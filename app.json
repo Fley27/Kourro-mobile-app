@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "Kourro",
+    "slug": "jesyon-magazen",
+    "scheme": "jesyon",
+    "version": "1.0.0",
+    "orientation": "default",
+    "plugins": ["expo-notifications"],
+    "ios": { "bundleIdentifier": "com.jesyon.magazen", "supportsTablet": true, "requiresFullScreen": false },
+    "android": { "package": "com.jesyon.magazen", "softwareKeyboardLayoutMode": "pan" }
+  }
+}

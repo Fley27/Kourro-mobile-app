@@ -1,0 +1,572 @@
+import React, { useEffect, useState } from "react";
+import { View, Text, ScrollView, Pressable, ActivityIndicator, TextInput, Alert, Modal } from "react-native";
+import { getDb } from "../db";
+import { ht } from "../i18n";
+import { USERS, getUserById } from "../users";
+
+type Sale = { id: string; sale_number: string; total: number; payment_method: string; status: string; created_at: string; amount_paid: number };
+type Shift = { id: string; opening_balance: number; status: string; start_time: string; cashier_confirmed: number; manager_confirmed: number; supervisor_confirmed: number; actual_cash?: number };
+
+export default function ShiftReportScreen({ storeId, role = "seller", currentUser }: { storeId: string; role?: string; currentUser?: any }) {
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [shift, setShift] = useState<Shift | null>(null);
+  const [showStart, setShowStart] = useState(false);
+  const [openingInput, setOpeningInput] = useState("10000");
+  const [showWithdraw, setShowWithdraw] = useState(false);
+  const [withdrawAmt, setWithdrawAmt] = useState("");
+  const [withdrawReason, setWithdrawReason] = useState("");
+  const [withdrawTakenBy, setWithdrawTakenBy] = useState<string>("owner-1");
+  const [withdrawals, setWithdrawals] = useState<any[]>([]);
+  const [debtCollections, setDebtCollections] = useState<any[]>([]);
+  const [cashRequests, setCashRequests] = useState<any[]>([]);
+  const [cashDiscrepancies, setCashDiscrepancies] = useState<any[]>([]);
+  const [showCashRequest, setShowCashRequest] = useState(false);
+  const [cashRequestAmt, setCashRequestAmt] = useState("");
+  const [cashRequestReason, setCashRequestReason] = useState("");
+  const [showEnd, setShowEnd] = useState(false);
+  const [actualCash, setActualCash] = useState("");
+  const [cashierCashInput, setCashierCashInput] = useState("");
+  const [cashierCashSecret, setCashierCashSecret] = useState("");
+  const isManager = role === "manager" || role === "admin" || role === "owner";
+  const isCashier = role === "cashier" || role === "stock";
+  const isSupervisor = role === "owner" || role === "admin" || role === "manager";
+  const [managerPassword, setManagerPassword] = useState("");
+  const [pendingValidateId, setPendingValidateId] = useState<string | null>(null);
+  const [reassignAmount, setReassignAmount] = useState("");
+  const [showReassign, setShowReassign] = useState<string | null>(null);
+  const MANAGER_PASSWORD = "3";
+  const CASHIER_PASSWORD = "4";
+
+  async function load() {
+    setLoading(true);
+    try {
+      const db = await getDb();
+      const allSales = (await db.getAllAsync("SELECT * FROM sales ORDER BY created_at DESC LIMIT 100")) as Sale[];
+      const allItems = (await db.getAllAsync("SELECT * FROM sale_items")) as any[];
+      const shifts = (await db.getAllAsync("SELECT * FROM shifts ORDER BY start_time DESC LIMIT 5")) as Shift[];
+      const cms = (await db.getAllAsync("SELECT * FROM cash_movements")) as any[];
+      const dcs = (await db.getAllAsync("SELECT * FROM debt_collections")) as any[];
+      const crs = (await db.getAllAsync("SELECT * FROM cash_requests")) as any[];
+      const cds = (await db.getAllAsync("SELECT * FROM cash_discrepancies")) as any[];
+      const active = shifts.find(s => s.status === "open") || null;
+      setShift(active);
+      setWithdrawals(cms.filter((c: any) => c.type === "withdrawal"));
+      setDebtCollections(dcs);
+      setCashRequests(crs.filter((c: any) => !active || c.shift_id === active.id));
+      setCashDiscrepancies(cds.filter((c: any) => !active || c.shift_id === active.id));
+      const today = new Date().toISOString().slice(0, 10);
+      const todaysSales = allSales.filter(s => !s.created_at || s.created_at.slice(0, 10) === today || true);
+      if (todaysSales.length === 0 && !active) {
+        const demoSales: Sale[] = [
+          { id: "demo-1", sale_number: "VTE-2026-0001", total: 6400, payment_method: "cash", status: "completed", created_at: new Date().toISOString(), amount_paid: 6400 },
+          { id: "demo-2", sale_number: "VTE-2026-0002", total: 1100, payment_method: "credit", status: "credit", created_at: new Date().toISOString(), amount_paid: 0 },
+          { id: "demo-3", sale_number: "VTE-2026-0003", total: 3200, payment_method: "cash", status: "completed", created_at: new Date().toISOString(), amount_paid: 3200 },
+        ];
+        setSales(demoSales);
+        setItems([
+          { sale_id: "demo-1", product_name: "Rice 25kg", quantity: 2, unit_price: 3200, line_total: 6400 },
+          { sale_id: "demo-2", product_name: "Cooking Oil 5L", quantity: 1, unit_price: 1100, line_total: 1100 },
+          { sale_id: "demo-3", product_name: "Prestige Beer", quantity: 8, unit_price: 100, line_total: 800 },
+        ]);
+      } else {
+        setSales(todaysSales);
+        setItems(allItems);
+      }
+    } finally { setLoading(false); }
+  }
+  useEffect(() => { load(); }, []);
+  const EXPECTED_OPENING = 10000;
+  async function handleStartShift() {
+    if (!openingInput.trim() || isNaN(parseFloat(openingInput))) return Alert.alert("Antre montan kach");
+    const amt = parseFloat(openingInput);
+    const db = await getDb();
+    const id = `shift-${Date.now()}`;
+    await db.runAsync("INSERT INTO shifts (id, store_id, cashier_id, manager_id, opening_balance, status, start_time, end_time, cashier_confirmed, manager_confirmed, supervisor_confirmed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      [id, storeId, "cashier-1", "manager-1", amt, "open", new Date().toISOString(), null, 0, 1, 0]);
+    if (amt !== EXPECTED_OPENING) {
+      Alert.alert("Kach ouvèti anrejistre", `Kach ouvèti: ${amt} HTG (atann: ${EXPECTED_OPENING} HTG) — Kesye dwe konfime.`);
+    } else {
+      Alert.alert("Chanjman kòmanse", `Kach ouvèti: ${amt} HTG — tann konfimasyon kesye`);
+    }
+    load(); setShowStart(false);
+  }
+  async function handleCashRequest() {
+    const amt = parseFloat(cashRequestAmt);
+    if (!amt || isNaN(amt) || amt <= 0) return Alert.alert("Antre montan pou mande");
+    if (!shift) return Alert.alert("Pa gen chanjman ouvè");
+    const db = await getDb();
+    await db.runAsync("INSERT INTO cash_requests (id, shift_id, amount, reason, created_by, status, created_at) VALUES (?,?,?,?,?,?,?)",
+      [`crq-${Date.now()}`, shift.id, amt, cashRequestReason || "Bezwen plis kach pou ouvèti", "cashier-1", "pending", new Date().toISOString()]);
+    Alert.alert("Demann voye", `${amt} HTG mande — tann validasyon Manadjè`);
+    setCashRequestAmt(""); setCashRequestReason(""); setShowCashRequest(false); load();
+  }
+  async function validateCashRequest(id: string, approved: boolean) {
+    if (!isSupervisor) return Alert.alert("Sèl Manadjè/Admin/Owner ka valide");
+    const db = await getDb();
+    await db.runAsync("UPDATE cash_requests SET status = ? WHERE id = ?", [approved ? "approved" : "rejected", id]);
+    if (approved) {
+      const crs = (await db.getAllAsync("SELECT * FROM cash_requests")) as any[];
+      const cr = crs.find((x: any) => x.id === id);
+      const shifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
+      const s = shifts.find((x: any) => x.id === cr.shift_id);
+      if (s) s.opening_balance = Number(s.opening_balance) + Number(cr.amount);
+      Alert.alert("Aprouve", `Demann ${cr.amount} HTG apwouve`);
+    } else Alert.alert("Refize", "Demann refize");
+    load();
+  }
+  async function confirmShift(who: "cashier" | "supervisor") {
+    if (!shift) return;
+    const db = await getDb();
+    if (who === "cashier") {
+      if (!cashierCashInput.trim() || isNaN(parseFloat(cashierCashInput))) return Alert.alert("Antre montan kach ou genyen");
+      if (String(cashierCashSecret).trim() !== String(currentUser?.secret).trim()) return Alert.alert("Kòd pa bon", `Antre kòd sekrè ou (${currentUser?.secret})`);
+      const actual = parseFloat(cashierCashInput);
+      const expected = Number(shift.opening_balance);
+      if (actual !== expected) {
+        const diff = expected - actual;
+        await db.runAsync("INSERT INTO cash_discrepancies (id, shift_id, manager_amount, cashier_amount, difference, status, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+          [`cd-${Date.now()}`, shift.id, expected, actual, diff, "pending", currentUser.id, new Date().toISOString()]);
+        Alert.alert("Diskrepans anrejistre", `Ou di ${actual} olye de ${expected} (manke ${diff}). Tout sipèvizè resevwa notifikasyon. Ou pa ka vann jiskaske yo konfime.`);
+        setCashierCashInput(""); setCashierCashSecret(""); load(); return;
+      }
+      await db.runAsync("UPDATE shifts SET cashier_confirmed = ? WHERE id = ?", [1, shift.id]);
+      Alert.alert("Konfime", `Kesye konfime ${actual} HTG — koresponn ak kes la. Notifikasyon voye bay owner/admin/manager. Ou ka vann kounye a!`);
+      setCashierCashInput(""); setCashierCashSecret(""); load();
+    } else {
+      if (!isSupervisor) return Alert.alert("Sèl sipèvizè ka konfime");
+      await db.runAsync("UPDATE shifts SET supervisor_confirmed = ? WHERE id = ?", [1, shift.id]);
+      Alert.alert("Konfime", "Sipèvizè konfime ouvèti");
+      load();
+    }
+  }
+  async function confirmDiscrepancy(id: string, approve: boolean) {
+    if (!isSupervisor) return Alert.alert("Sèl sipèvizè ka konfime");
+    const db = await getDb();
+    await db.runAsync("UPDATE cash_discrepancies SET status = ? WHERE id = ?", [approve ? "approved" : "rejected", id]);
+    const notifs = (await db.getAllAsync("SELECT * FROM notifications")) as any[];
+    for (const n of notifs.filter((x: any) => x.reference_id === id)) n.status = approve ? "approved" : "rejected";
+    if (approve) {
+      const cds = (await db.getAllAsync("SELECT * FROM cash_discrepancies")) as any[];
+      const cd = cds.find((x: any) => x.id === id);
+      if (cd) {
+        await db.runAsync("UPDATE shifts SET cashier_confirmed = ? WHERE id = ?", [1, cd.shift_id]);
+        const shifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
+        const s = shifts.find((x: any) => x.id === cd.shift_id);
+        if (s) s.opening_balance = Number(cd.cashier_amount);
+      }
+      Alert.alert("Konfime", "Kesye ka kòmanse vann.");
+    } else Alert.alert("Mande tann", "Vant toujou bloke.");
+    load();
+  }
+  async function reassignDiscrepancy(id: string) {
+    if (!isSupervisor) return Alert.alert("Sèl sipèvizè ka reasigne");
+    const amt = parseFloat(reassignAmount);
+    if (isNaN(amt)) return Alert.alert("Antre nouvo montan");
+    const db = await getDb();
+    await db.runAsync("UPDATE cash_discrepancies SET reassigned_amount = ? WHERE id = ?", [amt, id]);
+    await db.runAsync("UPDATE cash_discrepancies SET status = ? WHERE id = ?", ["reassigned", id]);
+    Alert.alert("Reasigne", `Nouvo montan ${amt} HTG voye bay kesye pou konfime.`);
+    setReassignAmount(""); setShowReassign(null); load();
+  }
+  async function cashierConfirmReassigned(id: string, secret: string) {
+    if (String(secret).trim() !== String(currentUser?.secret).trim()) return Alert.alert("Kòd pa bon", `Antre kòd ou (${currentUser?.secret})`);
+    const db = await getDb();
+    const cds = (await db.getAllAsync("SELECT * FROM cash_discrepancies")) as any[];
+    const cd = cds.find((x: any) => x.id === id);
+    if (!cd || cd.status !== "reassigned") return Alert.alert("Pa gen reasignasyon");
+    const reassigned = Number(cd.reassigned_amount);
+    await db.runAsync("UPDATE cash_discrepancies SET status = ? WHERE id = ?", ["approved", id]);
+    await db.runAsync("UPDATE shifts SET cashier_confirmed = ? WHERE id = ?", [1, cd.shift_id]);
+    const shifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
+    const s = shifts.find((x: any) => x.id === cd.shift_id);
+    if (s) s.opening_balance = reassigned;
+    Alert.alert("Konfime", `Ou konfime ${reassigned} HTG — ou ka vann`);
+    load();
+  }
+  async function handleWithdraw() {
+    const amt = parseFloat(withdrawAmt);
+    if (!amt || isNaN(amt)) return Alert.alert("Antre montan");
+    if (!shift) return Alert.alert("Pa gen chanjman ouvè");
+    const takenByUser = USERS.find(u => u.id === withdrawTakenBy);
+    if (!takenByUser) return Alert.alert("Chwazi ki moun ki pran kach la");
+    const db = await getDb();
+    await db.runAsync("INSERT INTO cash_movements (id, shift_id, store_id, type, amount, reason, created_by, taken_by, validated_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      [`cm-${Date.now()}`, shift.id, storeId, "withdrawal", amt, withdrawReason || `Retrè pa ${takenByUser.name}`, role, takenByUser.id, null, new Date().toISOString()]);
+    Alert.alert("Retrè anrejistre", `${amt} HTG pran pa ${takenByUser.name} — tann konfimasyon ${takenByUser.name} ak kòd ${takenByUser.secret})`);
+    setWithdrawAmt(""); setWithdrawReason(""); setShowWithdraw(false); load();
+  }
+  async function validateWithdraw(id: string, password?: string) {
+    const db = await getDb();
+    const cms = (await db.getAllAsync("SELECT * FROM cash_movements")) as any[];
+    const cm = cms.find((x: any) => x.id === id);
+    if (!cm) return;
+    const takenUser = getUserById(cm.taken_by || cm.created_by);
+    const expectedSecret = takenUser?.secret ?? MANAGER_PASSWORD;
+    if (String(password).trim() !== String(expectedSecret).trim()) {
+      return Alert.alert("Kòd pa bon", `Se sèlman ${takenUser?.name ?? cm.taken_by} (kòd ${expectedSecret}) ki ka konfime. Ou konekte kòm ${currentUser?.name} (${currentUser?.secret})`);
+    }
+    cm.validated_by = `${takenUser?.name} (kòd ${expectedSecret})`;
+    Alert.alert("Valide", `Retrè ${cm.amount} HTG valide pa ${takenUser?.name}`);
+    load();
+  }
+  async function handleEndShift() {
+    if (!shift) return;
+    const pendingManagerWithdrawals = withdrawals.filter((w: any) => !w.validated_by && !(w.created_by === "cashier" || w.created_by === "stock" || w.created_by === "cashier-1"));
+    if (pendingManagerWithdrawals.length > 0) return Alert.alert("Tann Kesye", `Gen ${pendingManagerWithdrawals.length} retrè ki poko valide pa Kesye.`);
+    const actual = parseFloat(actualCash);
+    if (isNaN(actual)) return Alert.alert("Antre montan kach ou konte");
+    const db = await getDb();
+    await db.runAsync("UPDATE shifts SET actual_cash = ? WHERE id = ?", [actual, shift.id]);
+    await db.runAsync("UPDATE shifts SET status = ? WHERE id = ?", ["closed", shift.id]);
+    Alert.alert("Chanjman fèmen", `Kach konte: ${actual} HTG`);
+    setShowEnd(false); setActualCash(""); load();
+  }
+  const cashSales = sales.filter(s => s.payment_method === "cash");
+  const cashTotal = cashSales.reduce((s, x) => s + Number(x.total), 0);
+  const withdrawalsTotal = withdrawals.reduce((s, x) => s + Number(x.amount), 0);
+  const debtCollected = 0;
+  const opening = shift?.opening_balance ?? 2000;
+  const expectedCash = opening + cashTotal - withdrawalsTotal;
+  const actual = shift?.actual_cash ?? null;
+  const deficit = actual !== null ? expectedCash - actual : null;
+  const productMap = new Map<string, { name: string; qty: number; total: number }>();
+  for (const it of items) {
+    const cur = productMap.get(it.product_name) ?? { name: it.product_name, qty: 0, total: 0 };
+    cur.qty += Number(it.quantity); cur.total += Number(it.line_total); productMap.set(it.product_name, cur);
+  }
+  if (productMap.size === 0 && sales.length > 0) for (const s of sales) productMap.set(s.sale_number, { name: s.sale_number, qty: 1, total: Number(s.total) });
+  const productsSold = Array.from(productMap.values()).sort((a, b) => b.qty - a.qty);
+  if (loading) return <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}><ActivityIndicator /><Text style={{ marginTop: 8, color: "#64748b" }}>Ap chaje...</Text></View>;
+  if (!shift) {
+    return (
+      <ScrollView style={{ flex: 1, backgroundColor: "#f8fafc" }} contentContainerStyle={{ padding: 16 }}>
+        <View style={{ backgroundColor: "white", borderRadius: 12, borderWidth: 1, borderColor: "#e2e8f0", padding: 16, alignItems: "center" }}>
+          <Text style={{ fontSize: 32 }}>🔓</Text><Text style={{ fontWeight: "900", fontSize: 18, marginTop: 8 }}>Pa gen chanjman ouvè</Text>
+          <Text style={{ color: "#64748b", textAlign: "center", marginTop: 6, fontSize: 12 }}>Manadjè dwe anrejistre kach ouvèti epi vandè konfime ak kont li</Text>
+          <Pressable onPress={() => setShowStart(true)} style={{ marginTop: 12, backgroundColor: "#0f172a", paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10 }}><Text style={{ color: "white", fontWeight: "800" }}>▶️ Kòmanse Chanjman</Text></Pressable>
+        </View>
+        <Modal visible={showStart} transparent animationType="slide">
+          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+            <View style={{ backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16 }}>
+              <Text style={{ fontWeight: "900", fontSize: 16 }}>Kòmanse Chanjman — Kach Ouvèti</Text>
+              <Text style={{ color: "#64748b", fontSize: 11, marginTop: 4 }}>Manadjè antre konbyen kach li bay kesye a • Kesye konfime • Atann 10000 HTG</Text>
+              <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 12 }}>Kach ouvèti (HTG) *</Text>
+              <TextInput placeholder="10000" value={openingInput} onChangeText={setOpeningInput} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#7c3aed", borderRadius: 10, padding: 12, marginTop: 6, fontWeight: "700" }} />
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+                <Pressable onPress={() => setShowStart(false)} style={{ flex: 1, padding: 12, backgroundColor: "#f1f5f9", borderRadius: 10, alignItems: "center" }}><Text style={{ fontWeight: "700" }}>Anile</Text></Pressable>
+                <Pressable onPress={handleStartShift} style={{ flex: 1, padding: 12, backgroundColor: "#7c3aed", borderRadius: 10, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "800" }}>Anrejistre (Manadjè)</Text></Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+        <Modal visible={showCashRequest} transparent animationType="slide">
+          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+            <View style={{ backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16 }}>
+              <Text style={{ fontWeight: "900" }}>Mande plis kach — Kesye</Text>
+              <TextInput placeholder="Montan" value={cashRequestAmt} onChangeText={setCashRequestAmt} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, padding: 12, marginTop: 12, fontWeight: "700" }} />
+              <TextInput placeholder="Rezon" value={cashRequestReason} onChangeText={setCashRequestReason} style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, padding: 12, marginTop: 8 }} />
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+                <Pressable onPress={() => setShowCashRequest(false)} style={{ flex: 1, padding: 12, backgroundColor: "#f1f5f9", borderRadius: 10, alignItems: "center" }}><Text style={{ fontWeight: "700" }}>Anile</Text></Pressable>
+                <Pressable onPress={handleCashRequest} style={{ flex: 1, padding: 12, backgroundColor: "#0f172a", borderRadius: 10, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "800" }}>Voye</Text></Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </ScrollView>
+    );
+  }
+  const isFullyConfirmed = shift.cashier_confirmed && shift.manager_confirmed && shift.supervisor_confirmed;
+  const todayStr = new Date().toLocaleDateString("fr-HT", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  return (
+    <ScrollView style={{ flex: 1, backgroundColor: "#f8fafc" }} contentContainerStyle={{ padding: 16 }}>
+      <View style={{ backgroundColor: "#0f172a", borderRadius: 16, padding: 16 }}>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: "white", fontWeight: "900", fontSize: 16 }}>📋 {ht.shiftReport} — Chanjman Ouvè</Text>
+            <Text style={{ color: "#cbd5e1", marginTop: 2, fontSize: 11 }}>{todayStr} • Kach ouvèti: {opening} HTG {opening !== EXPECTED_OPENING ? `(atann ${EXPECTED_OPENING} HTG)` : "✓"}</Text>
+            {opening !== EXPECTED_OPENING && <Text style={{ color: "#fde68a", fontSize: 10, marginTop: 2, fontWeight: "700" }}>⚠️ {opening < EXPECTED_OPENING ? `Manke ${EXPECTED_OPENING - opening} HTG` : `Depase ${opening - EXPECTED_OPENING} HTG`} — kesye dwe konfime</Text>}
+          </View>
+          <View style={{ backgroundColor: isFullyConfirmed ? "#22c55e" : "#f59e0b", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 20 }}>
+            <Text style={{ color: "white", fontWeight: "800", fontSize: 10 }}>{isFullyConfirmed ? "✓ Konfime" : "⏳ Tann"}</Text>
+          </View>
+        </View>
+        <View style={{ flexDirection: "row", gap: 6, marginTop: 10 }}>
+          <View style={{ flex: 1, backgroundColor: shift.cashier_confirmed ? "#22c55e" : "#334155", borderRadius: 8, padding: 6, alignItems: "center" }}><Text style={{ color: "white", fontSize: 10, fontWeight: "700" }}>Kesye {shift.cashier_confirmed ? "✓" : "○"}</Text></View>
+          <View style={{ flex: 1, backgroundColor: shift.manager_confirmed ? "#22c55e" : "#334155", borderRadius: 8, padding: 6, alignItems: "center" }}><Text style={{ color: "white", fontSize: 10, fontWeight: "700" }}>Manadjè {shift.manager_confirmed ? "✓" : "○"}</Text></View>
+          <View style={{ flex: 1, backgroundColor: shift.supervisor_confirmed ? "#22c55e" : "#334155", borderRadius: 8, padding: 6, alignItems: "center" }}><Text style={{ color: "white", fontSize: 10, fontWeight: "700" }}>Sipèvizè {shift.supervisor_confirmed ? "✓" : "○"}</Text></View>
+        </View>
+        {!isFullyConfirmed && (
+          <View style={{ gap: 6, marginTop: 8 }}>
+            {!shift.cashier_confirmed && (
+              <View style={{ backgroundColor: "white", borderRadius: 8, padding: 8 }}>
+                <Text style={{ fontWeight: "800", fontSize: 12, textAlign: "center" }}>Kesye: èske kach la kòrèk?</Text>
+                <Text style={{ fontSize: 11, color: "#0f172a", textAlign: "center", marginTop: 4 }}>Manadjè di gen <Text style={{ fontWeight: "900" }}>{opening} HTG</Text> nan kes la. Èske se sa ou konte?</Text>
+                <Text style={{ fontSize: 10, color: "#64748b", textAlign: "center" }}>Wi → notifikasyon bay owner/admin/manager • Non → antre montan ou genyen</Text>
+                <View style={{ flexDirection: "row", gap: 6, marginTop: 8 }}>
+                  <Pressable onPress={async () => {
+                    const db = await getDb();
+                    await db.runAsync("UPDATE shifts SET cashier_confirmed = ? WHERE id = ?", [1, shift.id]);
+                    // Notify supervisors even on Yes (info)
+                    for (const sup of ["owner-1","admin-1","manager-1"]) {
+                      await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
+                        [`notif-yes-${Date.now()}-${sup}`, sup, "cash_confirm_yes", shift.id, `Kesye konfime ${opening} HTG kòrèk`, "pending", new Date().toISOString()]);
+                    }
+                    Alert.alert("Konfime ✓", `Kesye konfime ${opening} HTG — koresponn ak kes la. Notifikasyon voye. Ou ka vann kounye a!`);
+                    load();
+                  }} style={{ flex: 1, backgroundColor: "#22c55e", padding: 10, borderRadius: 10, alignItems: "center", borderWidth: 1, borderColor: "#16a34a" }}>
+                    <Text style={{ fontWeight: "800", color: "white" }}>✓ Wi — {opening} HTG kòrèk</Text>
+                    <Text style={{ fontSize: 10, color: "white" }}>Kòd {currentUser?.secret}</Text>
+                  </Pressable>
+                  <View style={{ flex: 1, backgroundColor: "#fef3c7", padding: 8, borderRadius: 10, alignItems: "center", borderWidth: 1, borderColor: "#fde68a" }}>
+                    <Text style={{ fontWeight: "800", color: "#92400e" }}>✕ Non</Text>
+                    <Text style={{ fontSize: 10, color: "#92400e", textAlign: "center" }}>Antre lòt montan</Text>
+                  </View>
+                </View>
+                <View style={{ marginTop: 8, backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 8 }}>
+                  <Text style={{ fontWeight: "700", fontSize: 11 }}>Si Non — konbyen ou genyen vrèman? + kòd</Text>
+                  <View style={{ flexDirection: "row", gap: 6, marginTop: 6 }}>
+                    <TextInput placeholder={`${opening}`} value={cashierCashInput} onChangeText={setCashierCashInput} keyboardType="numeric" style={{ flex: 1, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 8, fontWeight: "700", backgroundColor: "white" }} />
+                    <TextInput placeholder={`Kòd ${currentUser?.secret}`} value={cashierCashSecret} onChangeText={setCashierCashSecret} secureTextEntry keyboardType="numeric" style={{ width: 90, borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 8, padding: 8, fontWeight: "700", backgroundColor: "white" }} />
+                  </View>
+                  <Pressable onPress={() => confirmShift("cashier")} style={{ marginTop: 6, backgroundColor: "#f59e0b", padding: 8, borderRadius: 8, alignItems: "center" }}>
+                    <Text style={{ fontWeight: "700", fontSize: 11, color: "white" }}>Voye Non ak montan + kòd — notify sipèvizè</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+            {!shift.supervisor_confirmed && shift.cashier_confirmed ? <Pressable onPress={() => confirmShift("supervisor")} style={{ backgroundColor: "#7c3aed", padding: 8, borderRadius: 8, alignItems: "center" }}><Text style={{ fontWeight: "700", fontSize: 11, color: "white" }}>Sipèvizè Konfime Ouvèti</Text></Pressable> : null}
+          </View>
+        )}
+        {cashDiscrepancies.filter((d: any) => d.status === "pending" || d.status === "reassigned").length > 0 && (
+          <View style={{ marginTop: 8, backgroundColor: isSupervisor ? "#fffbeb" : "#fee2e2", borderWidth: 1, borderColor: isSupervisor ? "#fde68a" : "#fecaca", borderRadius: 8, padding: 8 }}>
+            <Text style={{ fontWeight: "800", fontSize: 11, color: isSupervisor ? "#92400e" : "#991b1b" }}>⚠️ Diskrepans Kach — {cashDiscrepancies.filter((d: any) => d.status === "pending" || d.status === "reassigned").length} notifikasyon pou tout sipèvizè</Text>
+            {cashDiscrepancies.filter((d: any) => d.status === "pending" || d.status === "reassigned").map((d: any) => {
+              const isReassigned = d.status === "reassigned";
+              const reassignedAmt = d.reassigned_amount;
+              return (
+                <View key={d.id} style={{ marginTop: 6, backgroundColor: "white", padding: 8, borderRadius: 8, borderWidth: 1, borderColor: isReassigned ? "#93c5fd" : "#fecaca" }}>
+                  <Text style={{ fontWeight: "700", fontSize: 11 }}>{isReassigned ? `Sipèvizè reasigne → ${reassignedAmt} HTG (kesye te di ${d.cashier_amount} HTG)` : `Manadjè bay ${d.manager_amount} HTG • Kesye di ${d.cashier_amount} HTG • Manke ${d.difference} HTG`}</Text>
+                  <Text style={{ fontSize: 10, color: "#64748b" }}>Pa {getUserById(d.created_by)?.name ?? d.created_by} {isReassigned ? `• Reasigne pa sipèvizè → ${reassignedAmt} HTG` : "• Envantè ki manke ap sou kont kesye jiskaske konfime"}</Text>
+                  {isReassigned ? (
+                    isCashier ? (
+                      <View style={{ marginTop: 6, backgroundColor: "#dbeafe", borderWidth: 1, borderColor: "#93c5fd", borderRadius: 8, padding: 8 }}>
+                        <Text style={{ fontWeight: "700", fontSize: 11, color: "#1e40af" }}>Sipèvizè panse ou te konte mal — li reasigne a {reassignedAmt} HTG</Text>
+                        <Pressable onPress={() => cashierConfirmReassigned(d.id, currentUser?.secret ?? "")} style={{ marginTop: 6, backgroundColor: "#22c55e", padding: 6, borderRadius: 6, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "700", fontSize: 10 }}>Mwen dakò ({reassignedAmt} HTG)</Text></Pressable>
+                      </View>
+                    ) : <Text style={{ fontSize: 10, color: "#64748b", marginTop: 4, fontWeight: "600" }}>⏳ Tann kesye konfime nouvo montan {reassignedAmt} HTG ak kòd li</Text>
+                  ) : isSupervisor ? (
+                    <View style={{ gap: 6, marginTop: 6 }}>
+                      <View style={{ flexDirection: "row", gap: 6 }}>
+                        <Pressable onPress={() => confirmDiscrepancy(d.id, true)} style={{ flex: 1, backgroundColor: "#22c55e", padding: 6, borderRadius: 6, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "700", fontSize: 10 }}>Konfime kesye ({d.cashier_amount} HTG)</Text></Pressable>
+                        <Pressable onPress={() => confirmDiscrepancy(d.id, false)} style={{ flex: 1, backgroundColor: "#fee2e2", padding: 6, borderRadius: 6, alignItems: "center" }}><Text style={{ color: "#991b1b", fontWeight: "700", fontSize: 10 }}>Mande tann</Text></Pressable>
+                      </View>
+                      <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+                        <TextInput placeholder="Reasigne" value={reassignAmount} onChangeText={setReassignAmount} keyboardType="numeric" style={{ flex: 1, borderWidth: 1, borderColor: "#93c5fd", borderRadius: 6, padding: 6, fontSize: 12, backgroundColor: "#f8fafc" }} />
+                        <Pressable onPress={() => reassignDiscrepancy(d.id)} style={{ backgroundColor: "#0f172a", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 }}><Text style={{ color: "white", fontWeight: "700", fontSize: 10 }}>Reasigne</Text></Pressable>
+                      </View>
+                    </View>
+                  ) : <Text style={{ fontSize: 10, color: "#dc2626", marginTop: 4, fontWeight: "600" }}>⏳ Tann sipèvizè konfime — ou pa ka vann jiskaske yo konfime</Text>}
+                </View>
+              );
+            })}
+          </View>
+        )}
+        {shift && !shift.cashier_confirmed && (
+          <View style={{ marginTop: 8, backgroundColor: "white", borderRadius: 8, padding: 8 }}>
+            <Text style={{ fontSize: 11, color: "#0f172a", fontWeight: "700" }}>Kesye: si Manadjè pa gen ase kach, mande plis:</Text>
+            <Pressable onPress={() => setShowCashRequest(true)} style={{ marginTop: 6, backgroundColor: "#fef3c7", borderWidth: 1, borderColor: "#fde68a", padding: 8, borderRadius: 8, alignItems: "center" }}>
+              <Text style={{ fontWeight: "700", fontSize: 11, color: "#92400e" }}>＋ Mande plis kach (si Manadjè pa gen ase)</Text>
+            </Pressable>
+          </View>
+        )}
+        {cashRequests.length > 0 && (
+          <View style={{ marginTop: 8, backgroundColor: "white", borderRadius: 8, padding: 8 }}>
+            <Text style={{ fontWeight: "700", fontSize: 11 }}>Demann kach ouvèti:</Text>
+            {cashRequests.map((cr: any) => (
+              <View key={cr.id} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 6, padding: 8, backgroundColor: cr.status === "pending" ? "#fffbeb" : cr.status === "approved" ? "#dcfce7" : "#fee2e2", borderRadius: 8, borderWidth: 1, borderColor: cr.status === "pending" ? "#fde68a" : cr.status === "approved" ? "#22c55e" : "#fecaca" }}>
+                <View>
+                  <Text style={{ fontWeight: "700", fontSize: 12 }}>{cr.amount} HTG — {cr.reason}</Text>
+                  <Text style={{ fontSize: 10, color: "#64748b" }}>Pa kesye • {cr.status === "pending" ? "⏳ Tann Manadjè" : cr.status === "approved" ? "✓ Aprouve" : "✗ Refize"}</Text>
+                </View>
+                {cr.status === "pending" && isSupervisor && (
+                  <View style={{ flexDirection: "row", gap: 4 }}>
+                    <Pressable onPress={() => validateCashRequest(cr.id, true)} style={{ backgroundColor: "#22c55e", paddingHorizontal: 8, paddingVertical: 6, borderRadius: 6 }}><Text style={{ color: "white", fontWeight: "700", fontSize: 10 }}>Aprouve</Text></Pressable>
+                    <Pressable onPress={() => validateCashRequest(cr.id, false)} style={{ backgroundColor: "#fee2e2", paddingHorizontal: 8, paddingVertical: 6, borderRadius: 6 }}><Text style={{ color: "#991b1b", fontWeight: "700", fontSize: 10 }}>Refize</Text></Pressable>
+                  </View>
+                )}
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+      <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+        <View style={{ flex: 1, backgroundColor: "white", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" }}>
+          <Text style={{ fontSize: 11, color: "#64748b", fontWeight: "700" }}>💵 {ht.cashTotal}</Text>
+          <Text style={{ fontWeight: "900", fontSize: 16, color: "#16a34a" }}>{cashTotal} HTG</Text>
+          <Text style={{ fontSize: 11, color: "#64748b" }}>{sales.filter(s => s.payment_method === "cash").length} vant</Text>
+        </View>
+        <View style={{ flex: 1, backgroundColor: "white", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" }}>
+          <Text style={{ fontSize: 11, color: "#64748b", fontWeight: "700" }}>💰 Kolekte Dèt</Text>
+          <Text style={{ fontWeight: "900", fontSize: 16, color: "#06b6d4" }}>{demoDebtCollected} HTG</Text>
+          <Text style={{ fontSize: 11, color: "#64748b" }}>Peman kredi jodi a</Text>
+        </View>
+      </View>
+      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+        <View style={{ flex: 1, backgroundColor: "white", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" }}>
+          <Text style={{ fontSize: 11, color: "#64748b", fontWeight: "700" }}>📥 Kach Ouvèti</Text>
+          <Text style={{ fontWeight: "900", fontSize: 16 }}>{opening} HTG</Text>
+        </View>
+        <View style={{ flex: 1, backgroundColor: "white", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" }}>
+          <Text style={{ fontSize: 11, color: "#64748b", fontWeight: "700" }}>📤 Retrè Pwopriyetè</Text>
+          <Text style={{ fontWeight: "900", fontSize: 16, color: "#dc2626" }}>-{withdrawalsTotal} HTG</Text>
+          <Text style={{ fontSize: 10, color: "#64748b" }}>{withdrawals.length} retrè</Text>
+        </View>
+      </View>
+      <View style={{ marginTop: 12, backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, padding: 12 }}>
+        <Text style={{ fontWeight: "800", fontSize: 13 }}>Kach espere: {opening} + {cashTotal} + {demoDebtCollected} - {withdrawalsTotal} = <Text style={{ color: "#0f172a" }}>{expectedCash} HTG</Text></Text>
+        <Text style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>Ouvèti + Vant kach + Kolekte dèt - Retrè = Kach vandè dwe genyen</Text>
+        {withdrawals.length > 0 && (
+          <View style={{ marginTop: 8, gap: 4 }}>
+            {withdrawals.map((w: any) => (
+              <View key={w.id} style={{ flexDirection: "row", justifyContent: "space-between", backgroundColor: "white", padding: 8, borderRadius: 8, borderWidth: 1, borderColor: w.validated_by ? "#dcfce7" : "#fee2e2", alignItems: "center" }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontWeight: "700", fontSize: 12 }}>Retrè {w.amount} HTG — {w.reason}</Text>
+                  <Text style={{ fontSize: 10, color: "#64748b" }}>Anrejistre pa {getUserById(w.created_by)?.name ?? w.created_by} • Pran pa {getUserById(w.taken_by ?? w.created_by)?.name ?? w.taken_by ?? w.created_by} {w.taken_by ? `(kòd ${getUserById(w.taken_by)?.secret})` : ""}</Text>
+                  <Text style={{ fontSize: 10, color: w.validated_by ? "#16a34a" : "#f59e0b" }}>{w.validated_by ? `✓ Valide pa ${w.validated_by}` : `⏳ Tann ${getUserById(w.taken_by ?? "")?.name ?? "sila ki pran kach la"} konfime ak kòd ${getUserById(w.taken_by ?? "")?.secret ?? "?"}`}</Text>
+                </View>
+                {!w.validated_by && (
+                  <Pressable onPress={() => setPendingValidateId(w.id)} style={{ backgroundColor: "#fffbeb", borderWidth: 1, borderColor: "#fde68a", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }}>
+                    <Text style={{ color: "#92400e", fontWeight: "700", fontSize: 10 }}>Konfime ak kòd {getUserById(w.taken_by ?? "")?.secret ?? "?"}</Text>
+                  </Pressable>
+                )}
+              </View>
+            ))}
+          </View>
+        )}
+        {pendingValidateId && (() => {
+          const w = withdrawals.find((x: any) => x.id === pendingValidateId);
+          const takenUser = getUserById(w?.taken_by ?? "");
+          const expectedSecret = takenUser?.secret ?? "?";
+          const isOwnValidation = currentUser?.id === w?.taken_by;
+          return (
+            <View style={{ marginTop: 8, backgroundColor: isOwnValidation ? "#dcfce7" : "#fffbeb", borderWidth: 1, borderColor: isOwnValidation ? "#22c55e" : "#fde68a", borderRadius: 10, padding: 10 }}>
+              <Text style={{ fontWeight: "700", fontSize: 12, color: isOwnValidation ? "#166534" : "#92400e" }}>{isOwnValidation ? `Ou se ${takenUser?.name} — antre kòd ou (${expectedSecret}) pou konfime` : `Se sèlman ${takenUser?.name ?? "sila ki pran kach la"} (kòd ${expectedSecret}) ki ka konfime`}</Text>
+              <Text style={{ fontSize: 10, color: "#64748b" }}>{isOwnValidation ? "Ou konekte kòm moun ki pran kach la — antre kòd sekrè ou" : `Konekte kòm ${currentUser?.name} (${currentUser?.secret}) — chanje akses via bouton anlè a pou vin ${takenUser?.role.toUpperCase()} • Kòd ${expectedSecret}`}</Text>
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                <TextInput placeholder={`Kòd ${takenUser?.name} (${expectedSecret})`} value={managerPassword} onChangeText={setManagerPassword} secureTextEntry style={{ flex: 1, borderWidth: 1, borderColor: isOwnValidation ? "#22c55e" : "#fde68a", borderRadius: 8, padding: 10, backgroundColor: "white" }} />
+                <Pressable onPress={() => { validateWithdraw(pendingValidateId, managerPassword); setPendingValidateId(null); setManagerPassword(""); }} style={{ backgroundColor: isOwnValidation ? "#22c55e" : "#94a3b8", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8, justifyContent: "center" }}><Text style={{ color: "white", fontWeight: "700" }}>Valide</Text></Pressable>
+              </View>
+              <Text style={{ fontSize: 10, color: "#94a3b8", textAlign: "center", marginTop: 4 }}>Tape bouton aksè anlè a pou chanje itilizatè • Kòd: Owner 1, Admin 2, Manager 3, Cashier 4</Text>
+              <Pressable onPress={() => setPendingValidateId(null)} style={{ marginTop: 6, alignItems: "center" }}><Text style={{ color: "#64748b", fontSize: 11 }}>Anile</Text></Pressable>
+            </View>
+          );
+        })()}
+        <Pressable onPress={() => setShowWithdraw(true)} style={{ marginTop: 8, backgroundColor: "white", borderWidth: 1, borderColor: "#f59e0b", padding: 10, borderRadius: 8, alignItems: "center" }}>
+          <Text style={{ fontWeight: "700", fontSize: 12, color: "#92400e" }}>＋ Anrejistre retrè kach (Pwopriyetè pran)</Text>
+        </Pressable>
+        <Text style={{ fontSize: 10, color: "#94a3b8", textAlign: "center", marginTop: 4 }}>Vandè anrejistre • Manadjè/Pwopriyetè valide ak kont li</Text>
+      </View>
+      {actual !== null ? (
+        <View style={{ marginTop: 12, backgroundColor: deficit === 0 ? "#dcfce7" : deficit !== null && deficit > 0 ? "#fee2e2" : "#dcfce7", borderRadius: 12, padding: 12, borderWidth: 1, borderColor: deficit === 0 ? "#22c55e" : "#fecaca", flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <View>
+            <Text style={{ fontWeight: "800", color: deficit === 0 ? "#166534" : deficit! > 0 ? "#991b1b" : "#166534" }}>{deficit === 0 ? `✓ Balanse` : deficit! > 0 ? `⚠️ Defisi: ${deficit} HTG` : `✓ Sipè: ${Math.abs(deficit!)} HTG`}</Text>
+            <Text style={{ fontSize: 11, color: deficit === 0 ? "#166534" : "#991b1b" }}>Espere {expectedCash} HTG • Konte {actual} HTG</Text>
+          </View>
+          <Text style={{ fontSize: 22 }}>{deficit === 0 ? "✅" : "⚠️"}</Text>
+        </View>
+      ) : (
+        <View style={{ marginTop: 12, backgroundColor: "#0f172a", borderRadius: 12, padding: 14, alignItems: "center" }}>
+          <Text style={{ color: "white", fontWeight: "800" }}>Kòb vandè genyen?</Text>
+          <Text style={{ color: "#cbd5e1", fontSize: 11, marginTop: 4 }}>Antre montan kach ou konte • konpare ak espere {expectedCash} HTG</Text>
+          <Pressable onPress={() => setShowEnd(true)} style={{ marginTop: 10, backgroundColor: "#22c55e", paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10 }}>
+            <Text style={{ color: "white", fontWeight: "800" }}>Fèmen Chanjman • Konte Kach</Text>
+          </Pressable>
+        </View>
+      )}
+      <View style={{ marginTop: 12, backgroundColor: "white", borderRadius: 12, borderWidth: 1, borderColor: "#e2e8f0", overflow: "hidden" }}>
+        <View style={{ padding: 12, borderBottomWidth: 1, borderColor: "#e2e8f0", flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <Text style={{ fontWeight: "900" }}>📦 {ht.productsSold} ({productsSold.length})</Text>
+          <Pressable onPress={load} style={{ backgroundColor: "#f1f5f9", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }}><Text style={{ fontSize: 12, fontWeight: "700" }}>↻</Text></Pressable>
+        </View>
+        {productsSold.map(p => (
+          <View key={p.name} style={{ flexDirection: "row", justifyContent: "space-between", padding: 12, borderBottomWidth: 1, borderColor: "#f1f5f9" }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontWeight: "700" }}>{p.name}</Text>
+              <Text style={{ color: "#64748b", fontSize: 12 }}>Vann: {p.qty}</Text>
+            </View>
+            <Text style={{ fontWeight: "800" }}>{p.total} HTG</Text>
+          </View>
+        ))}
+      </View>
+      <View style={{ marginTop: 12, backgroundColor: "white", borderRadius: 12, borderWidth: 1, borderColor: "#e2e8f0", overflow: "hidden" }}>
+        <Text style={{ fontWeight: "800", padding: 12, borderBottomWidth: 1, borderColor: "#e2e8f0" }}>🧾 Vant jodi a ({sales.length})</Text>
+        {sales.map(s => (
+          <View key={s.id} style={{ flexDirection: "row", justifyContent: "space-between", padding: 12, borderBottomWidth: 1, borderColor: "#f1f5f9" }}>
+            <View>
+              <Text style={{ fontWeight: "700", fontSize: 13 }}>{s.sale_number}</Text>
+              <Text style={{ fontSize: 11, color: "#64748b" }}>{new Date(s.created_at).toLocaleTimeString()} • {s.payment_method === "cash" ? "Kach" : "Kredi"}</Text>
+            </View>
+            <Text style={{ fontWeight: "800", color: s.payment_method === "cash" ? "#16a34a" : "#f59e0b" }}>{s.total} HTG</Text>
+          </View>
+        ))}
+      </View>
+      <Modal visible={showWithdraw} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+          <View style={{ backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16 }}>
+            <Text style={{ fontWeight: "900" }}>Retrè kach — Kilès ki pran kach la?</Text>
+            <Text style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>Chwazi ki moun ki pran kach la — se li menm ki dwe konfime ak kòd sekrè li (1-4)</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+              {USERS.filter(u => u.role !== "cashier").map(u => (
+                <Pressable key={u.id} onPress={() => setWithdrawTakenBy(u.id)} style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 20, backgroundColor: withdrawTakenBy === u.id ? "#0f172a" : "#f1f5f9", borderWidth: 1, borderColor: withdrawTakenBy === u.id ? "#0f172a" : "#e2e8f0" }}>
+                  <Text style={{ fontSize: 12 }}>{u.role === "owner" ? "👑" : u.role === "admin" ? "🛡️" : "👔"}</Text>
+                  <View>
+                    <Text style={{ fontWeight: "700", fontSize: 11, color: withdrawTakenBy === u.id ? "white" : "#0f172a" }}>{u.name.split(" ")[0]} • {u.role.toUpperCase()}</Text>
+                    <Text style={{ fontSize: 9, color: withdrawTakenBy === u.id ? "#cbd5e1" : "#64748b" }}>Kòd: {u.secret} • {u.id}</Text>
+                  </View>
+                  {withdrawTakenBy === u.id && <Text style={{ color: "white", fontWeight: "800" }}>✓</Text>}
+                </Pressable>
+              ))}
+            </View>
+            <Text style={{ fontSize: 10, color: "#f59e0b", fontWeight: "600", marginTop: 6 }}>⚠️ Se sèlman {getUserById(withdrawTakenBy)?.name ?? ""} (kòd {getUserById(withdrawTakenBy)?.secret}) ki ka konfime retrè sa a ak kòd li</Text>
+            <TextInput placeholder="Montan HTG" value={withdrawAmt} onChangeText={setWithdrawAmt} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, padding: 12, marginTop: 10, fontWeight: "700" }} />
+            <TextInput placeholder="Rezon (eg. achte gaz)" value={withdrawReason} onChangeText={setWithdrawReason} style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, padding: 12, marginTop: 8 }} />
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+              <Pressable onPress={() => setShowWithdraw(false)} style={{ flex: 1, padding: 12, backgroundColor: "#f1f5f9", borderRadius: 10, alignItems: "center" }}><Text style={{ fontWeight: "700" }}>Anile</Text></Pressable>
+              <Pressable onPress={handleWithdraw} style={{ flex: 1, padding: 12, backgroundColor: "#f59e0b", borderRadius: 10, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "800" }}>Anrejistre ({USERS.find(u=>u.id===withdrawTakenBy)?.role.toUpperCase() ?? ""} pran)</Text></Pressable>
+            </View>
+            <Text style={{ fontSize: 10, color: "#94a3b8", textAlign: "center", marginTop: 6 }}>Anrejistre pa {currentUser?.name ?? role} • {getUserById(withdrawTakenBy)?.name} dwe konfime ak kòd {getUserById(withdrawTakenBy)?.secret}</Text>
+          </View>
+        </View>
+      </Modal>
+      <Modal visible={showEnd} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+          <View style={{ backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16 }}>
+            <Text style={{ fontWeight: "900", textAlign: "center" }}>Fèmen Chanjman — Konte Kach</Text>
+            <Text style={{ textAlign: "center", color: "#64748b", fontSize: 12, marginTop: 4 }}>Konbyen kach ou genyen kounye a?</Text>
+            <View style={{ backgroundColor: "#f8fafc", borderRadius: 10, padding: 10, marginTop: 10, borderWidth: 1, borderColor: "#e2e8f0" }}>
+              <Text style={{ fontSize: 11, color: "#64748b", fontWeight: "700" }}>KACH ESPERE</Text>
+              <Text style={{ fontWeight: "900", fontSize: 18 }}>{expectedCash} HTG</Text>
+              <Text style={{ fontSize: 11, color: "#64748b" }}>{opening} ouvèti + {cashTotal} vant kach + {demoDebtCollected} kolekte - {withdrawalsTotal} retrè</Text>
+            </View>
+            <TextInput placeholder="Antre kach ou konte" value={actualCash} onChangeText={setActualCash} keyboardType="numeric" autoFocus style={{ borderWidth: 1, borderColor: "#22c55e", borderRadius: 10, padding: 14, marginTop: 12, fontWeight: "800", fontSize: 18, textAlign: "center" }} />
+            {actualCash ? (
+              <View style={{ marginTop: 8, padding: 10, borderRadius: 10, backgroundColor: parseFloat(actualCash) === expectedCash ? "#dcfce7" : parseFloat(actualCash) < expectedCash ? "#fee2e2" : "#dbeafe", borderWidth: 1, borderColor: parseFloat(actualCash) === expectedCash ? "#22c55e" : parseFloat(actualCash) < expectedCash ? "#fecaca" : "#93c5fd" }}>
+                <Text style={{ fontWeight: "800", textAlign: "center", color: parseFloat(actualCash) === expectedCash ? "#166534" : parseFloat(actualCash) < expectedCash ? "#991b1b" : "#1e40af" }}>
+                  {parseFloat(actualCash) === expectedCash ? `✓ Balanse — pa gen defisi` : parseFloat(actualCash) < expectedCash ? `⚠️ Defisi: ${expectedCash - parseFloat(actualCash)} HTG` : `Sipè: ${parseFloat(actualCash) - expectedCash} HTG`}
+                </Text>
+              </View>
+            ) : null}
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+              <Pressable onPress={() => setShowEnd(false)} style={{ flex: 1, padding: 12, backgroundColor: "#f1f5f9", borderRadius: 10, alignItems: "center" }}><Text style={{ fontWeight: "700" }}>Anile</Text></Pressable>
+              <Pressable onPress={handleEndShift} style={{ flex: 1, padding: 12, backgroundColor: "#0f172a", borderRadius: 10, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "800" }}>Fèmen & Kalkile Defisi</Text></Pressable>
+            </View>
+            <Text style={{ fontSize: 10, color: "#94a3b8", textAlign: "center", marginTop: 6 }}>Vandè antre • Sipèvizè konfime fèmen an</Text>
+          </View>
+        </View>
+      </Modal>
+    </ScrollView>
+  );
+}
+
