@@ -1,0 +1,12 @@
+[
+  { "code": "OU", "name": "Ouest", "capital": "Port-au-Prince" },
+  { "code": "AR", "name": "Artibonite", "capital": "Gonaïves" },
+  { "code": "CE", "name": "Centre", "capital": "Hinche" },
+  { "code": "GA", "name": "Grand'Anse", "capital": "Jérémie" },
+  { "code": "NI", "name": "Nippes", "capital": "Miragoâne" },
+  { "code": "ND", "name": "Nord", "capital": "Cap-Haïtien" },
+  { "code": "NE", "name": "Nord-Est", "capital": "Fort-Liberté" },
+  { "code": "NO", "name": "Nord-Ouest", "capital": "Port-de-Paix" },
+  { "code": "SD", "name": "Sud", "capital": "Les Cayes" },
+  { "code": "SE", "name": "Sud-Est", "capital": "Jacmel" }
+]

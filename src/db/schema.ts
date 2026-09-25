@@ -43,14 +43,101 @@ CREATE TABLE IF NOT EXISTS products (
   sku TEXT, barcode TEXT,
   name TEXT NOT NULL, name_ht TEXT,
   category_id TEXT,
-  cost_price REAL DEFAULT 0,
+  item_type TEXT DEFAULT 'goods',
+  is_available INTEGER DEFAULT 1,
+  -- NOTE (catalog v2 cutover): cost_price was dropped — cost basis now
+  -- derives from received batches. stock_quantity is system-maintained
+  -- (batch-receive path only, base units); nobody edits it directly.
+  -- Chain-only rule (one base item per product) is what keeps this
+  -- unambiguous — see items/ratio lock in catalogModel.ts.
+  -- status: 'draft' while the create chain is unfinished (never listed),
+  -- 'active' once finished. Lists must filter accordingly.
   stock_quantity REAL DEFAULT 0,
   current_amount_available REAL DEFAULT 0,
   low_stock_threshold REAL DEFAULT 5,
+  status TEXT DEFAULT 'active',
   device_id TEXT, lamport_clock INTEGER DEFAULT 0,
   updated_at TEXT, is_deleted INTEGER DEFAULT 0,
   dirty INTEGER DEFAULT 0
 );
+
+-- Catalog v2: Product (abstract: name + categories) → Item (purchasable
+-- container chain) → Variant (sellable presentation) → VariantPrice
+-- (effective-dated). Cost enters only via batches.
+CREATE TABLE IF NOT EXISTS items (
+  id TEXT PRIMARY KEY,
+  product_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  ref_item_id TEXT,
+  ratio REAL,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_items_product ON items(product_id);
+
+-- Costless sourcing link: which suppliers may supply a product.
+CREATE TABLE IF NOT EXISTS product_suppliers (
+  id TEXT,
+  product_id TEXT NOT NULL,
+  supplier_id TEXT NOT NULL,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0,
+  PRIMARY KEY (product_id, supplier_id)
+);
+CREATE INDEX IF NOT EXISTS idx_product_suppliers_supplier ON product_suppliers(supplier_id);
+
+CREATE TABLE IF NOT EXISTS batches (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  supplier_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  quantity REAL NOT NULL DEFAULT 0,
+  total_paid REAL NOT NULL DEFAULT 0,
+  status TEXT DEFAULT 'pending',
+  received_by TEXT,
+  received_at TEXT,
+  denied_by TEXT,
+  denied_at TEXT,
+  reason TEXT,
+  delivery_ref TEXT,
+  transport_share REAL DEFAULT 0,
+  source TEXT DEFAULT 'user',
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_batches_item ON batches(item_id);
+CREATE INDEX IF NOT EXISTS idx_batches_supplier ON batches(supplier_id);
+
+CREATE TABLE IF NOT EXISTS variants (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_variants_item ON variants(item_id);
+
+CREATE TABLE IF NOT EXISTS variant_prices (
+  id TEXT PRIMARY KEY,
+  variant_id TEXT NOT NULL,
+  price REAL NOT NULL,
+  date TEXT NOT NULL,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_variant_prices_variant ON variant_prices(variant_id);
 -- Catalog is global: products are unique by SKU (and barcode) across all locations
 CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku_unique ON products(sku) WHERE sku IS NOT NULL AND sku != '' AND is_deleted=0;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_products_barcode_unique ON products(barcode) WHERE barcode IS NOT NULL AND barcode != '' AND is_deleted=0;
@@ -61,16 +148,38 @@ CREATE TABLE IF NOT EXISTS product_categories (
   PRIMARY KEY (product_id, category_id)
 );
 
+-- Category polyhierarchy (DAG): a category may have MULTIPLE parents
+-- (Beer -> Drinks and Alcohol). Roots have no parents. Cycle-checked at seed/write.
+CREATE TABLE IF NOT EXISTS category_links (
+  id TEXT PRIMARY KEY,
+  child_id TEXT NOT NULL,
+  parent_id TEXT NOT NULL,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_category_links_unique
+  ON category_links(child_id, parent_id);
+CREATE INDEX IF NOT EXISTS idx_category_links_child ON category_links(child_id);
+CREATE INDEX IF NOT EXISTS idx_category_links_parent ON category_links(parent_id);
+
 -- Multi-variant selling model: a product sells in several units (Unit, Box...),
 -- each unit has per-variant prices (Cold, Hot, Regular...), plus bundle rules.
+-- condition is the second variant dimension (cold / room temperature, nullable);
+-- variant text on prices/sale_items mirrors it during the transition.
 CREATE TABLE IF NOT EXISTS product_units (
   id TEXT PRIMARY KEY,
   product_id TEXT NOT NULL,
   unit_name TEXT NOT NULL,
+  condition TEXT,
   conversion_factor REAL NOT NULL DEFAULT 1,
   created_at TEXT,
   updated_at TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_units_unique
+  ON product_units(product_id, unit_name, COALESCE(condition, ''));
 
 CREATE TABLE IF NOT EXISTS product_prices (
   id TEXT PRIMARY KEY,
@@ -89,11 +198,33 @@ CREATE TABLE IF NOT EXISTS product_bundles (
   created_at TEXT
 );
 
+-- Catalog x Supplier (global join): one row per (product, supplier, unit).
+-- Cost only — resell is one-per-unit in product_prices. No store_id:
+-- same business, all locations. Editing one row never touches siblings.
+CREATE TABLE IF NOT EXISTS product_supplier_costs (
+  id TEXT PRIMARY KEY,
+  product_id TEXT NOT NULL,
+  supplier_id TEXT NOT NULL,
+  unit_id TEXT NOT NULL,
+  cost REAL NOT NULL DEFAULT 0,
+  last_updated TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_unique
+  ON product_supplier_costs(product_id, supplier_id, unit_id);
+CREATE INDEX IF NOT EXISTS idx_psc_product ON product_supplier_costs(product_id);
+CREATE INDEX IF NOT EXISTS idx_psc_supplier ON product_supplier_costs(supplier_id);
+
 CREATE TABLE IF NOT EXISTS stock_batches (
   id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL,
   reference TEXT,
   supplier TEXT,
+  supplier_id TEXT,
   transport_cost REAL DEFAULT 0,
   notes TEXT,
   total_items_cost REAL DEFAULT 0,
@@ -130,8 +261,20 @@ CREATE TABLE IF NOT EXISTS customers (
   store_id TEXT NOT NULL,
   name TEXT NOT NULL,
   phone TEXT,
+  email TEXT,
   address TEXT,
   id_card_number TEXT,
+  first_name TEXT,
+  last_name TEXT,
+  birth_day TEXT,
+  birth_month TEXT,
+  birth_year TEXT,
+  country TEXT,
+  department TEXT,
+  commune TEXT,
+  address_line1 TEXT,
+  address_line2 TEXT,
+  marketing_consent INTEGER DEFAULT 0,
   total_debt REAL DEFAULT 0,
   credit_limit REAL DEFAULT NULL,
   credit_limit_source TEXT,
@@ -151,6 +294,17 @@ CREATE TABLE IF NOT EXISTS customer_history (
   created_at TEXT NOT NULL
 );
 
+-- Free-text notes about a customer (e.g. promised discount), newest first.
+CREATE TABLE IF NOT EXISTS customer_notes (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_by TEXT,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_customer_notes_customer ON customer_notes(customer_id, created_at);
+
 CREATE TABLE IF NOT EXISTS sales (
   id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL,
@@ -159,6 +313,9 @@ CREATE TABLE IF NOT EXISTS sales (
   subtotal REAL, discount REAL, total REAL, amount_paid REAL, amount_due REAL,
   seller_id TEXT,
   seller_role TEXT,
+  is_complimentary INTEGER DEFAULT 0,
+  complimentary_reason TEXT,
+  approved_by TEXT,
   created_at TEXT,
   lamport_clock INTEGER DEFAULT 0, updated_at TEXT, is_deleted INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
 );
@@ -170,8 +327,26 @@ CREATE TABLE IF NOT EXISTS sale_items (
   product_id TEXT NOT NULL, product_name TEXT NOT NULL,
   unit_id TEXT, variant TEXT,
   quantity REAL, unit_price REAL, cost_price REAL, line_total REAL,
+  quantity_delivered REAL DEFAULT 0,
+  is_complimentary INTEGER DEFAULT 0,
+  approved_by TEXT,
   lamport_clock INTEGER DEFAULT 0, updated_at TEXT, is_deleted INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
 );
+
+-- Partial pickup / delivery tracking (staging, additive only).
+-- quantity (paid) is source of truth; remaining = quantity - quantity_delivered.
+-- sale_pickups is append-only history (one row per pickup event, supports multi-visit).
+CREATE TABLE IF NOT EXISTS sale_pickups (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  sale_id TEXT NOT NULL,
+  sale_item_id TEXT NOT NULL,
+  quantity REAL NOT NULL,
+  picked_up_by TEXT,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sale_pickups_sale ON sale_pickups(sale_id);
+CREATE INDEX IF NOT EXISTS idx_sale_pickups_item ON sale_pickups(sale_item_id);
 
 -- Receipts: two copies per sale — one for the customer, one for the store.
 -- copy_type: 'customer' | 'store'; content holds a JSON snapshot of the receipt
@@ -289,6 +464,50 @@ CREATE TABLE IF NOT EXISTS employees (
   created_at TEXT,
   updated_at TEXT,
   lamport_clock INTEGER DEFAULT 0,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+
+-- Employee <-> store assignments (many-to-many; every employee belongs to at
+-- least one store location). Legacy single-store values migrate here on load.
+CREATE TABLE IF NOT EXISTS employee_stores (
+  employee_id TEXT NOT NULL,
+  store_id TEXT NOT NULL,
+  PRIMARY KEY (employee_id, store_id)
+);
+
+-- Suppliers (Founisè). bank_info is sensitive: owner-only view/edit.
+CREATE TABLE IF NOT EXISTS suppliers (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  phone TEXT,
+  address TEXT,
+  payment_terms TEXT,
+  bank_info TEXT,
+  notes TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+
+-- Orders (Kòmand): stock/catalog need requests.
+-- Status flow: requested -> approved -> ordered -> received (cancelled anytime).
+CREATE TABLE IF NOT EXISTS orders (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  item_name TEXT NOT NULL,
+  qty REAL DEFAULT 1,
+  unit TEXT,
+  supplier_name TEXT,
+  note TEXT,
+  status TEXT DEFAULT 'requested',
+  requested_by TEXT,
+  requested_by_name TEXT,
+  approved_by TEXT,
+  created_at TEXT,
+  updated_at TEXT,
   is_deleted INTEGER DEFAULT 0,
   dirty INTEGER DEFAULT 0
 );

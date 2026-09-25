@@ -5,7 +5,7 @@ import { palette, radius, shadow } from "../../theme";
 import { TABLET_MIN } from "../../responsive";
 import type { RangeKey, TeamKPI } from "./types";
 import { RANGES } from "./types";
-import { fmt } from "../../format";
+import { fmtG, fmt } from "../../format";
 
 export type SalesTabProps = {
   teamKPI: TeamKPI;
@@ -89,7 +89,7 @@ export function PieCashCredit({ kpi }: { kpi: TeamKPI }) {
           centerLabelComponent={() => (
             <View style={styles.pieCenter}>
               <Text style={styles.pieCenterValue}>{fmt(total)}</Text>
-              <Text style={styles.pieCenterLabel}>HTG</Text>
+              <Text style={styles.pieCenterLabel}>G</Text>
             </View>
           )}
         />
@@ -123,7 +123,7 @@ export function DonutCashMobile({ kpi }: { kpi: TeamKPI }) {
           centerLabelComponent={() => (
             <View style={styles.pieCenter}>
               <Text style={styles.pieCenterValue}>{fmt(total)}</Text>
-              <Text style={styles.pieCenterLabel}>HTG</Text>
+              <Text style={styles.pieCenterLabel}>G</Text>
             </View>
           )}
           strokeWidth={0}
@@ -145,7 +145,7 @@ export function GaugeCreditCollection({ kpi }: { kpi: TeamKPI }) {
   const hasCredit = goal > 0;
   return (
     <Card>
-      <CardHeader title="Recouvrement du Crédit" subtitle={`Objectif : ${fmt(goal)} HTG émis`} />
+      <CardHeader title="Recouvrement du Crédit" subtitle={`Objectif : ${fmtG(goal)} émis`} />
       <View style={styles.gaugeWrap}>
         <PieChart
           semiCircle
@@ -166,11 +166,11 @@ export function GaugeCreditCollection({ kpi }: { kpi: TeamKPI }) {
         />
       </View>
       <View style={styles.legend}>
-        <LegendItem color={BRAND.gold} label="Collecté" value={collected} unit="HTG" />
-        <LegendItem color={BRAND.goldDeep} label="Restant" value={outstanding} unit="HTG" />
+        <LegendItem color={BRAND.gold} label="Collecté" value={collected} unit="G" />
+        <LegendItem color={BRAND.goldDeep} label="Restant" value={outstanding} unit="G" />
       </View>
       <View style={styles.gaugeBar}>
-        <Text style={styles.gaugeBarLabel}>Total émis : {fmt(goal)} HTG</Text>
+        <Text style={styles.gaugeBarLabel}>Total émis : {fmtG(goal)}</Text>
       </View>
     </Card>
   );
@@ -196,7 +196,7 @@ export function ProfitStackedBar({ kpi }: { kpi: TeamKPI }) {
   ];
   return (
     <Card>
-      <CardHeader title="Valeur brute (Profit)" subtitle="Cash sales + crédit (collecté + restant)" right={`${fmt(barTotal)} HTG`} />
+      <CardHeader title="Valeur brute (Profit)" subtitle="Cash sales + crédit (collecté + restant)" right={`${fmtG(barTotal)}`} />
       <View style={styles.barChartWrap}>
         <BarChart
           stackData={stackData}
@@ -212,9 +212,9 @@ export function ProfitStackedBar({ kpi }: { kpi: TeamKPI }) {
         />
       </View>
       <View style={styles.legend}>
-        <LegendItem color={BRAND.ink} label="Ventes Cash" value={cashSales} unit="HTG" />
-        <LegendItem color={BRAND.gold} label="Crédit collecté" value={collectedCredit} unit="HTG" />
-        <LegendItem color={BRAND.red} label="Crédit restant" value={outstandingCredit} unit="HTG" />
+        <LegendItem color={BRAND.ink} label="Ventes Cash" value={cashSales} unit="G" />
+        <LegendItem color={BRAND.gold} label="Crédit collecté" value={collectedCredit} unit="G" />
+        <LegendItem color={BRAND.red} label="Crédit restant" value={outstandingCredit} unit="G" />
       </View>
     </Card>
   );

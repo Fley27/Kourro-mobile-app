@@ -1,28 +1,22 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { SafeAreaView, Text, View, Pressable, TextInput, Alert, Modal, Animated, Easing, BackHandler, KeyboardAvoidingView, Platform, ScrollView, AppState, Dimensions, Image } from "react-native";
+import { SafeAreaView, Text, View, Pressable, TextInput, Alert, Modal, Animated, Easing, BackHandler, KeyboardAvoidingView, Platform, ScrollView, AppState, Dimensions, Image, StatusBar } from "react-native";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useFonts } from "expo-font";
 import {
-  Quicksand_300Light,
-  Quicksand_400Regular,
-  Quicksand_500Medium,
-  Quicksand_600SemiBold,
-  Quicksand_700Bold,
-} from "@expo-google-fonts/quicksand";
-import {
-  Roboto_300Light,
-  Roboto_400Regular,
-  Roboto_500Medium,
-  Roboto_700Bold,
-} from "@expo-google-fonts/roboto";
+  Inter_300Light,
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_600SemiBold,
+  Inter_700Bold,
+} from "@expo-google-fonts/inter";
 import POSScreen from "./src/screens/POSScreen";
 import HomeScreen from "./src/screens/HomeScreen";
-import StockScreen from "./src/screens/StockScreen";
 import InventoryScreen from "./src/screens/InventoryScreen";
-import CreditsScreen from "./src/screens/CreditsScreen";
-import CustomersScreen from "./src/screens/CustomersScreen";
+import TransactionsScreen from "./src/screens/TransactionsScreen";
 import ShiftReportScreen from "./src/screens/ShiftReportScreen";
 import AccountCenter from "./src/screens/home/AccountCenter";
+import MoreScreen from "./src/screens/MoreScreen";
+import type { BusinessType } from "./src/users";
 import SecurityCenter from "./src/screens/home/SecurityCenter";
 import StoreScreen from "./src/screens/home/StoreScreen";
 import TeamScreen, { type Employee } from "./src/screens/home/TeamScreen";
@@ -35,13 +29,15 @@ import { palette, radius, shadow } from "./src/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuthState } from "./src/auth/authStore";
 import LoginScreen from "./src/screens/LoginScreen";
+import { fmtG } from "./src/format";
 
 export type { Role, User };
 
 export type StoreItem = { id: string; name: string; location: string; code: string; createdAt: string; disabled?: boolean; breachFlagged?: boolean; breachedAt?: string; revokedBy?: string };
 
 const STORE_ID = "demo-store-id";
-const DEVICE_ID = "device-" + Math.random().toString(36).slice(2, 6);
+// NOTE: device id is NOT a Math.random() const (RAM-only, changes every
+// rebundle). It is loaded once from SecureStore (disk) into state below.
 const PROGRAM_OPENING_VAL = 10000;
 const SUPERVISOR_IDS = ["owner-1", "admin-1", "manager-1"];
 
@@ -63,32 +59,39 @@ function empFromRow(r: any): any {
     password: "",
     lastAction: "",
     kpi: "",
-    salary: `${(Number(r.salary) || 0).toLocaleString()} HTG`,
+    salary: `${fmtG(Number(r.salary) || 0)}`,
     isOnline: !!r.online_status,
     active: !!r.is_active,
   } as any;
 }
 
 export default function App() {
-  const [fontsLoaded] = useFonts({
-    Quicksand_300Light,
-    Quicksand_400Regular,
-    Quicksand_500Medium,
-    Quicksand_600SemiBold,
-    Quicksand_700Bold,
-    Roboto_300Light,
-    Roboto_400Regular,
-    Roboto_500Medium,
-    Roboto_700Bold,
+  const [fontsLoaded, fontError] = useFonts({
+    Inter_300Light,
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_600SemiBold,
+    Inter_700Bold,
   });
+  // Graceful degradation (offline-safe): never block startup on fonts.
+  // If the Google-fonts payload can't load, fall back to system fonts
+  // after a short timeout instead of hanging on the splash forever.
+  const [fontTimedOut, setFontTimedOut] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setFontTimedOut(true), 2500);
+    return () => clearTimeout(t);
+  }, []);
+  const fontsReady = fontsLoaded || !!fontError || fontTimedOut;
 
-  Text.defaultProps = Text.defaultProps || {};
-  Text.defaultProps.style = [{ fontFamily: "Quicksand_500Medium" }, Text.defaultProps.style];
-  TextInput.defaultProps = TextInput.defaultProps || {};
-  TextInput.defaultProps.style = [{ fontFamily: "Roboto_400Regular" }, TextInput.defaultProps.style];
+  (Text as any).defaultProps = (Text as any).defaultProps || {};
+  (Text as any).defaultProps.style = [{ fontFamily: "Inter_500Medium" }, (Text as any).defaultProps.style];
+  (TextInput as any).defaultProps = (TextInput as any).defaultProps || {};
+  (TextInput as any).defaultProps.style = [{ fontFamily: "Inter_400Regular" }, (TextInput as any).defaultProps.style];
 
   const [tab, setTab] = useState<Tab>("pos");
-  // Tablets are landscape-only: lock orientation so the side-by-side
+  // Bumping remounts MoreScreen, back to the hub (the Retounen button is gone).
+  const [moreKey, setMoreKey] = useState(0);
+  // Tablets are portrait-only: lock orientation so the
   // tablet layouts are always shown. Phones stay freely rotatable.
   // NOTE: classification must be rotation-independent (Platform.isPad /
   // smallest screen side). A width-based check would misclassify a phone
@@ -102,7 +105,7 @@ export default function App() {
     (async () => {
       try {
         if (isTabletDevice) {
-          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
         } else {
           await ScreenOrientation.unlockAsync();
         }
@@ -110,9 +113,41 @@ export default function App() {
     })();
   }, [isTabletDevice]);  const [showShift, setShowShift] = useState(false);
   const [selectedCreditCustomer, setSelectedCreditCustomer] = useState<any | null>(null);
+  // Add Sale from Customers: customer to preselect in POS on tab switch.
+  const [posAttachCustomer, setPosAttachCustomer] = useState<any | null>(null);
   const auth = useAuthState();
-  const [currentUserId, setCurrentUserId] = useState<string>("cashier-1");
-  const currentUser = auth.user ?? USERS.find(u => u.id === currentUserId) ?? USERS[0];
+  // Stable device id from HARD memory (SecureStore/Keychain). Survives
+  // rebundles + restarts; used for suspended-sales + sync attribution.
+  const [deviceId, setDeviceId] = useState<string>("device-pending");
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getOrCreateDeviceId } = await import("./src/device");
+        setDeviceId(await getOrCreateDeviceId());
+      } catch {}
+    })();
+  }, []);
+  // Boot diagnostics: which storage backend is live + how many sales are on
+  // disk. Check Metro logs after a rebundle — backend must stay "sqlite"
+  // and salesCount must not drop. If backend flips to "memory", the
+  // expo-sqlite native module failed to init (see the [db] warning above).
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getDb, getDbBackend } = await import("./src/db");
+        const db = await getDb();
+        const sales = ((await db.getAllAsync("SELECT * FROM sales")) as any[]) ?? [];
+        const saleItems = ((await db.getAllAsync("SELECT * FROM sale_items")) as any[]) ?? [];
+        console.log(`[db] boot check: backend=${getDbBackend()} sales=${sales.length} sale_items=${saleItems.length}`);
+      } catch (e) {
+        console.warn("[db] boot check failed:", String(e));
+      }
+    })();
+  }, []);
+  // Derive from the persisted session (SecureStore), not a RAM-only useState
+  // default — otherwise shift lookups use a stale "cashier-1" after login.
+  const currentUser = auth.user ?? USERS[0];
+  const currentUserId = currentUser?.id ?? "cashier-1";
   const role = currentUser.role;
   const [activeShift, setActiveShift] = useState<any | null>(null);
   const [pendingShift, setPendingShift] = useState<any | null>(null);
@@ -159,6 +194,27 @@ export default function App() {
   const [activeStoreId, setActiveStoreId] = useState<string>("st-petyonvil");
   const [appDisabled, setAppDisabled] = useState(false);
   const [storesHydrated, setStoresHydrated] = useState(false);
+  // Business type (owner-only setting, inherited by all location stores).
+  const [businessType, setBusinessTypeState] = useState<BusinessType>("retail");
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getDb } = await import("./src/db");
+        const { getBusinessType, ensureEmployeeStores } = await import("./src/org");
+        const db = await getDb();
+        setBusinessTypeState(await getBusinessType(db));
+        await ensureEmployeeStores(db);
+      } catch {}
+    })();
+  }, []);
+  const changeBusinessType = async (t: BusinessType) => {
+    setBusinessTypeState(t);
+    try {
+      const { getDb } = await import("./src/db");
+      const { setBusinessType } = await import("./src/org");
+      await setBusinessType(await getDb(), t);
+    } catch {}
+  };
   // Hydrate stores / activeStoreId / appDisabled from SQLite for persistent testing
   useEffect(() => {
     (async () => {
@@ -245,7 +301,32 @@ export default function App() {
       } catch {}
     })();
   }, [appDisabled, storesHydrated]);
+  const [employees, setEmployees] = useState<Employee[]>(() =>
+    USERS.map(u => ({
+      ...u,
+      store: u.store ?? "Petyonvil",
+      lastAction: u.role === "cashier" ? "Vente #VTE-1021 • il y a 12 min" : u.role === "manager" ? "Ajustement stock • il y a 1 h" : "Clôture caisse • hier",
+      kpi: u.role === "cashier" ? "22 ventes • G 1 540/panier" : "18 tâches • 98% précision",
+      salary: u.role === "owner" ? "G 45 000" : u.role === "admin" ? "G 32 000" : u.role === "manager" ? "G 25 000" : "G 12 000",
+      address: u.id === "owner-1" ? "Pétion-Ville, Rue Panaméricaine 12" : u.id === "admin-1" ? "Delmas 33, Impasse Lafleur" : u.id === "manager-1" ? "Carrefour, Bizoton 45" : "Kenscoff, Route de Furcy",
+      isOnline: u.role === "owner" || u.role === "admin" ? true : Math.random() > 0.4,
+      emergency: u.id === "owner-1" ? { name: "Marie Owner", address: "Pétion-Ville, Rue Clerveaux 8", phone: "+509 3100 0001" } : u.id === "admin-1" ? { name: "Jean Admin", address: "Delmas 31, Rue Tirlemont", phone: "+509 3100 0002" } : u.id === "manager-1" ? { name: "Sophie Manager", address: "Carrefour, Mahotière 12", phone: "+509 3100 0003" } : { name: "Luc Cashier", address: "Pétion-Ville, Laboule 10", phone: "+509 3100 0004" },
+      active: true,
+      password: `${u.id}-pass`,
+    }) as any)
+  );
   const [employeesHydrated, setEmployeesHydrated] = useState(false);
+  // Store locations this user works in (employee<->store relationship).
+  const [userStoreIds, setUserStoreIds] = useState<string[]>([]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getDb } = await import("./src/db");
+        const { loadUserStoreIds } = await import("./src/org");
+        setUserStoreIds(await loadUserStoreIds(await getDb(), currentUser));
+      } catch {}
+    })();
+  }, [currentUser?.id]);
   // Hydrate the team roster from SQLite (persistent across restarts); seed once if empty
   useEffect(() => {
     if (!storesHydrated) return;
@@ -257,12 +338,15 @@ export default function App() {
         if (rows.length > 0) {
           setEmployees(rows.map(empFromRow));
         } else {
-          for (const e of employees) {
-            await db.runAsync(
-              "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, salary, address, is_active, online_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-              [e.id, empStoreId(e.store), e.name, e.role, e.phone ?? "", parseSalary(e.salary), e.address ?? "", e.active ? 1 : 0, e.isOnline ? 1 : 0, new Date().toISOString(), new Date().toISOString()]
-            );
-          }
+        for (const e of employees) {
+          await db.runAsync(
+            "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, salary, address, is_active, online_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [e.id, empStoreId(e.store), e.name, e.role, e.phone ?? "", parseSalary(e.salary), e.address ?? "", e.active ? 1 : 0, e.isOnline ? 1 : 0, new Date().toISOString(), new Date().toISOString()]
+          );
+          try {
+            await db.runAsync("INSERT OR REPLACE INTO employee_stores (employee_id, store_id) VALUES (?,?)", [e.id, empStoreId(e.store)]);
+          } catch {}
+        }
         }
       } catch {}
       setEmployeesHydrated(true);
@@ -280,6 +364,9 @@ export default function App() {
             "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, salary, address, is_active, online_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [e.id, empStoreId(e.store), e.name, e.role, e.phone ?? "", parseSalary(e.salary), e.address ?? "", e.active ? 1 : 0, e.isOnline ? 1 : 0, new Date().toISOString(), new Date().toISOString()]
           );
+          try {
+            await db.runAsync("INSERT OR REPLACE INTO employee_stores (employee_id, store_id) VALUES (?,?)", [e.id, empStoreId(e.store)]);
+          } catch {}
         }
         const existing = (await db.getAllAsync("SELECT id FROM employees")) as any[];
         const ids = new Set(employees.map(e => e.id));
@@ -298,20 +385,6 @@ export default function App() {
   const activeStore = stores.find(s => s.id === activeStoreId) ?? stores[0];
   const storeBlocked = !!activeStore?.disabled;
 
-  const [employees, setEmployees] = useState<Employee[]>(() =>
-    USERS.map(u => ({
-      ...u,
-      store: u.store ?? "Petyonvil",
-      lastAction: u.role === "cashier" ? "Vente #VTE-1021 • il y a 12 min" : u.role === "manager" ? "Ajustement stock • il y a 1 h" : "Clôture caisse • hier",
-      kpi: u.role === "cashier" ? "22 ventes • 1,540 HTG/panier" : "18 tâches • 98% précision",
-      salary: u.role === "owner" ? "45,000 HTG" : u.role === "admin" ? "32,000 HTG" : u.role === "manager" ? "25,000 HTG" : "12,000 HTG",
-      address: u.id === "owner-1" ? "Pétion-Ville, Rue Panaméricaine 12" : u.id === "admin-1" ? "Delmas 33, Impasse Lafleur" : u.id === "manager-1" ? "Carrefour, Bizoton 45" : "Kenscoff, Route de Furcy",
-      isOnline: u.role === "owner" || u.role === "admin" ? true : Math.random() > 0.4,
-      emergency: u.id === "owner-1" ? { name: "Marie Owner", address: "Pétion-Ville, Rue Clerveaux 8", phone: "+509 3100 0001" } : u.id === "admin-1" ? { name: "Jean Admin", address: "Delmas 31, Rue Tirlemont", phone: "+509 3100 0002" } : u.id === "manager-1" ? { name: "Sophie Manager", address: "Carrefour, Mahotière 12", phone: "+509 3100 0003" } : { name: "Luc Cashier", address: "Pétion-Ville, Laboule 10", phone: "+509 3100 0004" },
-      active: true,
-      password: `${u.id}-pass`,
-    }) as any)
-  );
   const [newEmpName, setNewEmpName] = useState("");
   const [newEmpRole, setNewEmpRole] = useState("cashier");
   const [newEmpPhone, setNewEmpPhone] = useState("");
@@ -330,7 +403,7 @@ export default function App() {
 
   const canManageEmployees = role === "admin" || role === "owner";
   const cashiers = employees.filter(e => e.role === "cashier").map(e => ({ id: e.id, name: e.name, store: e.store ?? (activeStore ? activeStore.location : undefined) }));
-  const HIER: Record<string, number> = { owner: 4, admin: 3, manager: 2, cashier: 1 };
+  const HIER: Record<string, number> = { owner: 4, admin: 3, manager: 2, cashier: 1, associate: 1, cook: 1 };
   const canAddRole = (targetRole: string) => {
     if (targetRole === "owner") return false;
     if (!HIER[role] || !HIER[targetRole]) return false;
@@ -353,7 +426,11 @@ export default function App() {
     return canAffect(target);
   };
   const canChangeSelf = (target: any) => target.id === currentUser?.id;
-  const addRoleOptions = role === "owner" ? ["admin", "manager", "cashier"] : role === "admin" ? ["manager", "cashier"] : [];
+  const addRoleOptions = role === "owner"
+    ? ["admin", "manager", "cashier", "associate", ...(businessType === "retail" ? [] : ["cook"])]
+    : role === "admin"
+      ? ["manager", "cashier", "associate", ...(businessType === "retail" ? [] : ["cook"])]
+      : [];
 
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => {
@@ -372,13 +449,13 @@ export default function App() {
   const headerOpacity = useRef(new Animated.Value(0)).current;
   const headerTranslate = useRef(new Animated.Value(-8)).current;
   useEffect(() => {
-    if (fontsLoaded) {
+    if (fontsReady) {
       Animated.parallel([
         Animated.timing(headerOpacity, { toValue: 1, duration: 420, easing: Easing.out(Easing.quad), useNativeDriver: true }),
         Animated.timing(headerTranslate, { toValue: 0, duration: 420, easing: Easing.out(Easing.quad), useNativeDriver: true }),
       ]).start();
     }
-  }, [fontsLoaded]);
+  }, [fontsReady]);
 
   // Profile menu spring
   const profileScale = useRef(new Animated.Value(0.96)).current;
@@ -454,22 +531,20 @@ export default function App() {
         ? ht.home
         : tab === "pos"
           ? ht.sale
-          : tab === "stock"
-            ? ht.stock
-              : tab === "credits"
-                ? ht.credit
-                  : tab === "customers"
-                    ? ht.customers
-                    : ht.home;
+          : tab === "transactions"
+            ? ht.transactions
+            : tab === "more"
+              ? "Plis"
+              : ht.home;
 
-  if (!fontsLoaded) {
+  if (!fontsReady) {
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: palette.bg, alignItems: "center", justifyContent: "center" }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#000", alignItems: "center", justifyContent: "center" }}>
         <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", padding: 6 }}>
           <Image source={require("./assets/kourro-logo.png")} style={{ width: 34, height: 34, resizeMode: "contain" }} />
         </View>
-        <Text style={{ fontFamily: "Quicksand_600SemiBold", fontSize: 13, color: palette.ink, marginTop: 10, letterSpacing: -0.2 }}>Kourro</Text>
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
+        <Text style={{ fontFamily: "Inter_600SemiBold", fontSize: 13, color: palette.ink, marginTop: 10, letterSpacing: -0.2 }}>Kourro</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
       </SafeAreaView>
     );
   }
@@ -480,11 +555,11 @@ export default function App() {
 
   if (auth.status === "loading") {
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: palette.bg, alignItems: "center", justifyContent: "center" }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#000", alignItems: "center", justifyContent: "center" }}>
         <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", padding: 6 }}>
           <Image source={require("./assets/kourro-logo.png")} style={{ width: 34, height: 34, resizeMode: "contain" }} />
         </View>
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
       </SafeAreaView>
     );
   }
@@ -519,7 +594,7 @@ export default function App() {
         setActiveShift(existing);
         closeShiftStartSheet();
         setShiftVersion(v => v + 1);
-        Alert.alert("Chanjman kòmanse ✓", `Kes la dakò a ${existing.opening_balance} HTG. Vant debloke — ou ka kòmanse vann kounye a.`);
+        Alert.alert("Chanjman kòmanse ✓", `Kes la dakò a ${fmtG(existing.opening_balance)}. Vant debloke — ou ka kòmanse vann kounye a.`);
         return;
       }
       const ts = new Date().toISOString();
@@ -529,12 +604,12 @@ export default function App() {
       console.log("[beginShiftAgree] INSERTED shift id=", id, "store_id=", STORE_ID, "cashier_id=", currentUser.id, "opening=", PROGRAM_OPENING_VAL);
       for (const sup of SUPERVISOR_IDS) {
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [`notif-${Date.now()}-${sup}`, sup, "shift_opening", id, `${currentUser.name} konfime ${PROGRAM_OPENING_VAL} HTG nan kach la. Chanjman kòmanse epi vant debloke.`, "pending", ts]);
+          [`notif-${Date.now()}-${sup}`, sup, "shift_opening", id, `${currentUser.name} konfime ${fmtG(PROGRAM_OPENING_VAL)} nan kach la. Chanjman kòmanse epi vant debloke.`, "pending", ts]);
       }
       setActiveShift({ id, store_id: STORE_ID, cashier_id: currentUser.id, manager_id: "manager-1", opening_balance: PROGRAM_OPENING_VAL, status: "open", start_time: ts, cashier_confirmed: 1, manager_confirmed: 1, supervisor_confirmed: 1 });
       closeShiftStartSheet();
       setShiftVersion(v => v + 1);
-      Alert.alert("Chanjman kòmanse ✓", `Kes la dakò a ${PROGRAM_OPENING_VAL} HTG. Notification ale bay Owner/Admin/Manager. Vant debloke — ou ka kòmanse vann kounye a.`);
+      Alert.alert("Chanjman kòmanse ✓", `Kes la dakò a ${fmtG(PROGRAM_OPENING_VAL)}. Notification ale bay Owner/Admin/Manager. Vant debloke — ou ka kòmanse vann kounye a.`);
     } catch (e) { Alert.alert("Erè", String(e)); }
   }
 
@@ -553,78 +628,19 @@ export default function App() {
         [`cd-${Date.now()}`, pendingShiftId, PROGRAM_OPENING_VAL, amt, PROGRAM_OPENING_VAL - amt, "pending", currentUser.id, ts]);
       for (const sup of SUPERVISOR_IDS) {
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [`notif-${Date.now()}-${sup}-plent`, sup, "shift_review", pendingShiftId, `${currentUser.name} pa dakò: konte ${amt} HTG olye de ${PROGRAM_OPENING_VAL} HTG. Vant ret bloke jiskaske sipèvizè revize.`, "pending", ts]);
+          [`notif-${Date.now()}-${sup}-plent`, sup, "shift_review", pendingShiftId, `${currentUser.name} pa dakò: konte ${fmtG(amt)} olye de ${fmtG(PROGRAM_OPENING_VAL)}. Vant ret bloke jiskaske sipèvizè revize.`, "pending", ts]);
       }
       setPendingShift({ id: pendingShiftId, opening_balance: amt, status: "pending", cashier_confirmed: 0 });
       setActiveShift(null);
       closeShiftStartSheet();
       setShiftVersion(v => v + 1);
-      Alert.alert("Plent voye", `Ou konte ${amt} HTG olye de ${PROGRAM_OPENING_VAL} HTG (diferans ${Math.abs(PROGRAM_OPENING_VAL - amt)} HTG). Vant rete bloke — yon sipèvizè dwe rezoud tikit la anvan ou ka kòmanse.`);
+      Alert.alert("Plent voye", `Ou konte ${fmtG(amt)} olye de ${fmtG(PROGRAM_OPENING_VAL)} (diferans ${fmtG(Math.abs(PROGRAM_OPENING_VAL - amt))}). Vant rete bloke — yon sipèvizè dwe rezoud tikit la anvan ou ka kòmanse.`);
     } catch (e) { Alert.alert("Erè", String(e)); }
   }
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: palette.bg }}>
-      {/* Luxury header — mirrors web topbar: F5F5F7 translucent, hairline, soft shadow */}
-      <Animated.View style={{
-        paddingHorizontal: 16,
-        paddingTop: 10,
-        paddingBottom: 12,
-        backgroundColor: "#FFFFFF",
-        flexDirection: "row",
-        justifyContent: "space-between",
-        alignItems: "center",
-        borderBottomWidth: 0.5,
-        borderColor: palette.hairline,
-        zIndex: 2,
-        opacity: headerOpacity,
-        transform: [{ translateY: headerTranslate }],
-      }}>
-        <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 11 }}>
-          {/* Brand mark — Kourro logo */}
-          <View style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.45)", padding: 4 }}>
-            <Image source={require("./assets/kourro-logo.png")} style={{ width: 26, height: 26, resizeMode: "contain" }} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 17, color: palette.ink, letterSpacing: -0.4, lineHeight: 18 }} numberOfLines={1}>{screenTitle}</Text>
-            <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, letterSpacing: 0.4, fontWeight: "600", marginTop: 1, textTransform: "uppercase" }}>PÉTION-VILLE • HTG • OFFLINE PARE</Text>
-          </View>
-        </View>
-
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <Pressable
-            accessibilityLabel="Notifications"
-            onPress={() => setShowShift(true)}
-            style={{
-              width: 38, height: 38, borderRadius: 12,
-              backgroundColor: palette.surface,
-              borderWidth: 0.5, borderColor: palette.hairlineStrong,
-              alignItems: "center", justifyContent: "center",
-              position: "relative",
-              ...shadow.soft,
-            }}
-          >
-            <Text style={{ fontSize: 14, color: palette.inkSoft, fontWeight: "600" }}>◷</Text>
-            {pendingDiscrepancy && (
-              <View style={{ position: "absolute", top: 5, right: 5, width: 9, height: 9, borderRadius: 5, backgroundColor: palette.dangerDot, borderWidth: 2, borderColor: palette.surface }} />
-            )}
-          </Pressable>
-          <Pressable
-            accessibilityLabel="Open profile"
-            onPress={() => setShowProfileMenu(true)}
-            style={{
-              width: 38, height: 38, borderRadius: 12,
-              backgroundColor: palette.ink2,
-              alignItems: "center", justifyContent: "center",
-              borderWidth: 0.5, borderColor: "rgba(255,255,255,0.08)",
-              ...shadow.soft,
-            }}
-          >
-            <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontSize: 12, fontWeight: "700" }}>{currentUser.name.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase()}</Text>
-          </Pressable>
-        </View>
-      </Animated.View>
-
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
+      <StatusBar barStyle="light-content" backgroundColor="#000" />
       {/* Cashier shift gate — luxury amber/red with hairline */}
       {isCashierRole && !activeShift && tab === "pos" && !pendingShift && (
         <View style={{ backgroundColor: palette.warningBg, borderBottomWidth: 0.5, borderColor: palette.warningBd, padding: 12, flexDirection: "row", alignItems: "center", gap: 10 }}>
@@ -632,8 +648,8 @@ export default function App() {
             <Ionicons name="lock-closed-outline" size={16} color={palette.warning} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.warning, fontSize: 12, letterSpacing: -0.1 }}>Chanjman fèmen — Vant bloke</Text>
-            <Text style={{ fontFamily: "Roboto_400Regular", color: palette.warningDot, fontSize: 11, marginTop: 1 }}>Ou dwe kòmanse chanjman (Lajan Disponib) anvan ou ka vann.</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", color: palette.warning, fontSize: 12, letterSpacing: -0.1 }}>Chanjman fèmen — Vant bloke</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", color: palette.warningDot, fontSize: 11, marginTop: 1 }}>Ou dwe kòmanse chanjman (Lajan Disponib) anvan ou ka vann.</Text>
           </View>
         </View>
       )}
@@ -643,8 +659,8 @@ export default function App() {
             <Ionicons name="time-outline" size={16} color={palette.warning} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.warning, fontSize: 12, letterSpacing: -0.1 }}>Chanjman ap tann — Vant bloke</Text>
-            <Text style={{ fontFamily: "Roboto_400Regular", color: palette.warningDot, fontSize: 11, marginTop: 1 }}>Ou fè yon tikit (Pa dakò). Yon sipèvizè dwe rezoud li anvan ou ka kòmanse.</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", color: palette.warning, fontSize: 12, letterSpacing: -0.1 }}>Chanjman ap tann — Vant bloke</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", color: palette.warningDot, fontSize: 11, marginTop: 1 }}>Ou fè yon tikit (Pa dakò). Yon sipèvizè dwe rezoud li anvan ou ka kòmanse.</Text>
           </View>
         </View>
       )}
@@ -654,8 +670,8 @@ export default function App() {
             <Ionicons name="warning-outline" size={16} color={palette.danger} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.danger, fontSize: 12 }}>Vant bloke — Tann konfimasyon sipèvizè</Text>
-            <Text style={{ fontFamily: "Roboto_400Regular", color: palette.dangerDot, fontSize: 11, marginTop: 1 }}>Ou rapòte {pendingDiscrepancy?.cashier_amount} HTG olye de {pendingDiscrepancy?.manager_amount} HTG (manke {pendingDiscrepancy?.difference} HTG).</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", color: palette.danger, fontSize: 12 }}>Vant bloke — Tann konfimasyon sipèvizè</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", color: palette.dangerDot, fontSize: 11, marginTop: 1 }}>Ou rapòte {fmtG(pendingDiscrepancy?.cashier_amount)} olye de {fmtG(pendingDiscrepancy?.manager_amount)} (manke {fmtG(pendingDiscrepancy?.difference)}).</Text>
           </View>
         </View>
       )}
@@ -681,58 +697,58 @@ export default function App() {
                 <Ionicons name="briefcase-outline" size={20} color={palette.accentGold} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 17, color: palette.ink, letterSpacing: -0.3 }}>Lajan Disponib</Text>
-                <Text style={{ fontFamily: "Roboto_400Regular", color: palette.muted2, fontSize: 11, marginTop: 1 }}>Lajan ki disponib pou chak kesye — {currentUser.name}</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 17, color: palette.ink, letterSpacing: -0.3 }}>Lajan Disponib</Text>
+                <Text style={{ fontFamily: "Inter_400Regular", color: palette.muted2, fontSize: 11, marginTop: 1 }}>Lajan ki disponib pou chak kesye — {currentUser.name}</Text>
               </View>
             </View>
 
             <View style={{ marginTop: 16, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, padding: 12, borderWidth: 0.5, borderColor: palette.hairline }}>
               <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase" }}>Montan pwogram nan atann</Text>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "900", fontSize: 18, color: palette.accentGold, marginTop: 2 }}>{PROGRAM_OPENING_VAL} HTG</Text>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, marginTop: 2 }}>Sa pwogram nan deklare kes la genyen kòm kach ouvèti</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: palette.accentGold, marginTop: 2 }}>{fmtG(PROGRAM_OPENING_VAL)}</Text>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 2 }}>Sa pwogram nan deklare kes la genyen kòm kach ouvèti</Text>
             </View>
 
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "800", fontSize: 15, color: palette.ink, marginTop: 16 }}>Eske ou dakò ak montan kes la?</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontSize: 15, color: palette.ink, marginTop: 16 }}>Eske ou dakò ak montan kes la?</Text>
 
             <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
               <Pressable onPress={() => setShiftConfirmationChoice("no")} style={{ flex: 1, backgroundColor: shiftConfirmationChoice === "no" ? palette.dangerBg : palette.surface, borderWidth: 1, borderColor: shiftConfirmationChoice === "no" ? palette.dangerBd : palette.hairlineStrong, borderRadius: radius.md, padding: 13, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8 }}>
                 <Ionicons name="close-circle" size={18} color={palette.danger} />
-                <Text style={{ color: palette.danger, fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13 }}>Pa dakò</Text>
+                <Text style={{ color: palette.danger, fontFamily: "Inter_700Bold", fontSize: 13 }}>Pa dakò</Text>
               </Pressable>
               <Pressable onPress={() => setShiftConfirmationChoice("yes")} style={{ flex: 1, backgroundColor: shiftConfirmationChoice === "yes" ? palette.accentGold : palette.surface, borderWidth: 1, borderColor: shiftConfirmationChoice === "yes" ? "rgba(255,255,255,0.3)" : palette.hairlineStrong, borderRadius: radius.md, padding: 13, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, ...(shiftConfirmationChoice === "yes" ? shadow.soft : {}) }}>
                 <Ionicons name="checkmark-circle" size={18} color={shiftConfirmationChoice === "yes" ? "#fff" : palette.success} />
-                <Text style={{ color: shiftConfirmationChoice === "yes" ? "#fff" : palette.ink, fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13 }}>Dakò</Text>
+                <Text style={{ color: shiftConfirmationChoice === "yes" ? "#fff" : palette.ink, fontFamily: "Inter_700Bold", fontSize: 13 }}>Dakò</Text>
               </Pressable>
             </View>
 
             {!shiftConfirmationChoice ? (
-              <Text style={{ marginTop: 12, color: palette.muted2, fontSize: 11, textAlign: "center", fontFamily: "Roboto_400Regular" }}>Chwazi Dakò oswa Pa dakò pou kòmanse.</Text>
+              <Text style={{ marginTop: 12, color: palette.muted2, fontSize: 11, textAlign: "center", fontFamily: "Inter_400Regular" }}>Chwazi Dakò oswa Pa dakò pou kòmanse.</Text>
             ) : (
               <>
                 {shiftConfirmationChoice === "no" && (
                   <View style={{ backgroundColor: palette.bg, borderRadius: radius.md, padding: 12, marginTop: 14, borderWidth: 0.5, borderColor: palette.separator }}>
-                    <Text style={{ fontSize: 10, color: palette.muted, fontFamily: "Quicksand_700Bold", fontWeight: "700", letterSpacing: 0.6, textTransform: "uppercase" }}>Ki KACH OU REYÈLMAN KONTE? (HTG)</Text>
-                    <TextInput value={shiftOpeningInput} placeholder={String(PROGRAM_OPENING_VAL)} placeholderTextColor={palette.muted3} onChangeText={setShiftOpeningInput} keyboardType="numeric" style={{ borderWidth: 0.5, borderColor: palette.ink2, borderRadius: radius.sm, padding: 11, marginTop: 8, fontFamily: "Quicksand_700Bold", fontWeight: "700", backgroundColor: palette.surface, color: palette.ink }} />
-                    <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.muted, marginTop: 6 }}>Antre vrè montan. Yon plent ap ale bay Owner/Admin/Manadjè — vant rete bloke jiskaske yo rezoud.</Text>
+                    <Text style={{ fontSize: 10, color: palette.muted, fontFamily: "Inter_700Bold", letterSpacing: 0.6, textTransform: "uppercase" }}>Ki KACH OU REYÈLMAN KONTE? (G)</Text>
+                    <TextInput value={shiftOpeningInput} placeholder={String(PROGRAM_OPENING_VAL)} placeholderTextColor={palette.muted3} onChangeText={setShiftOpeningInput} keyboardType="numeric" style={{ borderWidth: 0.5, borderColor: palette.ink2, borderRadius: radius.sm, padding: 11, marginTop: 8, fontFamily: "Inter_700Bold", backgroundColor: palette.surface, color: palette.ink }} />
+                    <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted, marginTop: 6 }}>Antre vrè montan. Yon plent ap ale bay Owner/Admin/Manadjè — vant rete bloke jiskaske yo rezoud.</Text>
                   </View>
                 )}
                 {shiftConfirmationChoice === "yes" && (
                   <View style={{ marginTop: 14, backgroundColor: palette.successBg, borderWidth: 0.5, borderColor: palette.successBd, borderRadius: radius.md, padding: 12 }}>
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12, color: palette.success }}>✓ Dakò — chanjman kòmanse imedyatman</Text>
-                    <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.success, marginTop: 4 }}>Pa bezwen kòd. Notifikasyon ale bay Owner/Admin/Manager. Ou ka kòmanse vann.</Text>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontSize: 12, color: palette.success }}>✓ Dakò — chanjman kòmanse imedyatman</Text>
+                    <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.success, marginTop: 4 }}>Pa bezwen kòd. Notifikasyon ale bay Owner/Admin/Manager. Ou ka kòmanse vann.</Text>
                   </View>
                 )}
               </>
             )}
 
             <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
-              <Pressable onPress={() => { setShowShiftStart(false); setShiftConfirmationChoice(null); setShiftSecretInput(""); }} style={{ flex: 1, padding: 13, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, alignItems: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink }}>Anile</Text></Pressable>
+              <Pressable onPress={() => { setShowShiftStart(false); setShiftConfirmationChoice(null); setShiftSecretInput(""); }} style={{ flex: 1, padding: 13, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, alignItems: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink }}>Anile</Text></Pressable>
               <Pressable
                 onPress={shiftConfirmationChoice === "no" ? fileShiftComplaint : beginShiftAgree}
                 disabled={!shiftConfirmationChoice}
                 style={{ flex: 1, padding: 13, backgroundColor: shiftConfirmationChoice ? palette.ink2 : palette.separator, borderRadius: radius.md, alignItems: "center", ...shadow.soft }}
               >
-                <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>{shiftConfirmationChoice === "yes" ? "Dakò — Kòmanse" : shiftConfirmationChoice === "no" ? "Voye Plent" : "Konfime"}</Text>
+                <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>{shiftConfirmationChoice === "yes" ? "Dakò — Kòmanse" : shiftConfirmationChoice === "no" ? "Voye Plent" : "Konfime"}</Text>
               </Pressable>
             </View>
               </Animated.View>
@@ -756,15 +772,15 @@ export default function App() {
             <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingBottom: 14, borderBottomWidth: 0.5, borderColor: palette.separator }}>
               <View style={{ position: "relative" }}>
                 <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: palette.accentGold, shadowColor: palette.accentGold, shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } }}>
-                  <Text style={{ fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 19, letterSpacing: 0.5 }}>{currentUser.name.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase()}</Text>
+                  <Text style={{ fontFamily: "Inter_700Bold", color: "#fff", fontSize: 19, letterSpacing: 0.5 }}>{currentUser.name.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase()}</Text>
                 </View>
                 <View style={{ position: "absolute", right: 1, bottom: 1, width: 13, height: 13, borderRadius: 7, backgroundColor: palette.successDot, borderWidth: 2.5, borderColor: palette.surface }} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 16, color: palette.ink, letterSpacing: -0.3 }} numberOfLines={1}>{currentUser.name}</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 16, color: palette.ink, letterSpacing: -0.3 }} numberOfLines={1}>{currentUser.name}</Text>
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 5 }}>
                   <View style={{ height: 19, borderRadius: 9, paddingHorizontal: 7, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)" }}>
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 8, color: palette.accentGold, letterSpacing: 0.8, textTransform: "uppercase" }}>{currentUser.role}</Text>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontSize: 8, color: palette.accentGold, letterSpacing: 0.8, textTransform: "uppercase" }}>{currentUser.role}</Text>
                   </View>
                 </View>
               </View>
@@ -779,7 +795,7 @@ export default function App() {
                 >
                   <Ionicons name={activeShift ? "checkmark-circle" : "time-outline"} size={20} color={activeShift ? palette.success : palette.muted2} />
                   <View style={{ flex: 1 }}>
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, letterSpacing: -0.2 }}>Fin Travay</Text>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontSize: 14, color: palette.ink, letterSpacing: -0.2 }}>Fin Travay</Text>
                   </View>
                   <Text style={{ color: palette.muted3, fontSize: 16, fontWeight: "500" }}>›</Text>
                 </Pressable>
@@ -791,7 +807,7 @@ export default function App() {
                 >
                   <Ionicons name="business-outline" size={20} color={palette.accentGold} />
                   <View style={{ flex: 1 }}>
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, letterSpacing: -0.2 }}>Kourro</Text>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontSize: 14, color: palette.ink, letterSpacing: -0.2 }}>Kourro</Text>
                   </View>
                   <Text style={{ color: palette.muted3, fontSize: 16, fontWeight: "500" }}>›</Text>
                 </Pressable>
@@ -799,16 +815,21 @@ export default function App() {
             </View>
 
             {/* Log out — Apple logout style */}
-            <Pressable onPress={() => {
+            <Pressable onPress={async () => {
               setShowProfileMenu(false);
+              try {
+                const { getDb } = await import("./src/db");
+                const { clearCartDraft } = await import("./src/sales/cartDraft");
+                await clearCartDraft(await getDb(), STORE_ID, currentUser?.id ?? null);
+              } catch {}
               auth.signOut();
             }} style={{ marginTop: 14, backgroundColor: palette.dangerBg, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", borderWidth: 0.5, borderColor: palette.dangerBd }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
                 <Ionicons name="log-out-outline" size={17} color={palette.danger} />
-                <Text style={{ fontFamily: "Quicksand_700Bold", color: palette.danger, fontWeight: "700", letterSpacing: 0.2, fontSize: 13 }}>Log out</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", color: palette.danger, letterSpacing: 0.2, fontSize: 13 }}>Log out</Text>
               </View>
             </Pressable>
-            <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted3, textAlign: "center", marginTop: 10 }}>Tap deyò pou fèmen</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted3, textAlign: "center", marginTop: 10 }}>Tap deyò pou fèmen</Text>
           </Animated.View>
         </Pressable>
       </Modal>
@@ -817,7 +838,7 @@ export default function App() {
         {showAccountCenter ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowAccountCenter(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <Pressable onPress={() => setShowAccountCenter(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
               <View style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: 4, backgroundColor: palette.successDot }} />
             </View>
             <AccountCenter
@@ -828,14 +849,16 @@ export default function App() {
               setActiveStoreId={setActiveStoreId}
               appDisabled={appDisabled}
               setAppDisabled={setAppDisabled}
+              businessType={businessType}
+              onBusinessTypeChange={changeBusinessType}
               onClose={() => setShowAccountCenter(false)}
             />
           </View>
         ) : showSecurity ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowSecurity(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15, color: palette.ink, letterSpacing: -0.2 }}>Konsole Sipò</Text>
+              <Pressable onPress={() => setShowSecurity(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <Text style={{ fontFamily: "Inter_700Bold", fontSize: 15, color: palette.ink, letterSpacing: -0.2 }}>Konsole Sipò</Text>
               <View style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: 4, backgroundColor: palette.warningDot }} />
             </View>
             <SecurityCenter
@@ -849,7 +872,7 @@ export default function App() {
         ) : showStore ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowStore(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <Pressable onPress={() => setShowStore(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
             </View>
             <StoreScreen
               role={role}
@@ -869,15 +892,13 @@ export default function App() {
           </View>
         ) : showTeam ? (
           <View style={{ flex: 1 }}>
-            <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowTeam(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
-            </View>
             <TeamScreen
               employees={employees}
               setEmployees={setEmployees}
               role={role}
               currentUser={currentUser}
               activeStore={activeStore?.location ?? "Petyonvil"}
+              userStoreIds={userStoreIds}
               editingEmp={editingEmp}
               setEditingEmp={setEditingEmp}
               editEmpRole={editEmpRole}
@@ -921,14 +942,14 @@ export default function App() {
         ) : showShift ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowShift(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <Pressable onPress={() => setShowShift(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
             </View>
             <ShiftReportScreen storeId={STORE_ID} role={role} currentUser={currentUser} />
           </View>
         ) : showInventory ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowInventory(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <Pressable onPress={() => setShowInventory(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
             </View>
             <InventoryScreen
               role={role}
@@ -942,12 +963,12 @@ export default function App() {
             <View style={{ width: 64, height: 64, borderRadius: 18, backgroundColor: palette.dangerBg, borderWidth: 0.5, borderColor: palette.dangerBd, alignItems: "center", justifyContent: "center", ...shadow.card }}>
               <Ionicons name="lock-closed" size={28} color={palette.danger} />
             </View>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 18, marginTop: 14, textAlign: "center", color: palette.ink, letterSpacing: -0.4 }}>Magazen sa a bloke</Text>
-            <Text style={{ fontFamily: "Roboto_400Regular", color: palette.muted, textAlign: "center", marginTop: 8, fontSize: 13, lineHeight: 18 }}>
+            <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, marginTop: 14, textAlign: "center", color: palette.ink, letterSpacing: -0.4 }}>Magazen sa a bloke</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", color: palette.muted, textAlign: "center", marginTop: 8, fontSize: 13, lineHeight: 18 }}>
               Tout aktivite sou magazen <Text style={{ fontWeight: "700", color: palette.ink }}>{activeStore?.name}</Text> te sispann apre yon bès sekirite. Kontakte Konsole Sipò pou rektifye.
             </Text>
             <Pressable onPress={() => setShowSecurity(true)} style={{ marginTop: 18, backgroundColor: palette.ink2, paddingHorizontal: 22, paddingVertical: 13, borderRadius: radius.md, ...shadow.soft }}>
-              <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>Konsole Sipò</Text>
+              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>Konsole Sipò</Text>
             </Pressable>
           </View>
         ) : (
@@ -959,12 +980,12 @@ export default function App() {
                   <View style={{ width: 72, height: 72, borderRadius: 22, backgroundColor: hasPendingDiscrepancy ? palette.dangerBg : pendingShift ? palette.warningBg : palette.accentGoldSoft, borderWidth: 0.5, borderColor: hasPendingDiscrepancy ? palette.dangerBd : pendingShift ? palette.warningBd : palette.accentGold, alignItems: "center", justifyContent: "center", ...shadow.card }}>
                     <Ionicons name={hasPendingDiscrepancy ? "warning-outline" : pendingShift ? "time-outline" : "lock-closed-outline"} size={32} color={hasPendingDiscrepancy ? palette.danger : pendingShift ? palette.warning : palette.accentGold} />
                   </View>
-                  <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 18, marginTop: 16, textAlign: "center", color: palette.ink, letterSpacing: -0.4 }}>{hasPendingDiscrepancy ? (pendingDiscrepancy?.status === "reassigned" ? "Sipèvizè reasigne — konfime" : "Tann konfimasyon sipèvizè") : (pendingShift ? "Chanjman ap tann — Vant bloke" : "Vant bloke — Chanjman pa kòmanse")}</Text>
-                  <Text style={{ fontFamily: "Roboto_400Regular", color: palette.muted, textAlign: "center", marginTop: 8, fontSize: 13, lineHeight: 18 }}>
+                  <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, marginTop: 16, textAlign: "center", color: palette.ink, letterSpacing: -0.4 }}>{hasPendingDiscrepancy ? (pendingDiscrepancy?.status === "reassigned" ? "Sipèvizè reasigne — konfime" : "Tann konfimasyon sipèvizè") : (pendingShift ? "Chanjman ap tann — Vant bloke" : "Vant bloke — Chanjman pa kòmanse")}</Text>
+                  <Text style={{ fontFamily: "Inter_400Regular", color: palette.muted, textAlign: "center", marginTop: 8, fontSize: 13, lineHeight: 18 }}>
                     {hasPendingDiscrepancy
                       ? pendingDiscrepancy?.status === "reassigned"
-                        ? `Sipèvizè reasigne kach la a ${pendingDiscrepancy?.reassigned_amount} HTG (ou te di ${pendingDiscrepancy?.cashier_amount} HTG). Si ou dakò ak ${pendingDiscrepancy?.reassigned_amount} HTG, konfime ak kòd ou (${currentUser.secret}) pou kòmanse vann.`
-                        : `Ou rapòte ${pendingDiscrepancy?.cashier_amount} HTG olye de ${pendingDiscrepancy?.manager_amount} HTG. Tout sipèvizè resevwa notifikasyon. Ou pa ka vann jiskaske yo konfime.`
+                        ? `Sipèvizè reasigne kach la a ${fmtG(pendingDiscrepancy?.reassigned_amount)} (ou te di ${fmtG(pendingDiscrepancy?.cashier_amount)}). Si ou dakò ak ${fmtG(pendingDiscrepancy?.reassigned_amount)}, konfime ak kòd ou (${currentUser.secret}) pou kòmanse vann.`
+                        : `Ou rapòte ${fmtG(pendingDiscrepancy?.cashier_amount)} olye de ${fmtG(pendingDiscrepancy?.manager_amount)}. Tout sipèvizè resevwa notifikasyon. Ou pa ka vann jiskaske yo konfime.`
                       : pendingShift
                         ? `Ou te fè yon tikit (Pa dakò). Chanjman w la make "ap tann" — ou pa ka rebay konfimasyon an. Yon sipèvizè dwe rezoud li anvan ou ka kòmanse.`
                         : `Ou dwe kòmanse chanjman anvan ou ka vann. Peze katon anba a pou louvri Lajan Disponib epi atestine montan kes la.`}
@@ -972,13 +993,13 @@ export default function App() {
                   {!hasPendingDiscrepancy && !pendingShift && (
                     <Pressable onPress={() => setShowStore(true)} android_ripple={{ color: "rgba(200,162,74,0.25)" }} style={({ pressed }) => [{ marginTop: 20, backgroundColor: palette.accentGold, paddingHorizontal: 22, paddingVertical: 13, borderRadius: radius.md, flexDirection: "row", alignItems: "center", gap: 8, ...shadow.soft }, pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] }]}>
                       <Ionicons name="briefcase-outline" size={16} color="#fff" />
-                      <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>Tyeke Konbyen Ou Gen Nan Kès Ou</Text>
+                      <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>Tyeke Konbyen Ou Gen Nan Kès Ou</Text>
                     </Pressable>
                   )}
                   {hasPendingDiscrepancy && pendingDiscrepancy?.status === "reassigned" && (
                     <View style={{ marginTop: 16, width: "100%", backgroundColor: palette.blueBg, borderWidth: 0.5, borderColor: palette.blueBd, borderRadius: radius.md, padding: 14 }}>
-                      <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.blue, textAlign: "center", fontSize: 13 }}>Sipèvizè panse ou te konte mal</Text>
-                      <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.blue, textAlign: "center", marginTop: 4 }}>Li reasigne a {pendingDiscrepancy?.reassigned_amount} HTG. Si ou dakò, peze pou konfime ak kòd ou.</Text>
+                      <Text style={{ fontFamily: "Inter_700Bold", color: palette.blue, textAlign: "center", fontSize: 13 }}>Sipèvizè panse ou te konte mal</Text>
+                      <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.blue, textAlign: "center", marginTop: 4 }}>Li reasigne a {fmtG(pendingDiscrepancy?.reassigned_amount)}. Si ou dakò, peze pou konfime ak kòd ou.</Text>
                       <Pressable onPress={async () => {
                         if (!pendingDiscrepancy) return;
                         const { getDb } = await import("./src/db");
@@ -992,9 +1013,9 @@ export default function App() {
                         const allShifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
                         const active = allShifts.find((x: any) => x.status === "open");
                         setActiveShift(active || null);
-                        Alert.alert("Konfime ✓", `Konfime ${amt} HTG — ou ka kòmanse vann`);
+                        Alert.alert("Konfime ✓", `Konfime ${fmtG(amt)} — ou ka kòmanse vann`);
                       }} style={{ marginTop: 10, backgroundColor: palette.ink2, padding: 11, borderRadius: radius.sm, alignItems: "center" }}>
-                        <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>✓ Mwen dakò ({pendingDiscrepancy?.reassigned_amount} HTG) — Kòd {currentUser.secret}</Text>
+                        <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>✓ Mwen dakò ({fmtG(pendingDiscrepancy?.reassigned_amount)}) — Kòd {currentUser.secret}</Text>
                       </Pressable>
                     </View>
                   )}
@@ -1002,24 +1023,50 @@ export default function App() {
               ) : (
                 <POSScreen
                   storeId={STORE_ID}
-                  deviceId={DEVICE_ID}
+                  deviceId={deviceId}
                   role={role}
                   currentUser={currentUser}
                   storeName={activeStore?.name ?? "Pétion-Ville"}
                   selectedCreditCustomer={selectedCreditCustomer}
                   onSelectCreditCustomer={setSelectedCreditCustomer}
                   onTabsChanged={() => setTabDataVersion(v => v + 1)}
+                  attachCustomer={posAttachCustomer}
+                  onAttachCustomerConsumed={() => setPosAttachCustomer(null)}
                 />
               )
             )}
-            {tab === "stock" && <StockScreen role={role} currentUser={currentUser} onOpenInventory={() => setShowInventory(true)} inventoryVersion={inventoryVersion} />}
-            {tab === "credits" && <CreditsScreen role={role} storeId={STORE_ID} currentUser={currentUser} storeName={activeStore?.name ?? "Pétion-Ville"} onNewCredit={(c) => { setSelectedCreditCustomer(c); setTab("pos"); }} />}
-            {tab === "customers" && <CustomersScreen role={role} currentUser={currentUser} />}
+            {tab === "transactions" && <TransactionsScreen role={role} storeId={STORE_ID} storeName={activeStore?.name ?? "Pétion-Ville"} currentUser={currentUser} userStoreIds={userStoreIds} />}
+            {tab === "more" && (
+              <MoreScreen
+                key={moreKey}
+                role={role}
+                businessType={businessType}
+                currentUser={currentUser}
+                storeId={STORE_ID}
+                storeName={activeStore?.name ?? "Pétion-Ville"}
+                inventoryVersion={inventoryVersion}
+                onInventorySaved={() => setInventoryVersion(v => v + 1)}
+                onOpenStore={() => setShowStore(true)}
+                onOpenTeam={() => setShowTeam(true)}
+                onAddSale={(c) => { setPosAttachCustomer(c); setTab("pos"); }}
+                onLogout={async () => {
+                  try {
+                    const { getDb } = await import("./src/db");
+                    const { clearCartDraft } = await import("./src/sales/cartDraft");
+                    await clearCartDraft(await getDb(), STORE_ID, currentUser?.id ?? null);
+                  } catch {}
+                  auth.signOut();
+                }}
+                userStoreIds={userStoreIds}
+                stores={stores}
+                deviceId={deviceId}
+              />
+            )}
           </>
         )}
       </View>
 
-      {!showAccountCenter && !showSecurity && !showStore && !showTeam && !showShift && !showInventory && <BottomNav active={tab} onChange={setTab} />}
+      {!showAccountCenter && !showSecurity && !showStore && !showShift && !showInventory && <BottomNav active={tab} onChange={(t) => { setShowTeam(false); if (t === "more" && tab === "more") setMoreKey(k => k + 1); setTab(t); }} />}
       {/* Round draggable tabs FAB — root level, floats above header, nav and screens */}
       <TabsFab onOpen={onTabFABOpen} />
     </SafeAreaView>

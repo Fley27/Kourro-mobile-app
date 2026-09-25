@@ -2,11 +2,12 @@ import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { palette, radius, shadow } from "../theme";
-import { fmt, monoStyle } from "../format";
+import { fmtG, fmt, monoStyle } from "../format";
 import type { ProductUnit } from "../pricing";
+import { breakdownStock, countInUnit, itemFactor, minItemFactor, type Item, type Variant } from "../catalogModel";
 
-export type Category = { id: string; name: string; icon: string; color: string };
-export type Product = { id: string; name: string; sku?: string; barcode?: string; category?: string; category_id?: string; category_ids?: string[]; stock_quantity: number; low_stock_threshold: number; cost_price: number; selling_price?: number; unit?: string };
+export type Category = { id: string; name: string; icon: string; color: string; created_at?: string };
+export type Product = { id: string; name: string; sku?: string; barcode?: string; category?: string; category_id?: string; category_ids?: string[]; item_type?: "goods" | "service"; is_available?: number | boolean; stock_quantity: number; low_stock_threshold: number; cost_price?: number; selling_price?: number; unit?: string };
 export type StockBatch = { id: string; store_id: string; reference: string; supplier?: string; transport_cost: number; notes?: string; total_items_cost: number; total_cost: number; received_at?: string; status?: string; delivered_at?: string; created_by?: string; created_at: string };
 export type StockMovement = { id: string; batch_id?: string; store_id: string; product_id: string; type: string; quantity: number; initial_qty?: number; remaining_qty?: number; unit_cost: number; total_cost: number; allocated_transport: number; reason?: string; status?: string; delivered_at?: string; created_by?: string; created_at: string };
 
@@ -26,13 +27,112 @@ export const DEFAULT_CATEGORIES: Category[] = [
   { id: "produce", name: "Lejume", icon: "🥬", color: palette.ink2 },
 ];
 
+// Dark surfaces for the black-background Products / Category views — same
+// language as the More hub (black + #2b2b2b tiles + white/gray text).
+export const catalogDark = {
+  bg: "#000",
+  card: "#1C1C1E",
+  tile: "#2b2b2b",
+  border: "#2b2b2b",
+  borderStrong: "#3a3a3c",
+  hairline: "#262626",
+  text: "#fff",
+  sub: "#8e8e93",
+  faint: "#636366",
+} as const;
+
+// Modern premium vector icons for the built-in categories. Custom categories
+// (unknown ids) fall back to their stored character so user picks keep working.
+const CATEGORY_ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
+  all: "layers-outline",
+  food: "restaurant-outline",
+  drinks: "wine-outline",
+  household: "home-outline",
+  dairy: "egg-outline",
+  bakery: "pizza-outline",
+  produce: "leaf-outline",
+};
+export function categoryIonicon(c: Category): keyof typeof Ionicons.glyphMap | null {
+  const builtin = CATEGORY_ICONS[c.id];
+  if (builtin) return builtin;
+  // New categories store the Ionicon glyph name itself (CategoryFormModal).
+  if (typeof c.icon === "string" && (Ionicons.glyphMap as Record<string, unknown>)[c.icon] !== undefined) {
+    return c.icon as keyof typeof Ionicons.glyphMap;
+  }
+  return null;
+}
+
+// Keyword → glyph matching on the category NAME, so seeded/demo categories
+// with emoji icons still render premium vectors. Shared with the icon
+// suggester in CategoryFormModal.
+const ICON_KEYWORDS: [string[], keyof typeof Ionicons.glyphMap][] = [
+  [["beer", "biere", "bye", "prestige", "corona", "heineken", "guinness"], "beer-outline"],
+  [["vin", "wine", "diven", "champagne", "alkol", "alcohol", "rhum", "whisky", "kleren"], "wine-outline"],
+  [["kafe", "cafe", "coffee", "tea", "bwason"], "cafe-outline"],
+  [["dlo", "water", "ji", "jus", "juice", "kola", "cola", "soda", "dous"], "water-outline"],
+  [["diri", "rice", "mayi", "mais", "corn", "farin", "flour", "sik", "sugar", "manje", "food", "baz"], "restaurant-outline"],
+  [["pen", "bread", "boulanj", "pizza", "bakery", "gato"], "pizza-outline"],
+  [["let", "lait", "milk", "ze", "egg", "fromaj", "cheese", "dairy"], "egg-outline"],
+  [["bebe", "baby", "timoun"], "happy-outline"],
+  [["tabak", "sigaret", "smoke", "cigarette"], "cloud-outline"],
+  [["fwi", "fruit", "legim", "vegetable", "tomat", "tomato", "produce", "pwa"], "leaf-outline"],
+  [["vyann", "meat", "poul", "chicken", "poulet"], "nutrition-outline"],
+  [["pwason", "fish", "poisson"], "fish-outline"],
+  [["glace", "ice", "cream", "krem", "goute"], "ice-cream-outline"],
+  [["savon", "soap", "kay", "home", "netwaye", "menaj", "konsev"], "home-outline"],
+  [["swen", "care", "clean", "sanite"], "sparkles-outline"],
+  [["panye", "basket", "panier"], "basket-outline"],
+  [["mache", "market", "magazen", "shop", "store"], "cart-outline"],
+  [["eneji", "enerji", "energy"], "flash-outline"],
+];
+
+function normName(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/** Glyphs relevant to a name, best match first. Empty when nothing matches. */
+export function matchCategoryIconNames(name: string): (keyof typeof Ionicons.glyphMap)[] {
+  const words = normName(name).split(/[^a-z]+/).filter(w => w.length >= 3);
+  if (!words.length) return [];
+  const out: (keyof typeof Ionicons.glyphMap)[] = [];
+  for (const [keys, glyph] of ICON_KEYWORDS) {
+    if (keys.some(k => words.some(w => w.startsWith(k) || k.startsWith(w)))) {
+      if (!out.includes(glyph)) out.push(glyph);
+    }
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+/** Display icon: stored glyph or builtin first, then name match, else null
+ *  (caller falls back to the raw emoji character). */
+export function categoryDisplayIcon(c: Category): keyof typeof Ionicons.glyphMap | null {
+  return categoryIonicon(c) ?? matchCategoryIconNames(c.name)[0] ?? null;
+}
+
 export const ROLE_KR: Record<string, string> = {
   owner: "Patwon",
   admin: "Admin",
   manager: "Manadjè",
   cashier: "Kesye",
+  associate: "Asosye",
+  cook: "Kwizinye",
   seller: "Vandè",
 };
+
+// Catalog item types: goods are quantity-tracked, services are not (no stock
+// number at all — availability toggle only, same as the kitchen 86 flow).
+export function isService(p: Product | null | undefined): boolean {
+  return (p?.item_type ?? "goods") === "service";
+}
+export function isGoods(p: Product | null | undefined): boolean {
+  return !isService(p);
+}
+export function isAvailable(p: Product | null | undefined): boolean {
+  if (!p) return false;
+  if (isService(p)) return p.is_available !== 0 && (p.is_available as any) !== false;
+  return true;
+}
 
 export function getCategoryForProduct(p: Product): string {
   const name = p.name.toLowerCase();
@@ -50,10 +150,20 @@ export function slugify(s: string) { return s.toLowerCase().normalize("NFD").rep
 
 export type StockStatus = { label: string; border: string; bg: string; text: string; dot: string; accent: string; sub: string; bar: string };
 
-export function getStockStatus(qty: number, threshold: number): StockStatus {
-  if (qty <= 0) return { label: "EPUIZE", border: palette.dangerBd, bg: palette.dangerBg, text: palette.danger, dot: palette.dangerDot, accent: palette.danger, sub: "#FCA5A5", bar: palette.danger };
+export function getStockStatus(qty: number, threshold: number): StockStatus {  if (qty <= 0) return { label: "EPUIZE", border: palette.dangerBd, bg: palette.dangerBg, text: palette.danger, dot: palette.dangerDot, accent: palette.danger, sub: "#FCA5A5", bar: palette.danger };
   if (qty <= threshold) return { label: "FÈB", border: palette.warningBd, bg: palette.warningBg, text: palette.warning, dot: palette.warningDot, accent: palette.warning, sub: "#FDBA74", bar: palette.warningDot };
   return { label: "DISPONIB", border: palette.successBd, bg: palette.successBg, text: palette.success, dot: palette.successDot, accent: palette.success, sub: "#86EFAC", bar: palette.success };
+}
+
+// Status for catalog rows: services resolve through availability (86 flow),
+// goods through stock levels.
+export function statusForProduct(p: Product): StockStatus {
+  if (isService(p)) {
+    return isAvailable(p)
+      ? { label: "DISPONIB", border: palette.successBd, bg: palette.successBg, text: palette.success, dot: palette.successDot, accent: palette.success, sub: "#86EFAC", bar: palette.success }
+      : { label: "KOUPE", border: palette.warningBd, bg: palette.warningBg, text: palette.warning, dot: palette.warningDot, accent: palette.warning, sub: "#FDBA74", bar: palette.warningDot };
+  }
+  return getStockStatus(p.stock_quantity, p.low_stock_threshold);
 }
 
 /** One sell-unit row: rename + conversion factor, saved with ✓. Base unit factor stays 1. */
@@ -129,69 +239,26 @@ export function StockStatusPill({ status, large }: { status: StockStatus; large?
   );
 }
 
-/** Apple search bar + loading-dock segmented control + transport banner. Identical on phone/tablet. */
-export function SearchHeader({ q, setQ, barcode, setBarcode, stockTab, setStockTab, pendingCount, avgTransportShare, padH }: {
+/** Apple search bar (catalog only — batch tabs live in Inventory now). Identical on phone/tablet. */
+export function SearchHeader({ q, setQ, barcode, setBarcode, padH }: {
   q: string; setQ: (v: string) => void;
   barcode: string; setBarcode: (v: string) => void;
-  stockTab: StockTab; setStockTab: (v: StockTab) => void;
-  pendingCount: number; avgTransportShare: number; padH: number;
+  padH: number;
 }) {
   return (
-    <View style={{ backgroundColor: "#fff", borderBottomWidth: 0.5, borderColor: palette.hairline, paddingHorizontal: padH, paddingTop: 10, paddingBottom: 10 }}>
-      <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-        <View style={{ flex: 1, height: 42, flexDirection: "row", alignItems: "center", backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, paddingHorizontal: 10, borderWidth: 1, borderColor: palette.separatorSoft }}>
-          <Ionicons name="search" size={15} color={palette.muted3} style={{ marginRight: 6 }} />
-          <TextInput placeholder="Chèche pwodwi, SKU" placeholderTextColor={palette.muted3} value={q} onChangeText={setQ} style={{ flex: 1, fontSize: 14, color: palette.ink, paddingVertical: 8, fontWeight: "400" }} returnKeyType="search" />
-          {q.length > 0 && <Pressable onPress={() => setQ("")} hitSlop={8} style={{ padding: 4 }}><Ionicons name="close-circle" size={15} color={palette.muted3} /></Pressable>}
+    <View style={{ backgroundColor: catalogDark.bg, paddingHorizontal: padH, paddingTop: 12, paddingBottom: 4 }}>
+      <View style={{ flexDirection: "row", gap: 10, alignItems: "center" }}>
+        <View style={{ flex: 1, height: 52, flexDirection: "row", alignItems: "center", backgroundColor: "transparent", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 26, paddingHorizontal: 16 }}>
+          <Ionicons name="search" size={20} color="#fff" style={{ marginRight: 10 }} />
+          <TextInput placeholder="Chèche pwodwi, SKU" placeholderTextColor="#8e8e93" value={q} onChangeText={setQ} style={{ flex: 1, fontSize: 16, color: "#fff" }} returnKeyType="search" />
+          {q.length > 0 && <Pressable onPress={() => setQ("")} hitSlop={8} style={{ padding: 4 }}><Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>✕</Text></Pressable>}
         </View>
-        <View style={{ width: 112, height: 42, flexDirection: "row", alignItems: "center", backgroundColor: palette.surface, borderRadius: radius.md, borderWidth: 1, borderColor: palette.hairline, paddingHorizontal: 10 }}>
-          <Ionicons name="barcode-outline" size={15} color={palette.muted3} style={{ marginRight: 6 }} />
-          <TextInput placeholder="Kòd bar" placeholderTextColor={palette.muted3} value={barcode} onChangeText={setBarcode} style={{ flex: 1, fontSize: 13, color: palette.ink, fontWeight: "500" }} autoCapitalize="characters" />
-          {barcode.length > 0 && <Pressable onPress={() => setBarcode("")} hitSlop={8}><Ionicons name="close-circle" size={13} color={palette.muted3} /></Pressable>}
+        <View style={{ width: 124, height: 52, flexDirection: "row", alignItems: "center", backgroundColor: "transparent", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 26, paddingHorizontal: 16 }}>
+          <Ionicons name="barcode-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
+          <TextInput placeholder="Kòd bar" placeholderTextColor="#8e8e93" value={barcode} onChangeText={setBarcode} style={{ flex: 1, fontSize: 15, color: "#fff" }} autoCapitalize="characters" />
+          {barcode.length > 0 && <Pressable onPress={() => setBarcode("")} hitSlop={8} style={{ padding: 4 }}><Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>✕</Text></Pressable>}
         </View>
       </View>
-
-      {/* Loading-dock segmented control — same look as Home */}
-      <View style={{ backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, padding: 3, flexDirection: "row", borderWidth: 0.5, borderColor: palette.hairline, marginTop: 10 }}>
-        {([
-          { k: "store", label: "Nan magazen", icon: "storefront-outline" as const },
-          { k: "incoming", label: "Ap vini", icon: "boat-outline" as const },
-        ] as const).map(t => {
-          const active = stockTab === t.k;
-          const badge = t.k === "incoming" ? pendingCount : 0;
-          return (
-            <Pressable
-              key={t.k}
-              onPress={() => setStockTab(t.k)}
-              style={{
-                flex: 1,
-                paddingVertical: 8,
-                borderRadius: 8,
-                backgroundColor: active ? "white" : "transparent",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "row",
-                gap: 5,
-                shadowColor: active ? "#000" : "transparent",
-                shadowOpacity: active ? 0.08 : 0,
-                shadowRadius: 4,
-                shadowOffset: { width: 0, height: 1 },
-                elevation: active ? 2 : 0,
-              }}
-            >
-              <Ionicons name={t.icon} size={13} color={active ? palette.ink : palette.muted2} />
-              <Text style={{ fontSize: 13, fontWeight: active ? "600" : "400", color: active ? palette.ink : palette.muted2, letterSpacing: -0.2 }}>{t.label}</Text>
-              {badge > 0 && <View style={{ backgroundColor: active ? palette.accentGold : palette.accentGoldSoft, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 9 }}><Text style={{ fontSize: 10, fontWeight: "800", color: active ? "#fff" : palette.accentGold }}>{badge}</Text></View>}
-            </Pressable>
-          );
-        })}
-      </View>
-      {stockTab === "store" && avgTransportShare > 0.5 && (
-        <View style={{ marginTop: 8, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: palette.accentGold, borderRadius: radius.sm, padding: 8 }}>
-          <Ionicons name="analytics-outline" size={13} color={palette.accentGold} />
-          <Text style={{ fontSize: 11, color: palette.accentGold, fontWeight: "600", flex: 1 }}>Transpò mwayèn {avgTransportShare.toFixed(1)}% nan pri acha — gade Inventaire pou detay</Text>
-        </View>
-      )}
     </View>
   );
 }
@@ -202,20 +269,20 @@ export function CategoryStrip({ categories, cat, setCat, products, getProductCat
   products: Product[]; getProductCats: (productId: string) => string[]; padH: number;
 }) {
   return (
-    <View style={{ backgroundColor: "#fff", borderBottomWidth: 0.5, borderColor: palette.separatorSoft, paddingVertical: 8 }}>
+    <View style={{ backgroundColor: catalogDark.bg, borderBottomWidth: 0.5, borderColor: catalogDark.hairline, paddingVertical: 8 }}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: padH, gap: 8 }}>
         {categories.map(c => {
           const active = cat === c.id;
           const count = c.id === "all" ? products.length : products.filter(p => getProductCats(p.id).includes(c.id)).length;
           const isAll = c.id === "all";
           return (
-            <Pressable key={c.id} onPress={() => setCat(c.id)} style={{ flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: active ? palette.ink2 : palette.surface, borderWidth: 1, borderColor: active ? palette.ink2 : palette.hairline, ...(active ? shadow.soft : {}) }}>
-              <View style={{ width: 22, height: 22, borderRadius: 8, backgroundColor: isAll && active ? "rgba(255,255,255,0.14)" : isAll ? palette.accentGoldSoft : "transparent", borderWidth: isAll ? 1 : 0, borderColor: isAll ? (active ? "rgba(200,162,74,0.4)" : palette.accentGold) : "transparent", alignItems: "center", justifyContent: "center" }}>
-                {isAll ? <Ionicons name="layers-outline" size={13} color={active ? "#fff" : palette.accentGold} /> : <Text style={{ fontSize: 13, lineHeight: 14 }}>{c.icon}</Text>}
+            <Pressable key={c.id} onPress={() => setCat(c.id)} style={{ flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 18, paddingVertical: 13, borderRadius: radius.pill, backgroundColor: active ? "#F4F1EA" : "#000", borderWidth: 1, borderColor: active ? "#F4F1EA" : catalogDark.border, ...(active ? shadow.soft : {}) }}>
+              <View style={{ width: 24, height: 24, borderRadius: 8, backgroundColor: isAll && active ? "rgba(0,0,0,0.08)" : isAll ? "rgba(255,255,255,0.08)" : "transparent", borderWidth: isAll ? 1 : 0, borderColor: isAll ? (active ? "#3a3a3c" : "#fff") : "transparent", alignItems: "center", justifyContent: "center" }}>
+                {(() => { const gi = categoryDisplayIcon(c); return gi ? <Ionicons name={gi} size={16} color={active ? "#16130c" : "#fff"} /> : <Text style={{ fontSize: 15, lineHeight: 16 }}>{c.icon}</Text>; })()}
               </View>
-              <Text style={{ fontWeight: "600", fontSize: 12.5, color: active ? "#fff" : palette.inkSoft, letterSpacing: -0.1 }}>{c.name}</Text>
-              <View style={{ backgroundColor: active ? "rgba(255,255,255,0.14)" : palette.surfaceGrouped, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 10, borderWidth: 1, borderColor: active ? "rgba(255,255,255,0.12)" : palette.separatorSoft }}>
-                <Text style={{ fontSize: 11, fontWeight: "700", color: active ? "#fff" : palette.muted }}>{count}</Text>
+              <Text style={{ fontWeight: "700", fontSize: 14, color: active ? "#16130c" : catalogDark.sub, letterSpacing: -0.1 }}>{c.name}</Text>
+              <View style={{ backgroundColor: active ? "rgba(0,0,0,0.08)" : catalogDark.tile, paddingHorizontal: 9, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: active ? "rgba(0,0,0,0.08)" : catalogDark.tile }}>
+                <Text style={{ fontSize: 13, fontWeight: "800", color: active ? "#16130c" : catalogDark.sub }}>{count}</Text>
               </View>
             </Pressable>
           );
@@ -225,57 +292,85 @@ export function CategoryStrip({ categories, cat, setCat, products, getProductCat
   );
 }
 
-/** Store product card. Same inner JSX on both form factors; `isTablet` only flips flex for the grid. */
-export function ProductCard({ item, role, prodCats, status, recentMoves, displayPrice, unitName, isTablet, canEdit, onPress }: {
+/** Store product card — the single reusable product row (phone list, tablet
+ *  list, category details, inventory picker). Warm card: cube tile, name +
+ *  status pill, SKU · categories, qty + unit, gold price, chevron.
+ *  Quantities stay white unless stock warns (FÈB/EPUIZE bright tint);
+ *  `selected` highlights the pick. */
+export function ProductCard({ item, role, prodCats, status, recentMoves, displayPrice, unitName, isTablet, canEdit, canViewCost, canToggleAvail, selected, isFirst, isLast, stockItems, variants, baseCost, onPress }: {
   item: Product; role: string; prodCats: Category[]; status: StockStatus;
   recentMoves: StockMovement[]; displayPrice: number; unitName: string;
-  isTablet: boolean; canEdit: boolean; onPress: () => void;
+  isTablet: boolean; canEdit: boolean; canViewCost: boolean; canToggleAvail?: boolean; selected?: boolean; isFirst?: boolean; isLast?: boolean; stockItems?: Item[]; variants?: Variant[]; baseCost?: number; onPress: () => void;
 }) {
-  const cardStyle = { flex: isTablet ? 1 : undefined, backgroundColor: palette.surface, borderRadius: radius.md, padding: 14, borderWidth: 1, borderColor: status.border, ...shadow.card, overflow: "hidden" as const };
+  void role; void recentMoves; void canToggleAvail; void isFirst; void isLast;
+  void displayPrice; void canViewCost; void baseCost;
+  const service = isService(item);
+  const available = isAvailable(item);
+  // Biggest container ("48 boutèy") when the item chain is known.
+  const chain = (stockItems ?? []).filter(i => i.product_id === item.id && !i.is_deleted);
+  const biggest = chain.length
+    ? chain.map(it => ({ it, per: itemFactor(chain, it.id) / minItemFactor(chain, item.id) })).filter(x => x.per > 0).sort((a, b) => b.per - a.per)[0] ?? null
+    : null;
+  const bigCount = biggest ? countInUnit(chain, item.id, biggest.it.id, item.stock_quantity) : item.stock_quantity;
+  const warns = !service && status.label !== "DISPONIB";
+  // Low stock (≤ Seuil Fèb) → 1px ember border; empty stock → 1px red.
+  const warnBorder = !service && status.label !== "DISPONIB"
+    ? (status.label === "EPUIZE" ? palette.danger : palette.accent)
+    : null;
+  // status.sub is the bright-on-dark tint (mint/peach/red).
+  const qtyColor = warns ? status.sub : "#fff";
+  const catLine = prodCats.slice(0, 1).map(c => c.name).join(" • ");
+  const qtyUnit = biggest ? biggest.it.name : unitName;
+  // One price can't represent a multi-variant product — show the count.
+  const chainIds = new Set(chain.map(i => i.id));
+  const variantCount = (variants ?? []).filter(v => !v.is_deleted && chainIds.has(String(v.item_id))).length;
+  const paper = "#f6f1e4";
+  const paperSub = "#a89f88";
+  const cardStyle = {
+    flex: isTablet ? 1 : undefined,
+    flexDirection: "row" as const, alignItems: "center" as const, gap: 12,
+    backgroundColor: selected ? "#2b2b2b" : "#232327",
+    borderWidth: 1,
+    borderColor: warnBorder ?? (selected ? "#3a3a3c" : "rgba(246,241,228,0.12)"),
+    borderRadius: 20,
+    overflow: "hidden" as const,
+    padding: 14,
+    opacity: service && !available ? 0.55 : 1,
+  };
   const inner = (
     <>
-      <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: status.bar }} />
-      <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 12 }}>
-        <View style={{ flex: 1 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            {prodCats.slice(0, 3).map(catInfo => (
-              <View key={catInfo.id} style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: palette.surfaceGrouped, borderWidth: 1, borderColor: palette.separatorSoft, borderRadius: radius.pill, paddingHorizontal: 7, paddingVertical: 3 }}>
-                <Text style={{ fontSize: 11 }}>{catInfo.icon}</Text>
-                <Text style={{ fontSize: 10, fontWeight: "600", color: palette.inkSoft }}>{catInfo.name}</Text>
-              </View>
-            ))}
-            {prodCats.length > 3 && <Text style={{ fontSize: 11, color: palette.muted }}>+{prodCats.length - 3}</Text>}
-            <StockStatusPill status={status} />
-          </View>
-          <Text style={{ fontWeight: "600", fontSize: 14.5, color: palette.ink, marginTop: 8, letterSpacing: -0.2 }} numberOfLines={1}>{item.name}</Text>
-          {role !== "cashier" ? (
-            <Text style={{ color: palette.muted, fontSize: 12, marginTop: 3, fontWeight: "400" }} numberOfLines={1}>{item.sku ?? "—"} · <Text style={{ color: palette.muted3 }}>{item.cost_price ? `${fmt(item.cost_price)} HTG →` : "— →"}</Text> <Text style={{ color: palette.ink, fontWeight: "600", ...monoStyle }}>{displayPrice ? `${fmt(displayPrice)} HTG` : "—"}</Text></Text>
-          ) : (
-            <Text style={{ color: palette.muted, fontSize: 12, marginTop: 3, fontWeight: "400" }} numberOfLines={1}>{item.sku ?? "—"} · <Text style={{ color: palette.ink, fontWeight: "600" }}>{displayPrice ? `${fmt(displayPrice)} HTG` : "—"}</Text></Text>
-          )}
-          <Text style={{ color: palette.muted3, fontSize: 11, marginTop: 2, fontWeight: "500" }}>Seuil fèb {item.low_stock_threshold} · {item.stock_quantity} pcs · {unitName}</Text>
-          {role !== "cashier" && recentMoves.length > 0 && (
-            <View style={{ flexDirection: "row", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-              {recentMoves.map(m => (
-                <View key={m.id} style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: m.type === "in" ? palette.successBg : palette.dangerBg, borderWidth: 0.5, borderColor: m.type === "in" ? palette.successBd : palette.dangerBd, borderRadius: radius.pill, paddingHorizontal: 7, paddingVertical: 3 }}>
-                  <Ionicons name={m.type === "in" ? "arrow-down" : "arrow-up"} size={10} color={m.type === "in" ? palette.success : palette.danger} />
-                  <Text style={{ fontSize: 10, fontWeight: "600", color: m.type === "in" ? palette.success : palette.danger }}>{m.type === "in" ? "+" : "-"}{m.quantity} @ {fmt(m.unit_cost)} HTG</Text>
-                </View>
-              ))}
-            </View>
-          )}
-        </View>
-        <View style={{ alignItems: "center", justifyContent: "center", minWidth: 84 }}>
-          <View style={{ alignItems: "center" }}>
-            <Text style={{ fontWeight: "800", fontSize: 22, color: status.accent, letterSpacing: -0.6, lineHeight: 22 }}>{item.stock_quantity}</Text>
-            <Text style={{ fontSize: 10, color: status.sub, fontWeight: "700", letterSpacing: 0.6, marginTop: 1 }}>NAN STÒK</Text>
+      <View style={{ width: 52, height: 52, borderRadius: 14, backgroundColor: "rgba(221,138,62,0.12)", alignItems: "center", justifyContent: "center" }}>
+        <Ionicons name="cube-outline" size={24} color="#dd8a3e" />
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={{ fontWeight: "800", fontSize: 17, color: paper, letterSpacing: -0.3, flex: 1 }} numberOfLines={1}>{item.name}</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: status.bg, borderWidth: 1, borderColor: status.border, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3 }}>
+            <Text style={{ fontSize: 10, fontWeight: "800", color: status.sub, letterSpacing: 0.3 }}>{status.label}</Text>
           </View>
         </View>
+        <Text style={{ color: paperSub, fontSize: 13, marginTop: 4, fontWeight: "400" }} numberOfLines={1}>
+          {item.sku ?? "—"}{catLine ? ` · ${catLine}` : ""}
+        </Text>
+      </View>
+      <View style={{ alignItems: "flex-end", justifyContent: "center" }}>
+        {!service && (
+          <Text style={{ fontWeight: "800", fontSize: 17, color: qtyColor, ...monoStyle }} numberOfLines={1}>
+            {bigCount} <Text style={{ fontSize: 14, fontWeight: "400", color: paperSub }}>{qtyUnit}</Text>
+          </Text>
+        )}
+        <Text style={{ fontWeight: "600", fontSize: 14, color: paperSub, marginTop: 2 }} numberOfLines={1}>
+          {variantCount} variant
+        </Text>
       </View>
     </>
   );
-  return canEdit ? (
-    <Pressable onPress={onPress} style={cardStyle}>{inner}</Pressable>
+  const pressable = canEdit || (!!canToggleAvail && service);
+  const chevron = pressable
+    ? <Ionicons name="chevron-forward" size={18} color="#636366" style={{ marginRight: -4 }} />
+    : null;
+  return pressable ? (
+    <Pressable onPress={onPress} style={cardStyle}>{inner}{chevron}</Pressable>
   ) : (
     <View style={cardStyle}>{inner}</View>
   );
@@ -288,16 +383,16 @@ export function IncomingBatchCard({ batch: b, movs, products, delivering, onDeli
   const isPending = (b.status ?? "pending") === "pending";
   const totalQty = movs.reduce((s, m) => s + (m.quantity || 0), 0);
   return (
-    <View style={{ backgroundColor: palette.surface, borderRadius: radius.md, borderWidth: 1, borderColor: isPending ? palette.accentGold : palette.successBd, padding: 14, ...shadow.card, overflow: "hidden" }}>
-      <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: isPending ? palette.accentGold : palette.success }} />
+    <View style={{ backgroundColor: palette.surface, borderRadius: radius.md, borderWidth: 1, borderColor: isPending ? "#fff" : palette.successBd, padding: 14, ...shadow.card, overflow: "hidden" }}>
+      <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: isPending ? "#fff" : palette.success }} />
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
         <View style={{ flex: 1 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             <Text style={{ fontWeight: "700", fontSize: 14, color: palette.ink, letterSpacing: -0.2 }} numberOfLines={1}>{b.reference}</Text>
             {isPending ? (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: palette.accentGoldSoft, borderWidth: 1, borderColor: palette.accentGold, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3 }}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: palette.accentGold }} />
-                <Text style={{ fontSize: 10, fontWeight: "800", color: palette.accentGold, letterSpacing: 0.3 }}>AP VINI</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "rgba(255,255,255,0.08)", borderWidth: 1, borderColor: "#fff", borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3 }}>
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: "#fff" }} />
+                <Text style={{ fontSize: 10, fontWeight: "800", color: "#fff", letterSpacing: 0.3 }}>AP VINI</Text>
               </View>
             ) : (
               <View style={{ flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: palette.successBg, borderWidth: 1, borderColor: palette.successBd, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3 }}>
@@ -316,11 +411,11 @@ export function IncomingBatchCard({ batch: b, movs, products, delivering, onDeli
         </View>
         <View style={{ flex: 1, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, padding: 8, alignItems: "center" }}>
           <Text style={{ fontSize: 10, color: palette.muted3, fontWeight: "600" }}>Transpò</Text>
-          <Text style={{ fontSize: 13, fontWeight: "700", color: palette.ink }}>{fmt(Math.round(b.transport_cost ?? 0))} HTG</Text>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: palette.ink }}>{fmtG(Math.round(b.transport_cost ?? 0))}</Text>
         </View>
         <View style={{ flex: 1, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, padding: 8, alignItems: "center" }}>
           <Text style={{ fontSize: 10, color: palette.muted3, fontWeight: "600" }}>Pri total</Text>
-          <Text style={{ fontSize: 13, fontWeight: "700", color: isPending ? palette.accentGold : palette.success }}>{fmt(Math.round(b.total_cost ?? 0))} HTG</Text>
+          <Text style={{ fontSize: 13, fontWeight: "700", color: isPending ? "#fff" : palette.success }}>{fmtG(Math.round(b.total_cost ?? 0))}</Text>
         </View>
       </View>
       <View style={{ marginTop: 8, gap: 5 }}>
@@ -329,7 +424,7 @@ export function IncomingBatchCard({ batch: b, movs, products, delivering, onDeli
           return (
             <View key={m.id} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: palette.surface2, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.sm, paddingHorizontal: 10, paddingVertical: 7 }}>
               <Text style={{ fontSize: 12, fontWeight: "600", color: palette.ink }} numberOfLines={1}>{prod?.name ?? m.product_id} <Text style={{ color: palette.muted3, fontWeight: "500" }}>× {m.quantity}</Text></Text>
-              <Text style={{ fontSize: 11, color: palette.muted }}>{fmt(Math.round(m.total_cost))} HTG</Text>
+              <Text style={{ fontSize: 11, color: palette.muted }}>{fmtG(Math.round(m.total_cost))}</Text>
             </View>
           );
         })}

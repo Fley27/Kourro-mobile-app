@@ -2,6 +2,7 @@
 // Warm bone paper + deep ink + ember accent + gold nuance
 // Mirrors sales-site/src/site.css and web-app/src/lib/theme.ts
 // Usage: import { theme } from "./theme"
+import { useColorScheme } from "react-native";
 
 export const palette = {
   // ── Backgrounds (warm paper) ────────────────────────────────────
@@ -91,14 +92,39 @@ export const shadow = {
   },
 } as const;
 
+// ── Typeface: Inter (single typeface for the entire app) ─────────────
+// Loaded once in App.tsx via @expo-google-fonts/inter. Android cannot
+// combine a custom fontFamily with fontWeight (it breaks rendering), so
+// call sites must pick the family-per-weight token below instead of
+// setting fontWeight alongside fontFamily.
+export const fonts = {
+  regular: "Inter_400Regular",
+  medium: "Inter_500Medium",
+  semibold: "Inter_600SemiBold",
+  bold: "Inter_700Bold",
+} as const;
+
+export type FontWeightName = "regular" | "medium" | "semibold" | "bold";
+
+/** Map a numeric/text weight intent to its Inter family (no fontWeight). */
+export function fontForWeight(weight?: number | string): string {
+  const w = typeof weight === "string" ? parseInt(weight, 10) : (weight ?? 400);
+  if (Number.isFinite(w)) {
+    if (w >= 700) return fonts.bold;
+    if (w >= 600) return fonts.semibold;
+    if (w >= 500) return fonts.medium;
+  }
+  return fonts.regular;
+}
+
 export const typography = {
-  // Inter / Quicksand tight tracking
-  heroTitle: { fontFamily: "Quicksand_700Bold", fontSize: 28, fontWeight: "700" as const, letterSpacing: -1.2, lineHeight: 32, color: palette.ink },
-  heroTitleItalic: { fontFamily: "Quicksand_300Light", fontStyle: "italic" as const, color: palette.accentGold },
-  sectionTitle: { fontFamily: "Quicksand_700Bold", fontSize: 13, fontWeight: "700" as const, letterSpacing: -0.2, color: palette.ink },
-  kpiValue: { fontFamily: "Quicksand_700Bold", fontSize: 22, fontWeight: "800" as const, letterSpacing: -0.8, color: palette.ink },
-  eyebrow: { fontFamily: "Quicksand_700Bold", fontSize: 10, fontWeight: "700" as const, letterSpacing: 1.1, textTransform: "uppercase" as const, color: palette.muted2 },
-  body: { fontFamily: "Roboto_400Regular", fontSize: 13, color: palette.muted, lineHeight: 18 },
+  // Inter tight tracking. No fontWeight alongside fontFamily (Android).
+  heroTitle: { fontFamily: fonts.bold, fontSize: 28, letterSpacing: -1.2, lineHeight: 32, color: palette.ink },
+  heroTitleItalic: { fontFamily: "Inter_300Light", fontStyle: "italic" as const, color: palette.accentGold },
+  sectionTitle: { fontFamily: fonts.bold, fontSize: 13, letterSpacing: -0.2, color: palette.ink },
+  kpiValue: { fontFamily: fonts.bold, fontSize: 22, letterSpacing: -0.8, color: palette.ink },
+  eyebrow: { fontFamily: fonts.bold, fontSize: 10, letterSpacing: 1.1, textTransform: "uppercase" as const, color: palette.muted2 },
+  body: { fontFamily: fonts.regular, fontSize: 13, color: palette.muted, lineHeight: 18 },
 } as const;
 
 // Animation presets — Apple-like
@@ -121,5 +147,98 @@ export const cardLuxury = {
   ...shadow.card,
 } as const;
 
-export const theme = { palette, radius, shadow, typography, motion, cardLuxury, hairline };
+export const theme = { palette, radius, shadow, fonts, typography, motion, cardLuxury, hairline };
 export default theme;
+
+// ── Dark mode (warm charcoal — navbar + menu adapt via usePalette) ────
+// System-driven: follows Appearance / useColorScheme. Same key shape as
+// `palette` so call sites can swap `palette` → `usePalette()` with no
+// other changes.
+export const darkPalette = {
+  // ── Backgrounds (warm black) ────────────────────────────────────
+  bg: "#14110b",
+  bgWarm: "#1a1610",
+
+  // ── Surfaces (elevated warm charcoal) ───────────────────────────
+  surface: "#211d14",
+  surface2: "#262117",
+  surfaceGrouped: "#2c2719",
+
+  // ── Borders ─────────────────────────────────────────────────────
+  hairline: "rgba(246,241,228,0.16)",
+  hairlineStrong: "rgba(246,241,228,0.32)",
+  separator: "#3a3423",
+  separatorSoft: "#262117",
+
+  // ── Text (warm paper on charcoal) ───────────────────────────────
+  ink: "#f6f1e4",
+  ink2: "#f6f1e4", // active nav pill — paper circle on dark
+  inkSoft: "#d9d1ba",
+  muted: "#a89f88",
+  muted2: "#bdb39a",
+  muted3: "#8d8471",
+
+  // ── Accent — signature ember (unchanged) ────────────────────────
+  accent: "#ff4d00",
+  emberInk: "#fff6ee", // text on ember
+  accentGold: "#c8a24a",
+  accentGoldSoft: "rgba(200,162,74,0.22)",
+
+  // ── Semantic (lifted opacity so Bg tints read on dark) ──────────
+  success: "#4cae7f",
+  successBg: "rgba(76,174,127,0.18)",
+  successBd: "rgba(76,174,127,0.4)",
+  successDot: "#4cae7f",
+  warning: "#d99a2b",
+  warningBg: "rgba(217,154,43,0.2)",
+  warningBd: "rgba(200,162,74,0.5)",
+  warningDot: "#d99a2b",
+  danger: "#e06c5b",
+  dangerBg: "rgba(224,108,91,0.2)",
+  dangerBd: "rgba(224,108,91,0.45)",
+  dangerDot: "#e06c5b",
+
+  // Vibrant (for analytics)
+  blue: "#4da3e0",
+  blueBg: "rgba(77,163,224,0.2)",
+  blueBd: "rgba(77,163,224,0.45)",
+  violet: "#a78bfa",
+  violetBg: "rgba(167,139,250,0.2)",
+  violetBd: "rgba(167,139,250,0.45)",
+  emerald: "#4cae7f",
+  emeraldSoft: "rgba(76,174,127,0.2)",
+} as const;
+
+// Text scale applied to navbar + menu labels (+15% readability bump).
+export const NAV_MENU_TEXT_SCALE = 1.15;
+
+// Top-screen / modal icon buttons — gray circle + white icon (customer add
+// button language). Secondary gray is one step lighter for hierarchy.
+// Light variant is for white/bone sheets only.
+export const topIconBtn = {
+  size: 56,
+  radius: 28,
+  bg: "#2b2b2b",
+  bgSecondary: "#3a3a3c",
+  icon: "#fff",
+  iconSize: 26,
+} as const;
+
+export const topIconBtnLight = {
+  size: 56,
+  radius: 28,
+  bg: "#F2F2F7",
+  icon: "#000",
+  iconSize: 26,
+} as const;
+
+export type Palette = typeof palette;
+
+export function usePalette(): Palette {
+  const scheme = useColorScheme();
+  return (scheme === "dark" ? (darkPalette as unknown as Palette) : palette);
+}
+
+export function isDarkScheme(scheme: string | null | undefined): boolean {
+  return scheme === "dark";
+}

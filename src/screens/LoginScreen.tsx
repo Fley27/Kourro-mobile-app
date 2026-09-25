@@ -15,6 +15,8 @@ const ROLE_META: Record<Role, { label: string; color: string; bg: string; icon: 
   admin: { label: "Admin", color: palette.violet, bg: palette.violetBg, icon: "shield-checkmark-outline" },
   manager: { label: "Jestyonè", color: palette.blue, bg: palette.blueBg, icon: "briefcase-outline" },
   cashier: { label: "Kasye", color: palette.emerald, bg: palette.emeraldSoft, icon: "cart-outline" },
+  associate: { label: "Asosye", color: palette.emerald, bg: palette.emeraldSoft, icon: "person-outline" },
+  cook: { label: "Kwizinye", color: palette.warning, bg: palette.warningBg, icon: "restaurant-outline" },
 };
 
 type Mode = "signin" | "signup";
@@ -29,7 +31,7 @@ function BrandHero({ compact }: { compact?: boolean }) {
       <View style={{ width: 72, height: 72, borderRadius: 22, backgroundColor: palette.ink2, borderWidth: 1, borderColor: "rgba(200,162,74,0.55)", alignItems: "center", justifyContent: "center", shadowColor: palette.accentGold, shadowOpacity: 0.35, shadowRadius: 18, shadowOffset: { width: 0, height: 6 }, elevation: 8 }}>
         <Image source={require("../../assets/kourro-logo.png")} style={{ width: 52, height: 52, resizeMode: "contain" }} />
       </View>
-      <Text allowFontScaling={false} style={{ fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 22, letterSpacing: -0.6, marginTop: 18, textAlign: "center" }}>
+      <Text allowFontScaling={false} style={{ fontFamily: "Inter_700Bold", color: "#fff", fontWeight: "700", fontSize: 22, letterSpacing: -0.6, marginTop: 18, textAlign: "center" }}>
         Kourro
       </Text>
       <Text allowFontScaling={false} style={{ color: "rgba(255,255,255,0.55)", fontSize: 12, marginTop: 8, textAlign: "center", lineHeight: 17 }}>
@@ -62,7 +64,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
     marginTop: 8,
     fontSize: 14,
     color: palette.ink,
-    fontFamily: "Roboto_400Regular",
+    fontFamily: "Inter_400Regular",
   });
 
   const fieldFocus = (k: "email" | "password" | "name" | "store") => ({
@@ -80,10 +82,10 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
           <View style={{ backgroundColor: palette.surface, borderRadius: radius.xl, padding: 22, borderWidth: 0.5, borderColor: "rgba(200,162,74,0.35)", ...shadow.elevated }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingBottom: 14, borderBottomWidth: 0.5, borderColor: palette.separator }}>
               <View style={{ width: 48, height: 48, borderRadius: 24, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: ROLE_META[cached.role].color }}>
-                <Text allowFontScaling={false} style={{ fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 17 }}>{cached.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
+                <Text allowFontScaling={false} style={{ fontFamily: "Inter_700Bold", color: "#fff", fontWeight: "700", fontSize: 17 }}>{cached.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
               </View>
               <View style={{ flex: 1 }}>
-                <Text allowFontScaling={false} style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 16, color: palette.ink }} numberOfLines={1}>{cached.name}</Text>
+                <Text allowFontScaling={false} style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 16, color: palette.ink }} numberOfLines={1}>{cached.name}</Text>
                 <Text allowFontScaling={false} style={{ fontSize: 11, color: palette.muted2, marginTop: 2 }}>{ROLE_META[cached.role].label} • {cached.store}</Text>
               </View>
             </View>
@@ -138,7 +140,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
 
             {!isLiveSupabase && (
               <>
-                <Text allowFontScaling={false} style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 11, letterSpacing: 1.2, textTransform: "uppercase", color: palette.muted2 }}>Antre Demo — chwazi wòl ou</Text>
+                <Text allowFontScaling={false} style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 11, letterSpacing: 1.2, textTransform: "uppercase", color: palette.muted2 }}>Antre Demo — chwazi wòl ou</Text>
                 <Text allowFontScaling={false} style={{ fontSize: 11, color: palette.muted2, marginTop: 4, marginBottom: 14 }}>Pa gen backend konekte (localhost). Chak wòl gen kòd sekrè li — pre 1, li ap sèvi tou kòm PIN. One tap pou antre.</Text>
                 <View style={{ backgroundColor: palette.surface, borderRadius: radius.xl, borderWidth: 0.5, borderColor: palette.hairline, overflow: "hidden", ...shadow.card }}>
                   {DEMO_CREDENTIALS.map((c, i) => {
@@ -147,12 +149,12 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
                       <Pressable key={c.userId} onPress={async () => { await demoSignIn(c.userId); onAuthed(); }} style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 13, borderTopWidth: i === 0 ? 0 : 0.5, borderTopColor: palette.separator, borderBottomWidth: i === DEMO_CREDENTIALS.length - 1 ? 0 : 0.5, borderBottomColor: palette.separator }}>
                         <View style={{ position: "relative" }}>
                           <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: meta.color }}>
-                            <Text allowFontScaling={false} style={{ fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 14 }}>{c.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
+                            <Text allowFontScaling={false} style={{ fontFamily: "Inter_700Bold", color: "#fff", fontWeight: "700", fontSize: 14 }}>{c.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
                           </View>
                           <View style={{ position: "absolute", right: -2, bottom: -2, width: 15, height: 15, borderRadius: 8, backgroundColor: palette.successDot, borderWidth: 2, borderColor: palette.surface }} />
                         </View>
                         <View style={{ flex: 1 }}>
-                          <Text allowFontScaling={false} style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, letterSpacing: -0.2 }} numberOfLines={1}>{c.name}</Text>
+                          <Text allowFontScaling={false} style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, letterSpacing: -0.2 }} numberOfLines={1}>{c.name}</Text>
                           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 3 }}>
                             <View style={{ height: 18, borderRadius: 9, paddingHorizontal: 7, backgroundColor: meta.bg, borderWidth: 0.5, borderColor: meta.color }}>
                               <Text allowFontScaling={false} style={{ fontWeight: "700", fontSize: 8, color: meta.color, letterSpacing: 0.6, textTransform: "uppercase" }}>{meta.label}</Text>
@@ -162,7 +164,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
                         </View>
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                           <View style={{ paddingHorizontal: 9, height: 26, borderRadius: 9, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: "rgba(200,162,74,0.45)", alignItems: "center", justifyContent: "center" }}>
-                            <Text allowFontScaling={false} style={{ fontFamily: "Quicksand_700Bold", fontWeight: "800", fontSize: 12, color: palette.accentGold, letterSpacing: 1 }}>KÒD {c.pin}</Text>
+                            <Text allowFontScaling={false} style={{ fontFamily: "Inter_700Bold", fontWeight: "800", fontSize: 12, color: palette.accentGold, letterSpacing: 1 }}>KÒD {c.pin}</Text>
                           </View>
                           <Ionicons name="chevron-forward" size={16} color={palette.muted3} />
                         </View>
@@ -214,7 +216,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
                 )}
               </Pressable>
 
-            <Text allowFontScaling={false} style={{ fontSize: 10, color: palette.muted3, textAlign: "center", marginTop: 24, letterSpacing: 0.4 }}>HTG • Offline-first • Byen pwotèje</Text>
+            <Text allowFontScaling={false} style={{ fontSize: 10, color: palette.muted3, textAlign: "center", marginTop: 24, letterSpacing: 0.4 }}>G • Offline-first • Byen pwotèje</Text>
           </View>
           </View>
         </ScrollView>

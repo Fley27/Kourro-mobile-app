@@ -9,8 +9,8 @@ export type Props = AnalyticsTabProps;
 
 export default function AnalyticsTab(props: AnalyticsTabProps) {
   const { isTablet, isLandscape } = useResponsive();
-  // Tablet dashboard needs landscape width; portrait tablets use phone stack.
-  if (isTablet && isLandscape) {
+  // Tablet dashboard shows in portrait; landscape tablets use phone stack.
+  if (isTablet && !isLandscape) {
     return <AnalyticsTablet {...props} />;
   }
   return <AnalyticsPhone {...props} />;

@@ -6,7 +6,7 @@ import { getDb } from "../db";
 import { ht } from "../i18n";
 import { USERS, getUserById } from "../users";
 import { notifyLocal } from "../notifications";
-import { fmt, monoStyle } from "../format";
+import { fmtG, fmt, monoStyle } from "../format";
 import { useResponsive, centerBox, sheetBox } from "../responsive";
 import { salesEvents } from "../salesEvents";
 
@@ -271,6 +271,12 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
     await db.runAsync("UPDATE daily_reports SET status = ?, expected_cash = ?, actual_cash = ?, deficit = ?, submitted_at = ?, closed_at = ? WHERE user_id = ? AND report_date = ? AND store_id = ?",
       ["closed", expectedCash, finalActual, deficitAmt, new Date().toISOString(), new Date().toISOString(), currentUser.id, today, storeId]);
 
+    // Shift end wipes any unfinished cart draft for this cashier.
+    try {
+      const { clearCartDraft } = await import("../sales/cartDraft");
+      await clearCartDraft(db, storeId, currentUser.id);
+    } catch {}
+
     // Accumulate the cashier's deficit on a persistent running balance
     if (isCashier && deficitAmt > 0) {
       const existing = await db.getAllAsync("SELECT * FROM cashier_deficits WHERE status = ?", ["open"]);
@@ -301,14 +307,14 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
         const supRole = (getUserById(uid)?.role ?? "").toUpperCase();
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
           [`notif-${Date.now()}-${uid}-${Math.random().toString(36).slice(2, 5)}`, uid, "report_closed", `rep-${currentUser.id}-${today}`,
-            `${currentUser.name} (${role.toUpperCase()}) fèmen rapò jounen li. Atann ${fmt(expectedCash)} HTG, konte ${fmt(finalActual ?? 0)} HTG — Defisi: ${fmt(deficitAmt)} HTG${deficitAmt>0?` (dèt anrejistre pou ${currentUser.name})`:""}`, "pending", new Date().toISOString()]);
+            `${currentUser.name} (${role.toUpperCase()}) fèmen rapò jounen li. Atann ${fmtG(expectedCash)}, konte ${fmtG(finalActual ?? 0)} — Defisi: ${fmtG(deficitAmt)}${deficitAmt>0?` (dèt anrejistre pou ${currentUser.name})`:""}`, "pending", new Date().toISOString()]);
       }
     }
     const supLabel = cashierStore ? `Manadjè/Admin (${cashierStore}) + Owner` : "Manadjè/Admin/Owner";
     Alert.alert("Rapò Fèmen", isSupervisor
       ? `Rapò ${role.toUpperCase()} fèmen. Notifikasyon voye bay ${supLabel}.`
-      : `Rapò kesye fèmen. Atann ${fmt(expectedCash)} HTG, konte ${fmt(finalActual ?? 0)} HTG — Defisi ${fmt(deficitAmt)} HTG anrejistre. Notifikasyon voye bay ${supLabel}.`);
-    notifyLocal(deficitAmt > 0 ? `Rapò fèmen — Defisi ${fmt(deficitAmt)} HTG` : "Rapò fèmen", `${currentUser.name} fèmen rapò jounen li (atann ${fmt(expectedCash)} HTG, konte ${fmt(finalActual ?? 0)} HTG, defisi ${fmt(deficitAmt)} HTG)`);
+      : `Rapò kesye fèmen. Atann ${fmtG(expectedCash)}, konte ${fmtG(finalActual ?? 0)} — Defisi ${fmtG(deficitAmt)} anrejistre. Notifikasyon voye bay ${supLabel}.`);
+    notifyLocal(deficitAmt > 0 ? `Rapò fèmen — Defisi ${fmtG(deficitAmt)}` : "Rapò fèmen", `${currentUser.name} fèmen rapò jounen li (atann ${fmtG(expectedCash)}, konte ${fmtG(finalActual ?? 0)}, defisi ${fmtG(deficitAmt)})`);
     try { const { salesEvents } = await import("../salesEvents"); salesEvents.emit(); } catch {}
     load({ silent: true });
     } catch (e: any) {
@@ -367,7 +373,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
     if (openDebts.length === 0) return Alert.alert("Pa gen defisi", "Pa gen defisi kesye ouvè ki poko revize kounye a.");
     try {
     const total = openDebts.reduce((s, d) => s + Number(d.deficit ?? 0), 0);
-    await notifyCharges(`Rapèl: gen ${openDebts.length} defisi kesye ouvè (total ${fmt(total)} HTG). Manadjè/Admin/Owner dwe revize anvan fèmen mwa.`);
+    await notifyCharges(`Rapèl: gen ${openDebts.length} defisi kesye ouvè (total ${fmtG(total)}). Manadjè/Admin/Owner dwe revize anvan fèmen mwa.`);
     Alert.alert("Rapèl voye", `Rapèl defisi voye bay Manadjè/Admin/Owner (${openDebts.length} kesye).`);
     load({ silent: true });
     } catch (e: any) {
@@ -412,12 +418,12 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
       await db.runAsync("INSERT INTO monthly_losses (id, store_id, month, cashier_id, amount, origin, reason, registered_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
         [`loss-${Date.now()}`, storeId, String(r.report_date).slice(0, 7), r.user_id, deficitAmt, "waived_negligible", reason ?? "Defisi negligeable", currentUser?.id ?? null, ts]);
     }
-    await notifyCharges(`${cashierName}: ${DECISION_MSG[decision] ?? decision} (${deficitAmt} HTG) pa ${currentUser?.name ?? currentUser?.id}.`);
-    notifyLocal("Revizyon rapò", `${cashierName} (${r.report_date}) · ${meta.label} · ${fmt(deficitAmt)} HTG — ${currentUser?.name ?? currentUser?.role}`);
+    await notifyCharges(`${cashierName}: ${DECISION_MSG[decision] ?? decision} (${fmtG(deficitAmt)}) pa ${currentUser?.name ?? currentUser?.id}.`);
+    notifyLocal("Revizyon rapò", `${cashierName} (${r.report_date}) · ${meta.label} · ${fmtG(deficitAmt)} — ${currentUser?.name ?? currentUser?.role}`);
     Alert.alert(meta.label, decision === "revoke_to_debt"
-      ? `Dèt ${fmt(deficitAmt)} HTG reouvri pou ${cashierName}; pèt la konpense nan rejis la.`
+      ? `Dèt ${fmtG(deficitAmt)} reouvri pou ${cashierName}; pèt la konpense nan rejis la.`
       : decision === "debt"
-        ? `Dèt total ${cashierName}: ${fmt(totalDebtOf(r.user_id))} HTG.`
+        ? `Dèt total ${cashierName}: ${fmtG(totalDebtOf(r.user_id))}.`
         : `Rapò ${cashierName} (${r.report_date}) rekòde: ${meta.label}.`);
     const { salesEvents: ev } = await import("../salesEvents");
     try { ev.emit(); } catch {}
@@ -446,7 +452,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
     if (dup) { Alert.alert("Deja egziste","Gen yon règleman ouvè deja pou peryòd sa"); return; }
     await db.runAsync("INSERT INTO deficit_settlements (id, store_id, cashier_id, period_start, period_end, deficit_ids, total, paid, status, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
       [`set-${Date.now()}`, storeId, cashierId, dates[0], dates[dates.length-1], deficit_ids, total, 0, "open", currentUser.id, ts]);
-    Alert.alert("Règleman kreye", `${getUserById(cashierId)?.name ?? cashierId}: ${opens.length} dèt • ${total} HTG`);
+    Alert.alert("Règleman kreye", `${getUserById(cashierId)?.name ?? cashierId}: ${opens.length} dèt • ${fmtG(total)}`);
     load({ silent: true });
   }
   async function paySettlement(settlementId: string, amount: number) {
@@ -464,7 +470,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
       for (const did of ids) { try { await db.runAsync("UPDATE cashier_deficits SET status = ?, resolved_by = ?, resolved_at = ? WHERE id = ?", ["paid", currentUser.id, new Date().toISOString(), did]); } catch {} }
       notifyLocal("Règleman peye", (getUserById(s.cashier_id)?.name ?? s.cashier_id)+" peye nèt");
     }
-    Alert.alert(newPaid>=Number(s.total)?"Peye nèt":"Peman anrejistre", amount+" HTG");
+    Alert.alert(newPaid>=Number(s.total)?"Peye nèt":"Peman anrejistre", fmtG(amount));
     load({ silent: true });
   }
   async function waiveSettlement(settlementId: string) {
@@ -498,7 +504,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
       {/* Header */}
       <View style={{ backgroundColor: palette.ink2, borderRadius: radius.lg, padding: 16, ...shadow.card, borderTopWidth: 2.5, borderTopColor: palette.accentGold }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <Text style={{ flex: 1, fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 20, letterSpacing: -0.3 }} numberOfLines={1}>{todayStr}</Text>
+          <Text style={{ flex: 1, fontFamily: "Inter_700Bold", color: "#fff", fontWeight: "700", fontSize: 20, letterSpacing: -0.3 }} numberOfLines={1}>{todayStr}</Text>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <Pressable onPress={() => { setRefreshing(true); load({ silent: true }); }} style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.08)", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(255,255,255,0.12)" }}>
             {refreshing ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="refresh" size={15} color="#fff" />}
@@ -506,7 +512,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
           {role && (
             <View style={{ flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: "rgba(200,162,74,0.16)", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)" }}>
               <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: palette.accentGold }} />
-              <Text style={{ fontFamily: "Quicksand_700Bold", color: palette.accentGold, fontWeight: "700", fontSize: 10, letterSpacing: 0.4, textTransform: "uppercase" }}>{role === "owner" ? "Patwon" : role}</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", color: palette.accentGold, fontWeight: "700", fontSize: 10, letterSpacing: 0.4, textTransform: "uppercase" }}>{role === "owner" ? "Patwon" : role}</Text>
             </View>
           )}
           </View>
@@ -520,11 +526,11 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
             <Ionicons name="cash-outline" size={22} color={palette.success} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Total Vant Jodi a</Text>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 34, color: palette.ink, letterSpacing: -0.5 }}>{salesTotal} <Text style={{ fontSize: 16, color: palette.muted2 }}>HTG</Text></Text>
+            <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Total Vant Jodi a</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 34, color: palette.ink, letterSpacing: -0.5 }}>{salesTotal} <Text style={{ fontSize: 16, color: palette.muted2 }}>G</Text></Text>
           </View>
           <View style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: palette.successBg }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", color: palette.success, fontWeight: "700", fontSize: 10, textTransform: "uppercase" }}>
+            <Text style={{ fontFamily: "Inter_700Bold", color: palette.success, fontWeight: "700", fontSize: 10, textTransform: "uppercase" }}>
               {isSupervisor ? (role === "owner" ? "Magazen" : "Sòm Ekip") : "Mwen"}
             </Text>
           </View>
@@ -532,26 +538,26 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
 
         {/* Payment breakdown */}
         <View style={{ height: 0.5, backgroundColor: palette.separator, marginTop: 16 }} />
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7, marginTop: 12 }}>Repatisyon Peman</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7, marginTop: 12 }}>Repatisyon Peman</Text>
         <View style={{ marginTop: 8, gap: 8 }}>
           {[{ k: "Kach", v: cashTotal, c: palette.success }, { k: "MonCash", v: moncashTotal, c: palette.blue }, { k: "NatCash", v: natcashTotal, c: palette.warningDot }, { k: "Kredi", v: creditTotal, c: palette.accentGold }, { k: "Kolekte Dèt", v: collectedTotal, c: palette.emerald }].map(x => {
             const pct = Math.max(0, Math.min(100, (x.v / (salesTotal || 1)) * 100));
             return (
               <View key={x.k} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
                 <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: x.c }} />
-                <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted2, flex: 1, width: 90 }}>{x.k}</Text>
+                <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted2, flex: 1, width: 90 }}>{x.k}</Text>
                 <View style={{ flex: 0.7, height: 5, borderRadius: 3, backgroundColor: palette.surfaceGrouped, overflow: "hidden" }}>
                   <View style={{ width: `${pct}%`, height: 5, borderRadius: 3, backgroundColor: x.c }} />
                 </View>
-                <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13, color: x.c, minWidth: 84, textAlign: "right", ...monoStyle }}>{fmt(x.v)} HTG</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13, color: x.c, minWidth: 84, textAlign: "right", ...monoStyle }}>{fmtG(x.v)}</Text>
               </View>
             );
           })}
         </View>
         <View style={{ height: 0.5, backgroundColor: palette.separator, marginTop: 12 }} />
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted, fontWeight: "700" }}>{role === "owner" ? "Total Magazen" : "Vant Total (Ekip ou)"}</Text>
-          <Text style={{ fontFamily: "Quicksand_700Bold", color: palette.success, fontWeight: "700", fontSize: 20, textAlign: "right", ...monoStyle }}>{fmt(salesTotal)} HTG</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted, fontWeight: "700" }}>{role === "owner" ? "Total Magazen" : "Vant Total (Ekip ou)"}</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", color: palette.success, fontWeight: "700", fontSize: 20, textAlign: "right", ...monoStyle }}>{fmtG(salesTotal)}</Text>
         </View>
       </View>
 
@@ -563,8 +569,8 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
               <Ionicons name="briefcase-outline" size={18} color={palette.accentGold} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Kach Espere nan Kès</Text>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 24, color: palette.ink, letterSpacing: -0.3, marginTop: 2, textAlign: "right", ...monoStyle }}>{fmt(expectedCash)} <Text style={{ fontSize: 13, color: palette.muted2 }}>HTG</Text></Text>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Kach Espere nan Kès</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 24, color: palette.ink, letterSpacing: -0.3, marginTop: 2, textAlign: "right", ...monoStyle }}>{fmt(expectedCash)} <Text style={{ fontSize: 13, color: palette.muted2 }}>G</Text></Text>
             </View>
           </View>
           <View style={{ height: 0.5, backgroundColor: palette.separator, marginTop: 12 }} />
@@ -576,30 +582,30 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
               { lbl: "Retrè", v: myWithdrawalsTotal, add: false },
             ].map(row => (
               <View key={row.lbl} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted }}>{row.lbl}</Text>
-                <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13, color: row.add ? palette.inkSoft : palette.danger }}>{row.add ? "+" : "−"}{fmt(row.v)} HTG</Text>
+                <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted }}>{row.lbl}</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13, color: row.add ? palette.inkSoft : palette.danger }}>{row.add ? "+" : "−"}{fmtG(row.v)}</Text>
               </View>
             ))}
-            <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2, marginTop: 6 }}>{myOpening} ouvèti + {myCashTotal} vant kach + {myCollectedTotal} kolekte − {myWithdrawalsTotal} retrè = kach espere</Text>
-            <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted3, marginTop: 4 }}>Sous ouvèti: {myShiftToday ? `${myShiftToday.id} • ${String(myShiftToday.start_time ?? "?").slice(0, 16)} • ${myShiftToday.status} • kesye=${myShiftToday.cashier_id ?? "?"}` : "okenn chanjman jwenn"}</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2, marginTop: 6 }}>{myOpening} ouvèti + {myCashTotal} vant kach + {myCollectedTotal} kolekte − {myWithdrawalsTotal} retrè = kach espere</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted3, marginTop: 4 }}>Sous ouvèti: {myShiftToday ? `${myShiftToday.id} • ${String(myShiftToday.start_time ?? "?").slice(0, 16)} • ${myShiftToday.status} • kesye=${myShiftToday.cashier_id ?? "?"}` : "okenn chanjman jwenn"}</Text>
           </View>
           <View style={{ height: 0.5, backgroundColor: palette.separator, marginTop: 10 }} />
           {inventoryPickups.length > 0 && (
             <View style={{ marginTop: 10, gap: 6 }}>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "600" }}>Kach depans ({fmt(inventoryTotal)} HTG):</Text>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "600" }}>Kach depans ({fmtG(inventoryTotal)}):</Text>
               {inventoryPickups.map((w: any) => (
                 <View key={w.id} style={{ flexDirection: "row", justifyContent: "space-between", backgroundColor: palette.warningBg, padding: 9, borderRadius: radius.md, borderWidth: 0.5, borderColor: palette.warningBd, alignItems: "center" }}>
                   <View style={{ flex: 1 }}>
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 11 }}>Kach depans {w.amount} HTG — {w.reason}</Text>
-                    <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2 }}>Depi kès {getUserById(w.taken_by ?? "")?.name ?? w.taken_by ?? "—"} • Anrejistre pa {getUserById(w.created_by)?.name ?? w.created_by}</Text>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 11 }}>Kach depans {fmtG(w.amount)} — {w.reason}</Text>
+                    <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2 }}>Depi kès {getUserById(w.taken_by ?? "")?.name ?? w.taken_by ?? "—"} • Anrejistre pa {getUserById(w.created_by)?.name ?? w.created_by}</Text>
                   </View>
-                  <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.success, fontWeight: "600" }}>✓ {w.validated_by ? "Valide" : "Pandan"}</Text>
+                  <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.success, fontWeight: "600" }}>✓ {w.validated_by ? "Valide" : "Pandan"}</Text>
                 </View>
               ))}
             </View>
           )}
           {withdrawals.length > 0 && (
-            <Text style={{ fontFamily: "Roboto_400Regular", fontWeight: "600", fontSize: 10, color: palette.muted2, marginTop: 8 }}>{withdrawals.length} retrè • Detay nan seksyon "Retrè Jounen" anba</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", fontWeight: "600", fontSize: 10, color: palette.muted2, marginTop: 8 }}>{withdrawals.length} retrè • Detay nan seksyon "Retrè Jounen" anba</Text>
           )}
         </View>
       )}
@@ -608,8 +614,8 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
       {actual !== null ? (
         <View style={{ marginTop: 14, backgroundColor: deficit === 0 ? palette.successBg : deficit! > 0 ? palette.dangerBg : palette.successBg, borderRadius: radius.lg, padding: 16, borderWidth: 0.5, borderColor: deficit === 0 ? palette.successBd : palette.dangerBd, flexDirection: "row", justifyContent: "space-between", alignItems: "center", ...shadow.soft }}>
           <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14, color: deficit! === 0 ? palette.success : palette.danger }}>{deficit! === 0 ? `✓ Balanse` : deficit! > 0 ? `⚠️ Defisi: ${fmt(deficit!)} HTG` : `✓ Sipè: ${fmt(Math.abs(deficit!))} HTG`}</Text>
-            <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: deficit === 0 ? palette.success : palette.danger }}>Espere {fmt(expectedCash)} HTG • Konte {fmt(actual)} HTG</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 14, color: deficit! === 0 ? palette.success : palette.danger }}>{deficit! === 0 ? `✓ Balanse` : deficit! > 0 ? `⚠️ Defisi: ${fmtG(deficit!)}` : `✓ Sipè: ${fmtG(Math.abs(deficit!))}`}</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: deficit === 0 ? palette.success : palette.danger }}>Espere {fmtG(expectedCash)} • Konte {fmtG(actual)}</Text>
           </View>
           <View style={{ width: 40, height: 40, borderRadius: 13, backgroundColor: deficit === 0 ? palette.successBg : palette.dangerBg, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name={deficit === 0 ? "checkmark-circle" : "warning"} size={22} color={deficit === 0 ? palette.success : palette.danger} />
@@ -620,10 +626,10 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
           <View style={{ width: 52, height: 52, borderRadius: 17, backgroundColor: palette.accentGoldSoft, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: palette.accentGold }}>
             <Ionicons name="cash-outline" size={24} color={palette.accentGold} />
           </View>
-          <Text style={{ fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 15, marginTop: 10 }}>Konte Kach Ou Nan Kès La</Text>
-          <Text style={{ fontFamily: "Roboto_400Regular", color: palette.muted3, fontSize: 11, marginTop: 3, textAlign: "center" }}>Konte tout kòb ou genyen nan kès la, antre montan an. Dwe konpare ak {fmt(expectedCash)} HTG ki espere.</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", color: "#fff", fontWeight: "700", fontSize: 15, marginTop: 10 }}>Konte Kach Ou Nan Kès La</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", color: palette.muted3, fontSize: 11, marginTop: 3, textAlign: "center" }}>Konte tout kòb ou genyen nan kès la, antre montan an. Dwe konpare ak {fmtG(expectedCash)} ki espere.</Text>
           <Pressable onPress={() => setShowEnd(true)} style={{ marginTop: 12, backgroundColor: palette.success, paddingHorizontal: 18, paddingVertical: 12, borderRadius: radius.pill }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 13 }}>Konte & Antre Montan Mwen</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", color: "#fff", fontWeight: "700", fontSize: 13 }}>Konte & Antre Montan Mwen</Text>
           </Pressable>
         </View>
       )}
@@ -637,8 +643,8 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                 <Ionicons name="shield-checkmark-outline" size={17} color={palette.accentGold} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13, fontFamily: "Quicksand_700Bold", letterSpacing: 0.2 }}>Kontwòl Rapò Kesye</Text>
-                <Text style={{ color: palette.muted3, fontSize: 9.5, marginTop: 2, fontFamily: "Roboto_400Regular" }}>
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13, fontFamily: "Inter_700Bold", letterSpacing: 0.2 }}>Kontwòl Rapò Kesye</Text>
+                <Text style={{ color: palette.muted3, fontSize: 9.5, marginTop: 2, fontFamily: "Inter_400Regular" }}>
                   {pendingReports.length} pou revize · {waivedReports.length} apwobasyon · {openDebts.length} dèt ouvè
                 </Text>
               </View>
@@ -692,10 +698,10 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                           <Text style={{ fontWeight: "800", fontSize: 12, color: revAmt > 0 ? palette.warning : palette.success }}>{initialsOf(cashierName)}</Text>
                         </View>
                         <View style={{ flex: 1 }}>
-                          <Text style={{ fontWeight: "700", fontSize: 12.5, color: palette.ink, fontFamily: "Quicksand_700Bold" }}>
+                          <Text style={{ fontWeight: "700", fontSize: 12.5, color: palette.ink, fontFamily: "Inter_700Bold" }}>
                             {cashierName} <Text style={{ fontWeight: "600", color: palette.muted2, fontSize: 9.5 }}>KESYE · {(cashierStore ?? "").toUpperCase()}</Text>
                           </Text>
-                          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>Rapò {r.report_date} · Fèmen {td(r.closed_at ?? r.submitted_at ?? r.created_at)}</Text>
+                          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>Rapò {r.report_date} · Fèmen {td(r.closed_at ?? r.submitted_at ?? r.created_at)}</Text>
                         </View>
                         {revAmt > 0 ? (
                           <Text style={{ paddingHorizontal: 9, paddingVertical: 3, borderRadius: 999, backgroundColor: palette.warningBg, color: palette.warning, fontWeight: "800", fontSize: 10.5, overflow: "hidden" }}>Defisi {fmt(revAmt)}</Text>
@@ -723,9 +729,9 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
 
                       <View style={{ paddingTop: 7, paddingBottom: 7, paddingHorizontal: 12, borderTopWidth: 0.5, borderColor: palette.hairline, flexDirection: "row", alignItems: "center", gap: 6 }}>
                         <Ionicons name="briefcase-outline" size={12} color={palette.muted2} />
-                        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2 }}>
+                        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2 }}>
                           {openCd
-                            ? <>Dèt ouvè kounye a: <Text style={{ fontWeight: "700", color: palette.warning }}>{fmt(owe)} HTG</Text></>
+                            ? <>Dèt ouvè kounye a: <Text style={{ fontWeight: "700", color: palette.warning }}>{fmtG(owe)}</Text></>
                             : "Pa gen dèt ouvè pou jou sa a — dèt la pralouvri ak desizyon an."}
                         </Text>
                       </View>
@@ -754,7 +760,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                         ) : (
                           <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", paddingTop: 10, paddingBottom: 10, paddingHorizontal: 12, borderTopWidth: 0.5, borderColor: palette.hairline }}>
                             <Pressable onPress={() => submitDecision(r, "debt")} style={{ flex: 1, backgroundColor: palette.accentGold, borderRadius: radius.sm, paddingVertical: 9, alignItems: "center" }}>
-                              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 10 }}>Kreye Dèt — {fmt(owe)} HTG</Text>
+                              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 10 }}>Kreye Dèt — {fmtG(owe)}</Text>
                             </Pressable>
                             <Pressable onPress={() => submitDecision(r, "waived_negligible")} style={{ backgroundColor: palette.surface2, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.sm, paddingVertical: 9, paddingHorizontal: 12, alignItems: "center" }}>
                               <Text style={{ fontWeight: "700", fontSize: 10 }}>Abandone kòm pèt</Text>
@@ -790,16 +796,16 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                           <Text style={{ fontWeight: "800", fontSize: 12, color: palette.accentGold }}>{initialsOf(cashierName)}</Text>
                         </View>
                         <View style={{ flex: 1 }}>
-                          <Text style={{ fontWeight: "700", fontSize: 12.5, color: palette.ink, fontFamily: "Quicksand_700Bold" }}>{cashierName} <Text style={{ fontWeight: "600", color: palette.muted2, fontSize: 9.5 }}>KESYE</Text></Text>
-                          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>Rapò {r.report_date}</Text>
+                          <Text style={{ fontWeight: "700", fontSize: 12.5, color: palette.ink, fontFamily: "Inter_700Bold" }}>{cashierName} <Text style={{ fontWeight: "600", color: palette.muted2, fontSize: 9.5 }}>KESYE</Text></Text>
+                          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>Rapò {r.report_date}</Text>
                         </View>
-                        <Text style={{ paddingHorizontal: 9, paddingVertical: 3, borderRadius: 999, backgroundColor: palette.accentGoldSoft, color: palette.accentGold, fontWeight: "800", fontSize: 10.5, overflow: "hidden" }}>Pèt {fmt(revAmt)} HTG</Text>
+                        <Text style={{ paddingHorizontal: 9, paddingVertical: 3, borderRadius: 999, backgroundColor: palette.accentGoldSoft, color: palette.accentGold, fontWeight: "800", fontSize: 10.5, overflow: "hidden" }}>Pèt {fmtG(revAmt)}</Text>
                       </View>
                       <View style={{ paddingTop: 8, paddingBottom: 8, paddingHorizontal: 12, borderTopWidth: 0.5, borderColor: palette.hairline, backgroundColor: palette.surface2 }}>
-                        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted }}>
+                        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted }}>
                           Abandone pa <Text style={{ fontWeight: "700", color: palette.inkSoft }}>{getUserById(rv?.decided_by)?.name ?? rv?.decided_by ?? "?"}</Text> ({rv?.decided_by_role?.toUpperCase()}) · {td(rv?.created_at)}
                         </Text>
-                        {rv?.reason ? <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, marginTop: 2 }}>“{rv.reason}”</Text> : null}
+                        {rv?.reason ? <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 2 }}>“{rv.reason}”</Text> : null}
                       </View>
                       <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", paddingTop: 10, paddingBottom: 10, paddingHorizontal: 12, borderTopWidth: 0.5, borderColor: palette.hairline }}>
                         <Pressable onPress={() => submitDecision(r, "approve_waive", rv?.reason, rv?.id)} style={{ flex: 1, backgroundColor: palette.success, borderRadius: radius.sm, paddingVertical: 9, alignItems: "center" }}>
@@ -823,7 +829,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
               const groups = Object.entries(byCashier);
               return (
                 <>
-                  <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2 }}>Defisi ki poko peye — gwoup pa kesye. Kreye yon règleman pou yon peryòd. FSM: open → partial → paid; waived fèmen.</Text>
+                  <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2 }}>Defisi ki poko peye — gwoup pa kesye. Kreye yon règleman pou yon peryòd. FSM: open → partial → paid; waived fèmen.</Text>
                   {groups.length === 0 ? (
                     <Text style={{ color: palette.success, fontWeight: "700", fontSize: 12 }}>✓ Pa gen defisi ouvè pou règleman.</Text>
                   ) : groups.map(([cid, rows]: any) => {
@@ -837,7 +843,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                           </View>
                           <View>
                             <Text style={{ fontWeight: "700", fontSize: 12 }}>{getUserById(cid)?.name ?? cid}</Text>
-                            <Text style={{ fontSize: 10, color: palette.muted2 }}>{rows.length} dèt • {total} HTG • {dates[0]} → {dates[dates.length - 1]}</Text>
+                            <Text style={{ fontSize: 10, color: palette.muted2 }}>{rows.length} dèt • {fmtG(total)} • {dates[0]} → {dates[dates.length - 1]}</Text>
                           </View>
                         </View>
                         <Pressable onPress={() => createSettlement(cid)} style={{ backgroundColor: palette.success, borderRadius: radius.sm, paddingVertical: 8, paddingHorizontal: 12 }}>
@@ -851,11 +857,11 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                       <Text style={{ fontWeight: "700", fontSize: 11 }}>Règleman yo ({settlements.length})</Text>
                       {settlements.map((s: any) => (
                         <View key={s.id} style={{ backgroundColor: s.status === "paid" ? palette.successBg : s.status === "waived" ? palette.surface2 : palette.surface, borderWidth: 0.5, borderColor: s.status === "paid" ? palette.successBd : palette.hairline, borderRadius: radius.md, padding: 10 }}>
-                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}><Text style={{ fontWeight: "700", fontSize: 12 }}>{getUserById(s.cashier_id)?.name ?? s.cashier_id}</Text><Text style={{ fontWeight: "700", fontSize: 11, color: s.status === "paid" ? palette.success : s.status === "partial" ? palette.warningDot : palette.muted }}>{s.status} · {s.paid}/{s.total} HTG</Text></View>
+                          <View style={{ flexDirection: "row", justifyContent: "space-between" }}><Text style={{ fontWeight: "700", fontSize: 12 }}>{getUserById(s.cashier_id)?.name ?? s.cashier_id}</Text><Text style={{ fontWeight: "700", fontSize: 11, color: s.status === "paid" ? palette.success : s.status === "partial" ? palette.warningDot : palette.muted }}>{s.status} · {fmtG(s.paid)} / {fmtG(s.total)}</Text></View>
                           <Text style={{ fontSize: 10, color: palette.muted2 }}>{s.period_start} → {s.period_end} · {JSON.parse(s.deficit_ids || "[]").length} dèt</Text>
                           {s.status !== "paid" && s.status !== "waived" && (
                             <View style={{ flexDirection: "row", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-                              <Pressable onPress={() => paySettlement(s.id, Number(s.total) - Number(s.paid))} style={{ flex: 1, backgroundColor: palette.success, borderRadius: radius.sm, paddingVertical: 8, alignItems: "center" }}><Text style={{ color: "#fff", fontWeight: "700", fontSize: 10 }}>Peye rès {Number(s.total) - Number(s.paid)} HTG</Text></Pressable>
+                              <Pressable onPress={() => paySettlement(s.id, Number(s.total) - Number(s.paid))} style={{ flex: 1, backgroundColor: palette.success, borderRadius: radius.sm, paddingVertical: 8, alignItems: "center" }}><Text style={{ color: "#fff", fontWeight: "700", fontSize: 10 }}>Peye rès {fmtG(Number(s.total) - Number(s.paid))}</Text></Pressable>
                               <Pressable onPress={() => waiveSettlement(s.id)} style={{ backgroundColor: palette.surface2, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.sm, paddingVertical: 8, paddingHorizontal: 10 }}><Text style={{ fontWeight: "700", fontSize: 10 }}>Abandone</Text></Pressable>
                             </View>
                           )}
@@ -896,10 +902,10 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                             <View style={{ flex: 1 }}>
                               <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
                                 <Text style={{ fontSize: 11.5, fontWeight: "700", color: palette.ink }}>{meta.label}</Text>
-                                <Text style={{ fontSize: 11, fontWeight: "800", color: meta.color }}>{Number(v.deficit) > 0 ? `${fmt(Number(v.deficit))} HTG` : "—"}</Text>
+                                <Text style={{ fontSize: 11, fontWeight: "800", color: meta.color }}>{Number(v.deficit) > 0 ? `${fmtG(Number(v.deficit))}` : "—"}</Text>
                               </View>
-                              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>{getUserById(v.cashier_id)?.name ?? v.cashier_id} · {v.report_date}</Text>
-                              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9.5, color: palette.muted3, marginTop: 1 }}>
+                              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>{getUserById(v.cashier_id)?.name ?? v.cashier_id} · {v.report_date}</Text>
+                              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9.5, color: palette.muted3, marginTop: 1 }}>
                                 {act?.name ?? act?.id ?? "?"} ({v.decided_by_role}) · {td(v.created_at)}
                                 {v.reason ? <Text> · “{v.reason}”</Text> : null}
                               </Text>
@@ -930,9 +936,9 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                 <View style={{ width: 34, height: 34, borderRadius: 11, backgroundColor: palette.accentGoldSoft, alignItems: "center", justifyContent: "center" }}>
                   <Ionicons name="briefcase-outline" size={17} color={palette.accentGold} />
                 </View>
-                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13, fontFamily: "Quicksand_700Bold" }}>Retrè Jounen</Text>
+                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13, fontFamily: "Inter_700Bold" }}>Retrè Jounen</Text>
               </View>
-              <Text style={{ color: palette.muted3, fontSize: 10, marginTop: 4, fontFamily: "Roboto_400Regular" }}>{ledger.length} mouvman • Total -{fmt(ledgerTotal)} HTG • {done}/{ledger.length} valide</Text>
+              <Text style={{ color: palette.muted3, fontSize: 10, marginTop: 4, fontFamily: "Inter_400Regular" }}>{ledger.length} mouvman • Total -{fmtG(ledgerTotal)} • {done}/{ledger.length} valide</Text>
             </View>
             {ledger.length === 0 ? (
               <View style={{ padding: 14, alignItems: "center" }}>
@@ -945,7 +951,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                   return (
                     <View key={m.id} style={{ flexDirection: "row", justifyContent: "space-between", backgroundColor: isInv ? palette.warningBg : palette.surface2, padding: 10, borderRadius: radius.md, borderWidth: 0.5, borderColor: isInv ? palette.warningBd : palette.hairline, alignItems: "center" }}>
                       <View style={{ flex: 1 }}>
-                        <Text style={{ fontWeight: "700", fontSize: 12 }}>{isInv ? "🗂 Kach depans" : "💵 Retrè"} -{m.amount} HTG</Text>
+                        <Text style={{ fontWeight: "700", fontSize: 12 }}>{isInv ? "🗂 Kach depans" : "💵 Retrè"} -{fmtG(m.amount)}</Text>
                         <Text style={{ fontSize: 9, color: palette.muted2, marginTop: 2 }}>{m.reason}</Text>
                         <Text style={{ fontSize: 9, color: palette.muted2, marginTop: 2 }}>
                           Anrejistre pa <Text style={{ fontWeight: "700" }}>{getUserById(m.created_by)?.name ?? m.created_by}</Text>
@@ -978,7 +984,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
         const takenUser = getUserById(w?.taken_by ?? "");
         return (
           <View style={{ marginTop: 12, backgroundColor: palette.warningBg, borderWidth: 0.5, borderColor: palette.warningBd, borderRadius: radius.md, padding: 11 }}>
-            <Text style={{ fontWeight: "700", fontSize: 12, color: palette.warning }}>Konfime retrè {w?.amount} HTG — se sèlman {takenUser?.name ?? w?.taken_by} ki ka valide ak kòd li.</Text>
+            <Text style={{ fontWeight: "700", fontSize: 12, color: palette.warning }}>Konfime retrè {fmtG(w?.amount)} — se sèlman {takenUser?.name ?? w?.taken_by} ki ka valide ak kòd li.</Text>
             <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
               <TextInput placeholder="Kòd sekrè" value={managerPassword} onChangeText={setManagerPassword} secureTextEntry keyboardType="numeric" style={{ flex: 1, borderWidth: 0.5, borderColor: palette.warningBd, borderRadius: radius.sm, paddingVertical: 12, paddingHorizontal: 10, minHeight: 48, backgroundColor: palette.surface }} />
               <Pressable onPress={async () => {
@@ -986,7 +992,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                 try {
                 const db = await getDb();
                 await db.runAsync("UPDATE cash_movements SET validated_by = ? WHERE id = ?", [`${takenUser?.name} (valide)`, pendingValidateId]);
-                Alert.alert("Valide", `Retrè ${w?.amount} HTG valide.`);
+                Alert.alert("Valide", `Retrè ${fmtG(w?.amount)} valide.`);
                 setPendingValidateId(null); setManagerPassword(""); load({ silent: true });
                 } catch (e: any) {
                   Alert.alert("Erè", e?.message ?? "Validasyon echwe");
@@ -1004,9 +1010,9 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
             <View style={{ width: 34, height: 34, borderRadius: 11, backgroundColor: palette.surfaceGrouped, alignItems: "center", justifyContent: "center" }}>
               <Ionicons name="document-text-outline" size={17} color={palette.ink} />
             </View>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13 }}>{ht.productsSold}</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13 }}>{ht.productsSold}</Text>
             <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: radius.pill, backgroundColor: palette.surface2 }}>
-              <Text style={{ fontFamily: "Quicksand_700Bold", color: palette.muted2, fontWeight: "700", fontSize: 10 }}>{productsSold.length}</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", color: palette.muted2, fontWeight: "700", fontSize: 10 }}>{productsSold.length}</Text>
             </View>
           </View>
           <Pressable onPress={() => load({ silent: true })} style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: palette.surfaceGrouped, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: palette.hairline }}>
@@ -1016,10 +1022,10 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
         {productsSold.map(p => (
           <View key={p.name} style={{ flexDirection: "row", justifyContent: "space-between", padding: 12, borderBottomWidth: 0.5, borderColor: palette.separatorSoft }}>
             <View style={{ flex: 1 }}>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12 }}>{p.name}</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12 }}>{p.name}</Text>
               <Text style={{ color: palette.muted2, fontSize: 10 }}>Vann: {p.qty}</Text>
             </View>
-            <Text style={{ fontWeight: "700", fontSize: 12 }}>{fmt(p.total)} HTG</Text>
+            <Text style={{ fontWeight: "700", fontSize: 12 }}>{fmtG(p.total)}</Text>
           </View>
         ))}
       </View>
@@ -1031,19 +1037,19 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
             <View style={{ width: 34, height: 34, borderRadius: 11, backgroundColor: palette.successBg, alignItems: "center", justifyContent: "center" }}>
               <Ionicons name="checkmark-circle" size={17} color={palette.success} />
             </View>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13 }}>Vant Jodi a</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13 }}>Vant Jodi a</Text>
             <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: radius.pill, backgroundColor: palette.surface2 }}>
-              <Text style={{ fontFamily: "Quicksand_700Bold", color: palette.muted2, fontWeight: "700", fontSize: 10 }}>{sales.length}</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", color: palette.muted2, fontWeight: "700", fontSize: 10 }}>{sales.length}</Text>
             </View>
           </View>
         </View>
         {sales.map(s => (
           <View key={s.id} style={{ flexDirection: "row", justifyContent: "space-between", padding: 12, borderBottomWidth: 0.5, borderColor: palette.separatorSoft }}>
             <View>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12 }}>{s.sale_number}</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12 }}>{s.sale_number}</Text>
               <Text style={{ fontSize: 10, color: palette.muted2 }}>{new Date(s.created_at).toLocaleTimeString()} • {s.payment_method} {s.seller_role ? `• ${s.seller_role}` : ""}</Text>
             </View>
-            <Text style={{ fontWeight: "700", color: s.payment_method === "cash" ? palette.success : palette.accentGold }}>{fmt(s.total)} HTG</Text>
+            <Text style={{ fontWeight: "700", color: s.payment_method === "cash" ? palette.success : palette.accentGold }}>{fmtG(s.total)}</Text>
           </View>
         ))}
       </View>
@@ -1055,23 +1061,23 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
             <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end", ...(isTablet && { alignItems: "center", width }) }}>
               <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: palette.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: 18, ...shadow.elevated }}>
             <View style={{ width: 40, height: 5, borderRadius: 3, backgroundColor: palette.separator, alignSelf: "center", marginBottom: 12 }} />
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", textAlign: "center", fontSize: 15 }}>Fèmen Chanjman — Konte Kach</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", textAlign: "center", fontSize: 15 }}>Fèmen Chanjman — Konte Kach</Text>
             <Text style={{ textAlign: "center", color: palette.muted2, fontSize: 12, marginTop: 4 }}>Konbyen kach ou genyen kounye a?</Text>
             <View style={{ backgroundColor: palette.surface2, borderRadius: radius.md, padding: 11, marginTop: 10, borderWidth: 0.5, borderColor: palette.hairline }}>
               <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 }}>KACH ESPERE</Text>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 20, color: palette.accentGold }}>{expectedCash} HTG</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 20, color: palette.accentGold }}>{fmtG(expectedCash)}</Text>
               <Text style={{ fontSize: 9, color: palette.muted2 }}>{myOpening} ouvèti + {myCashTotal} vant kach + {myCollectedTotal} kolekte − {myWithdrawalsTotal} retrè = kach espere</Text>
             </View>
-            <TextInput placeholder="Antre kach ou konte" value={actualCash} onChangeText={setActualCash} keyboardType="numeric" autoFocus style={{ borderWidth: 0.5, borderColor: palette.success, borderRadius: radius.md, paddingVertical: 15, paddingHorizontal: 14, minHeight: 52, marginTop: 12, fontWeight: "700", fontSize: 18, textAlign: "center", backgroundColor: palette.surface, fontFamily: "Quicksand_700Bold", color: palette.ink }} />
+            <TextInput placeholder="Antre kach ou konte" value={actualCash} onChangeText={setActualCash} keyboardType="numeric" autoFocus style={{ borderWidth: 0.5, borderColor: palette.success, borderRadius: radius.md, paddingVertical: 15, paddingHorizontal: 14, minHeight: 52, marginTop: 12, fontWeight: "700", fontSize: 18, textAlign: "center", backgroundColor: palette.surface, fontFamily: "Inter_700Bold", color: palette.ink }} />
             {actualCash ? (
               <View style={{ marginTop: 8, padding: 10, borderRadius: radius.md, backgroundColor: parseFloat(actualCash) === expectedCash ? palette.successBg : parseFloat(actualCash) < expectedCash ? palette.dangerBg : palette.blueBg, borderWidth: 0.5, borderColor: parseFloat(actualCash) === expectedCash ? palette.successBd : parseFloat(actualCash) < expectedCash ? palette.dangerBd : palette.blueBd }}>
-                <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", textAlign: "center", color: parseFloat(actualCash) === expectedCash ? palette.success : parseFloat(actualCash) < expectedCash ? palette.danger : palette.blue }}>
-                  {parseFloat(actualCash) === expectedCash ? `✓ Balanse — pa gen defisi` : parseFloat(actualCash) < expectedCash ? `⚠️ Defisi: ${expectedCash - parseFloat(actualCash)} HTG` : `Sipè: ${parseFloat(actualCash) - expectedCash} HTG`}
+                <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", textAlign: "center", color: parseFloat(actualCash) === expectedCash ? palette.success : parseFloat(actualCash) < expectedCash ? palette.danger : palette.blue }}>
+                  {parseFloat(actualCash) === expectedCash ? `✓ Balanse — pa gen defisi` : parseFloat(actualCash) < expectedCash ? `⚠️ Defisi: ${fmtG(expectedCash - parseFloat(actualCash))}` : `Sipè: ${fmtG(parseFloat(actualCash) - expectedCash)}`}
                 </Text>
               </View>
             ) : null}
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
-              <Pressable onPress={() => setShowEnd(false)} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>Anile</Text></Pressable>
+              <Pressable onPress={() => setShowEnd(false)} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700" }}>Anile</Text></Pressable>
               <Pressable onPress={async () => {
                 const amt = parseFloat(actualCash);
                 if (isNaN(amt)) return Alert.alert("Antre montan kach ou konte");
@@ -1079,7 +1085,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                 if (myTabs.length) return Alert.alert("Tab ouvè — pa ka fèmen", `Ou gen ${myTabs.length} vant an atann. Fèmen oswa anile yo nan Vant anvan ou fèmen chanjman an.`);
                 setShowEnd(false); setActualCash("");
                 await endReport(amt);
-              }} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.md, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", ...shadow.soft }}><Text style={{ color: "#fff", fontWeight: "700", fontFamily: "Quicksand_700Bold" }}>Fèmen & Voye Rapò</Text></Pressable>
+              }} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.md, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", ...shadow.soft }}><Text style={{ color: "#fff", fontWeight: "700", fontFamily: "Inter_700Bold" }}>Fèmen & Voye Rapò</Text></Pressable>
             </View>
               </View>
             </ScrollView>

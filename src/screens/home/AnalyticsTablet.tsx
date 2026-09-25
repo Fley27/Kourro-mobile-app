@@ -3,7 +3,7 @@ import { View, Text } from "react-native";
 import { BarChart } from "react-native-gifted-charts";
 import { palette, radius, shadow } from "../../theme";
 import { useResponsive } from "../../responsive";
-import { fmt, monoStyle } from "../../format";
+import { fmtG, fmt, monoStyle } from "../../format";
 import type { AnalyticsTabProps } from "./AnalyticsShared";
 import {
   RangePills,
@@ -36,10 +36,10 @@ function CardHeader({ title, subtitle, pill }: { title: string; subtitle: string
       }}
     >
       <View style={{ flex: 1 }}>
-        <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13, color: palette.ink, letterSpacing: -0.2 }}>
+        <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13, color: palette.ink, letterSpacing: -0.2 }}>
           {title}
         </Text>
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.muted, marginTop: 2 }}>{subtitle}</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted, marginTop: 2 }}>{subtitle}</Text>
       </View>
       <View
         style={{
@@ -51,7 +51,7 @@ function CardHeader({ title, subtitle, pill }: { title: string; subtitle: string
           borderColor: palette.hairline,
         }}
       >
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: "#3A3A3C", fontWeight: "600" }}>{pill}</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: "#3A3A3C", fontWeight: "600" }}>{pill}</Text>
       </View>
     </View>
   );
@@ -91,7 +91,7 @@ function KpiCard({
         <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: accent }} />
         <Text
           style={{
-            fontFamily: "Roboto_400Regular",
+            fontFamily: "Inter_400Regular",
             fontSize: 10,
             color: palette.muted2,
             fontWeight: "700",
@@ -104,7 +104,7 @@ function KpiCard({
       </View>
       <Text
         style={{
-          fontFamily: "Quicksand_700Bold",
+          fontFamily: "Inter_700Bold",
           fontWeight: "700",
           fontSize: 22,
           color: valueColor ?? palette.ink,
@@ -118,7 +118,7 @@ function KpiCard({
         {unit ? <Text style={{ fontSize: 11, fontWeight: "700", color: palette.muted2 }}> {unit}</Text> : null}
       </Text>
       <View style={{ marginTop: 4 }}>{typeof sub === "string" ? (
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted }}>{sub}</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted }}>{sub}</Text>
       ) : (
         sub
       )}</View>
@@ -199,7 +199,7 @@ export default function AnalyticsTablet({
             >
               <Text
                 style={{
-                  fontFamily: "Quicksand_700Bold",
+                  fontFamily: "Inter_700Bold",
                   fontSize: 10,
                   fontWeight: "700",
                   letterSpacing: 1,
@@ -213,7 +213,7 @@ export default function AnalyticsTablet({
             </View>
             <Text
               style={{
-                fontFamily: "Quicksand_700Bold",
+                fontFamily: "Inter_700Bold",
                 fontWeight: "700",
                 fontSize: 30,
                 color: "#FFFFFF",
@@ -223,14 +223,14 @@ export default function AnalyticsTablet({
               }}
             >
               Bati yon{" "}
-              <Text style={{ fontFamily: "Quicksand_300Light", fontStyle: "italic", fontWeight: "300", color: palette.accentGold }}>
+              <Text style={{ fontFamily: "Inter_300Light", fontStyle: "italic", fontWeight: "300", color: palette.accentGold }}>
                 biznis
               </Text>
               {"\n"}ki ap siviv ou.
             </Text>
             <Text
               style={{
-                fontFamily: "Roboto_400Regular",
+                fontFamily: "Inter_400Regular",
                 fontSize: 13,
                 color: "rgba(255,255,255,0.60)",
                 lineHeight: 20,
@@ -255,7 +255,7 @@ export default function AnalyticsTablet({
             >
               <Text
                 style={{
-                  fontFamily: "Roboto_400Regular",
+                  fontFamily: "Inter_400Regular",
                   fontSize: 10,
                   fontWeight: "700",
                   letterSpacing: 0.8,
@@ -267,7 +267,7 @@ export default function AnalyticsTablet({
               </Text>
               <Text
                 style={{
-                  fontFamily: "Quicksand_700Bold",
+                  fontFamily: "Inter_700Bold",
                   fontWeight: "700",
                   fontSize: 22,
                   letterSpacing: -0.8,
@@ -276,9 +276,9 @@ export default function AnalyticsTablet({
                   ...monoStyle,
                 }}
               >
-                {fmt(todayTotal)} HTG
+                {fmtG(todayTotal)}
               </Text>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: "rgba(255,255,255,0.48)", marginTop: 2 }}>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: "rgba(255,255,255,0.48)", marginTop: 2 }}>
                 {todayCount} tranzaksyon • Kach {fmt(todayCash)} • Kredi {fmt(todayCredit)} • {dbSalesLength ? "live" : "demo"}
               </Text>
               <View style={{ marginTop: 8, height: 4, backgroundColor: "rgba(255,255,255,0.14)", borderRadius: 999, overflow: "hidden" }}>
@@ -298,7 +298,7 @@ export default function AnalyticsTablet({
             >
               <Text
                 style={{
-                  fontFamily: "Roboto_400Regular",
+                  fontFamily: "Inter_400Regular",
                   fontSize: 10,
                   fontWeight: "700",
                   letterSpacing: 0.8,
@@ -310,7 +310,7 @@ export default function AnalyticsTablet({
               </Text>
               <Text
                 style={{
-                  fontFamily: "Quicksand_700Bold",
+                  fontFamily: "Inter_700Bold",
                   fontWeight: "700",
                   fontSize: 22,
                   letterSpacing: -0.8,
@@ -319,12 +319,12 @@ export default function AnalyticsTablet({
                   ...monoStyle,
                 }}
               >
-                {fmt(profitStats.profit)} HTG{" "}
+                {fmtG(profitStats.profit)}{" "}
                 <Text style={{ fontSize: 12, fontWeight: "600", color: "rgba(255,255,255,0.58)" }}>
                   • {profitStats.margin.toFixed(1)}%
                 </Text>
               </Text>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: "rgba(255,255,255,0.48)", marginTop: 2 }}>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: "rgba(255,255,255,0.48)", marginTop: 2 }}>
                 Revni {fmt(profitStats.revenue)} • Kout {fmt(profitStats.cost)}
               </Text>
             </View>
@@ -341,7 +341,7 @@ export default function AnalyticsTablet({
             >
               <Text
                 style={{
-                  fontFamily: "Roboto_400Regular",
+                  fontFamily: "Inter_400Regular",
                   fontSize: 10,
                   fontWeight: "700",
                   letterSpacing: 0.8,
@@ -353,7 +353,7 @@ export default function AnalyticsTablet({
               </Text>
               <Text
                 style={{
-                  fontFamily: "Quicksand_700Bold",
+                  fontFamily: "Inter_700Bold",
                   fontWeight: "700",
                   fontSize: 22,
                   letterSpacing: -0.8,
@@ -363,9 +363,9 @@ export default function AnalyticsTablet({
                 }}
               >
                 {lowStockCount} atik{" "}
-                <Text style={{ fontSize: 14, color: "rgba(255,255,255,0.68)" }}>{fmt(lowStockValue)} HTG</Text>
+                <Text style={{ fontSize: 14, color: "rgba(255,255,255,0.68)" }}>{fmtG(lowStockValue)}</Text>
               </Text>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: "rgba(255,255,255,0.48)", marginTop: 2 }}>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: "rgba(255,255,255,0.48)", marginTop: 2 }}>
                 {lowStockCount > 0 ? `${lowStockCount} pwodui • Reyaprovizyonne` : "Okenn alèt kritik"}
               </Text>
             </View>
@@ -379,7 +379,7 @@ export default function AnalyticsTablet({
           accent="#30D158"
           label="Vant Jodi a"
           valueText={fmt(todayTotal)}
-          unit="HTG"
+          unit="G"
           sub={
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
               <View
@@ -394,7 +394,7 @@ export default function AnalyticsTablet({
               >
                 <Text
                   style={{
-                    fontFamily: "Quicksand_700Bold",
+                    fontFamily: "Inter_700Bold",
                     fontSize: 11,
                     fontWeight: "700",
                     color: growthPct >= 0 ? palette.success : palette.danger,
@@ -403,7 +403,7 @@ export default function AnalyticsTablet({
                   {growthPct >= 0 ? "↗" : "↘"} {growthPct >= 0 ? `+${growthPct}%` : `${growthPct}%`}
                 </Text>
               </View>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted }}>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted }}>
                 vs yè • {todayCount} tikè
               </Text>
             </View>
@@ -413,21 +413,21 @@ export default function AnalyticsTablet({
           accent="#0A84FF"
           label="Panyen Mwayèn"
           valueText={fmt(avgBasket)}
-          unit="HTG"
+          unit="G"
           sub={`Maj ${profitStats.margin.toFixed(1)}% • ${filteredSalesCount} vant total`}
         />
         <KpiCard
           accent="#AF52DE"
           label="Tranzaksyon"
           valueText={filteredSalesCount}
-          sub={`Kredi ${fmt(todayCredit)} HTG • ${todayCreditPct}% sou kredi`}
+          sub={`Kredi ${fmtG(todayCredit)} • ${todayCreditPct}% sou kredi`}
         />
         <KpiCard
           accent="#FF9F0A"
           label="Stòk Fèb"
           valueText={lowStockCount}
           valueColor={lowStockCount ? palette.danger : palette.ink}
-          sub={`Valè ${fmt(lowStockValue)} HTG • ${lowStockCount ? "Achte prese" : "Stab"}`}
+          sub={`Valè ${fmtG(lowStockValue)} • ${lowStockCount ? "Achte prese" : "Stab"}`}
         />
       </View>
 
@@ -470,7 +470,7 @@ export default function AnalyticsTablet({
               {topSeries.map(s => (
                 <View key={s.name} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
                   <View style={{ width: 9, height: 9, borderRadius: 3, backgroundColor: s.c }} />
-                  <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2 }} numberOfLines={1}>
+                  <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2 }} numberOfLines={1}>
                     {s.name}
                   </Text>
                 </View>
@@ -490,25 +490,25 @@ export default function AnalyticsTablet({
             ...shadow.soft,
           }}
         >
-          <CardHeader title="Repatisyon Peman" subtitle="Jodi a • 4 metòd • Kach / Kredi / MonCash / NatCash" pill={`${fmt(mixTotal)} HTG`} />
+          <CardHeader title="Repatisyon Peman" subtitle="Jodi a • 4 metòd • Kach / Kredi / MonCash / NatCash" pill={`${fmtG(mixTotal)}`} />
           <View style={{ padding: 16 }}>
             <View style={{ gap: 8 }}>
               {payments.map(p => (
                 <View key={p.label} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
                   <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: p.c }} />
-                  <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted2, width: 62 }}>{p.label}</Text>
+                  <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted2, width: 62 }}>{p.label}</Text>
                   <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: palette.surfaceGrouped }}>
                     <View style={{ width: `${p.pct}%`, height: 5, borderRadius: 3, backgroundColor: p.c }} />
                   </View>
-                  <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13, color: p.c, minWidth: 14, textAlign: "right" }}>
+                  <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13, color: p.c, minWidth: 14, textAlign: "right" }}>
                     {p.pct}%
                   </Text>
                 </View>
               ))}
             </View>
             <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 10 }}>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.muted2 }}>{filteredSalesCount} antre</Text>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12, color: palette.ink }}>{fmt(mixTotal)} HTG</Text>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted2 }}>{filteredSalesCount} antre</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12, color: palette.ink }}>{fmtG(mixTotal)}</Text>
             </View>
           </View>
         </View>
@@ -554,7 +554,7 @@ export default function AnalyticsTablet({
                       justifyContent: "center",
                     }}
                   >
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontSize: 10, fontWeight: "700", color: rankStyle.tint }}>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontSize: 10, fontWeight: "700", color: rankStyle.tint }}>
                       #{it.rank}
                     </Text>
                   </View>
@@ -571,26 +571,26 @@ export default function AnalyticsTablet({
                     <Text style={{ fontSize: 14 }}>{it.icon}</Text>
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12, color: palette.ink }} numberOfLines={1}>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12, color: palette.ink }} numberOfLines={1}>
                       {it.name}
                     </Text>
-                    <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>
+                    <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 1 }}>
                       {it.sku} • {it.qty} vann
                     </Text>
                   </View>
                   <View style={{ alignItems: "flex-end" }}>
                     <Text
                       style={{
-                        fontFamily: "Quicksand_700Bold",
+                        fontFamily: "Inter_700Bold",
                         fontWeight: "700",
                         fontSize: 12,
                         color: palette.ink,
                         ...monoStyle,
                       }}
                     >
-                      {fmt(it.amount)} HTG
+                      {fmtG(it.amount)}
                     </Text>
-                    <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2 }}>
+                    <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2 }}>
                       {(it.amount / it.qty).toFixed(0)} /u
                     </Text>
                   </View>
@@ -618,13 +618,13 @@ export default function AnalyticsTablet({
               return (
                 <View key={p.label} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
                   <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: p.c }} />
-                  <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted2, width: 62 }}>{p.label}</Text>
+                  <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted2, width: 62 }}>{p.label}</Text>
                   <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: palette.surfaceGrouped }}>
                     <View style={{ width: `${pct}%`, height: 5, borderRadius: 3, backgroundColor: p.c }} />
                   </View>
                   <Text
                     style={{
-                      fontFamily: "Quicksand_700Bold",
+                      fontFamily: "Inter_700Bold",
                       fontWeight: "700",
                       fontSize: 12,
                       color: palette.ink,
@@ -633,7 +633,7 @@ export default function AnalyticsTablet({
                       ...monoStyle,
                     }}
                   >
-                    {p.value ? `${fmt(p.value)} HTG` : "—"}
+                    {p.value ? `${fmtG(p.value)}` : "—"}
                   </Text>
                 </View>
               );

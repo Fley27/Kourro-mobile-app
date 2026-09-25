@@ -3,6 +3,9 @@ import { View, Text, Pressable, TextInput, Alert, Modal, ScrollView, StyleSheet,
 import { Ionicons } from "@expo/vector-icons";
 import { palette, shadow } from "../../theme";
 import { useResponsive, centerBox, sheetBox } from "../../responsive";
+import { storeIdForLocation } from "../../org";
+import { getDb } from "../../db";
+import { EmployeeProfileBody } from "../../components/EmployeeProfile";
 
 const GOLD = palette.accentGold;
 const GOLD_SOFT = palette.accentGoldSoft;
@@ -32,13 +35,6 @@ const ROLE_META: Record<string, { label: string; color: string; bg: string; bd: 
   cashier: { label: "KESYE", color: "#6D28D9", bg: "#F5F3FF", bd: "#DDD6FE" },
 };
 
-const ROLE_COLOR: Record<string, string> = {
-  owner: "#16130c",
-  admin: "#5856D6",
-  manager: "#FF9F0A",
-  cashier: "#837b69",
-};
-
 const STORE_LABELS: Record<string, string> = {
   Petyonvil: "Pétion-Ville",
   Dèlma: "Dèlma",
@@ -51,6 +47,7 @@ type Props = {
   role: string;
   currentUser?: any;
   activeStore: string;
+  userStoreIds?: string[];
   editingEmp: any | null;
   setEditingEmp: (e: any | null) => void;
   editEmpRole: string;
@@ -92,7 +89,7 @@ type Props = {
 };
 
 export default function TeamScreen({
-  employees, setEmployees, currentUser, role, activeStore,
+  employees, setEmployees, currentUser, role, activeStore, userStoreIds = [],
   editingEmp, setEditingEmp, editEmpRole, setEditEmpRole,
   resetTarget, setResetTarget,
   selfEditEmp, setSelfEditEmp, selfSecret, setSelfSecret, selfPassword, setSelfPassword,
@@ -106,11 +103,54 @@ export default function TeamScreen({
 }: Props) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "inactive">("all");
+  const [showFilters, setShowFilters] = useState(false);
+  const [draftFilter, setDraftFilter] = useState<"all" | "active" | "inactive">("all");
   const [selectedEmp, setSelectedEmp] = useState<Employee | null>(null);
+  const [empStats, setEmpStats] = useState({ sales: 0, total: 0 });
+  // Refetch on every open (id transition null↔id) — same-object reopens
+  // would otherwise skip the fetch and show stale zeros.
+  const selectedEmpId = selectedEmp?.id ?? null;
+  const selectedEmpName = String(selectedEmp?.name ?? "").trim().toLowerCase();
+  useEffect(() => {
+    if (!selectedEmpId) return;
+    (async () => {
+      try {
+        const db = await getDb();
+        const allSales = ((await db.getAllAsync("SELECT * FROM sales").catch(() => [])) as any[]) ?? [];
+        // Receipts snapshot the cashier too (id + name columns) — second
+        // attribution path for sales stamped under a different login id or
+        // before seller_id existed.
+        const allReceipts = ((await db.getAllAsync("SELECT sale_id, cashier_id, cashier_name FROM receipts").catch(() => [])) as any[]) ?? [];
+        const receiptSaleIds = new Set(
+          allReceipts
+            .filter(r => String(r.cashier_id ?? "") === selectedEmpId || String(r.cashier_name ?? "").trim().toLowerCase() === selectedEmpName)
+            .map(r => r.sale_id)
+        );
+        const mine = allSales.filter(s =>
+          String(s.status ?? "") !== "cancelled" &&
+          (String(s.seller_id ?? "") === selectedEmpId || receiptSaleIds.has(s.id))
+        );
+        setEmpStats({ sales: mine.length, total: mine.reduce((a: number, s: any) => a + Number(s.total ?? s.amount ?? s.subtotal ?? 0), 0) });
+      } catch { setEmpStats({ sales: 0, total: 0 }); }
+    })();
+  }, [selectedEmpId, selectedEmpName]);
+  const [empNameCollapsed, setEmpNameCollapsed] = useState(false);
+  const titleFade = useRef(new Animated.Value(0)).current;
+  const detailScrollRef = useRef<any>(null);
+  const empLastName = useMemo(() => {
+    const parts = String(selectedEmp?.name ?? "").trim().split(/\s+/).filter(Boolean);
+    return parts.slice(1).join(" ") || parts[0] || "";
+  }, [selectedEmp]);
+  useEffect(() => {
+    Animated.timing(titleFade, { toValue: empNameCollapsed ? 1 : 0, duration: 220, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
+  }, [empNameCollapsed, titleFade]);
+  useEffect(() => {
+    setEmpNameCollapsed(false);
+    detailScrollRef.current?.scrollTo?.({ y: 0, animated: false });
+  }, [selectedEmp]);
   const [modalView, setModalView] = useState<"detail" | "edit" | "selfEdit" | "reset">("detail");
   const [resetTargetEmp, setResetTargetEmp] = useState<Employee | null>(null);
   const { width, isTablet, padH } = useResponsive();
-  const fabRight = isTablet ? Math.max(20, (width - 880) / 2 + 24) : 20;
   const slideAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -128,23 +168,37 @@ export default function TeamScreen({
 
   const currentStore = activeStore || currentUser?.store || "Petyonvil";
 
-  const LEVEL: Record<string, number> = { owner: 4, admin: 3, manager: 2, cashier: 1 };
+  const LEVEL: Record<string, number> = { owner: 4, admin: 3, manager: 2, cashier: 1, associate: 1, cook: 1 };
 
-const visibleEmployees = useMemo(() => {
-    const inScope = employees.filter(e => e.store === currentStore || e.role === "owner");
-    if (role === "cashier") return inScope;
-    const myLevel = LEVEL[role] ?? 1;
-    return inScope.filter(e => (LEVEL[e.role] ?? 1) <= myLevel);
-  }, [employees, role, currentStore]);
+  // Phase 4 matrix — store scope via the employee<->store relationship, then
+  // role subsets: owner sees everything; admin sees self + managers/cashiers/
+  // associates/cooks in his stores (never other admins); manager sees self +
+  // cashiers/associates/cooks in his stores.
+  const myStoreIds = userStoreIds.length ? userStoreIds : [storeIdForLocation(currentUser?.store)];
+  const inMyStores = (e: Employee) =>
+    role === "owner" ? true : myStoreIds.includes(storeIdForLocation((e as any).store));
+  const visibleEmployees = useMemo(() => {
+    const inScope = employees.filter(e => inMyStores(e) || e.role === "owner");
+    if (role === "owner") return inScope;
+    if (role === "admin") {
+      return inScope.filter(e =>
+        ["manager", "cashier", "associate", "cook"].includes(e.role) ||
+        (e.role === "admin" && e.id === currentUser?.id)
+      );
+    }
+    if (role === "manager") {
+      return inScope.filter(e =>
+        ["cashier", "associate", "cook"].includes(e.role) || e.id === currentUser?.id
+      );
+    }
+    return [];
+  }, [employees, role, currentUser?.id, myStoreIds.join("|")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const canSeeSalary = (e: Employee) => {
     if (role !== "admin") return true;
     if (e.role !== "admin") return true;
     return e.id === currentUser?.id;
   };
-
-  const activeCount = visibleEmployees.filter(e => e.active).length;
-  const inactiveCount = visibleEmployees.length - activeCount;
 
   const list = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -166,12 +220,6 @@ const visibleEmployees = useMemo(() => {
     if (e.role === "owner") { Alert.alert("Pa ka dezaktive Owner."); return; }
     setEmployees(prev => prev.map(x => (x.id === e.id ? { ...x, active: !x.active } : x)));
   };
-
-  const filterPills: { id: "all" | "active" | "inactive"; label: string; count: number }[] = [
-    { id: "all", label: "Tout", count: visibleEmployees.length },
-    { id: "active", label: "Aktif", count: activeCount },
-    { id: "inactive", label: "Inaktif", count: inactiveCount },
-  ];
 
   const IOSToggle = ({ value, onToggle }: { value: boolean; onToggle: () => void }) => (
     <Pressable
@@ -197,113 +245,138 @@ const visibleEmployees = useMemo(() => {
   );
 
   return (
-    <View style={{ flex: 1, backgroundColor: palette.bg, alignItems: isTablet ? "center" : undefined }}>
-      <ScrollView style={{ flex: 1, width: "100%" }} contentContainerStyle={{ padding: padH, paddingBottom: 24, gap: 12, ...(isTablet && { flexDirection: "row", flexWrap: "wrap" as const }) }} showsVerticalScrollIndicator={false}>
-      {/* Search + filter — Apple precision */}
-      <View style={{ width: "100%", backgroundColor: "white", borderRadius: 16, ...shadow.card, padding: 12 }}>
-        <View style={{ flex: 1, height: 48, flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: "#D1D1D6", borderRadius: 14, backgroundColor: "#F9F9FB", paddingHorizontal: 13 }}>
-          <Text style={{ fontSize: 16, color: "#6B7280", fontWeight: "600" }}>⌕</Text>
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
+      {/* Title + add */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: padH, paddingTop: 18, paddingBottom: 14 }}>
+        <Text style={{ color: "#fff", fontSize: 28, fontWeight: "800", letterSpacing: -0.5 }}>Ekip</Text>
+        {canManageEmployees ? (
+          <Pressable
+            onPress={() => setShowAdd(true)}
+            style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}
+          >
+            <Ionicons name="add" size={26} color="#fff" />
+          </Pressable>
+        ) : null}
+      </View>
+      {/* Search + filter */}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: padH, marginBottom: 8 }}>
+        <View style={{ flex: 1, height: 56, flexDirection: "row", alignItems: "center", backgroundColor: "transparent", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 28, paddingHorizontal: 16 }}>
+          <Ionicons name="search" size={20} color="#fff" style={{ marginRight: 10 }} />
           <TextInput
             value={search}
             onChangeText={setSearch}
             placeholder="Chèche non, wòl, telefon…"
-            placeholderTextColor="#837b69"
+            placeholderTextColor="#8e8e93"
             returnKeyType="search"
-            style={{ flex: 1, paddingVertical: 10, paddingHorizontal: 9, fontSize: 15, color: "#16130c" }}
+            style={{ flex: 1, paddingVertical: 10, fontSize: 16, color: "#fff" }}
           />
           {search ? (
-            <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ padding: 5 }}><Text style={{ color: "#6B7280", fontSize: 13, fontWeight: "700" }}>✕</Text></Pressable>
+            <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ padding: 4 }}>
+              <Ionicons name="close-circle" size={18} color="#8e8e93" />
+            </Pressable>
           ) : null}
         </View>
-        <View style={{ flexDirection: "row", gap: 4, marginTop: 12, backgroundColor: "#F2F2F7", borderRadius: 11, padding: 3, borderWidth: 0.5, borderColor: "#E5E5EA" }}>
-          {filterPills.map(p => {
-            const active = filter === p.id;
-            return (
-              <Pressable
-                key={p.id}
-                onPress={() => setFilter(p.id)}
-                style={{ flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingVertical: 8, borderRadius: 8, backgroundColor: active ? "white" : "transparent", shadowColor: "#000", shadowOpacity: active ? 0.08 : 0, shadowRadius: 4, elevation: active ? 2 : 0 }}
-              >
-                <Text style={{ fontSize: 12, fontWeight: "700", color: active ? "#16130c" : "#837b69" }}>{p.label}</Text>
-                <Text style={{ fontSize: 11, fontWeight: "600", color: active ? "#16130c" : "#a1967f" }}>{p.count}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
+        <Pressable
+          onPress={() => { setDraftFilter(filter); setShowFilters(true); }}
+          style={{
+            width: 52, height: 52, borderRadius: 14, alignItems: "center", justifyContent: "center",
+            backgroundColor: filter !== "all" ? "#fff" : "#000",
+            borderWidth: 1, borderColor: filter !== "all" ? "#fff" : "#3a3a3c",
+          }}
+        >
+          <Ionicons name="filter" size={20} color={filter !== "all" ? "#000" : "#fff"} />
+        </Pressable>
       </View>
-
-      {/* Employee cards — Apple Settings–style */}
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+      {/* Employee rows — customers-list style */}
       {list.length === 0 ? (
-        <View style={{ width: "100%", backgroundColor: "white", borderRadius: 16, padding: 32, alignItems: "center", gap: 6, ...shadow.card }}>
-          <Text style={{ fontSize: 15, fontWeight: "600", color: "#16130c" }}>{search || filter !== "all" ? "Pa gen rezilta" : "Pa gen anplwaye"}</Text>
-          <Text style={{ fontSize: 13, color: "#837b69", textAlign: "center" }}>Eseye chanje rechèch oswa filtè.</Text>
+        <View style={{ padding: 32, alignItems: "center" }}>
+          <Text style={{ fontSize: 15, fontWeight: "600", color: "#fff" }}>{search || filter !== "all" ? "Pa gen rezilta" : "Pa gen anplwaye"}</Text>
+          <Text style={{ fontSize: 13, color: "#8e8e93", marginTop: 4 }}>Eseye chanje rechèch oswa filtè.</Text>
         </View>
       ) : (
-        list.map((e) => {
+        [...list].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))).map((e) => {
           const meta = ROLE_META[e.role] ?? ROLE_META.cashier;
           const isSelf = e.id === currentUser?.id;
           return (
             <Pressable
               key={e.id}
               onPress={() => { setSelectedEmp(e); setModalView("detail"); }}
-              style={{ backgroundColor: "white", borderRadius: 16, ...shadow.card, opacity: e.active ? 1 : 0.55, ...(isTablet && { flexBasis: "48%" as any, flexGrow: 1 }) }}
+              style={{ opacity: e.active ? 1 : 0.55 }}
             >
-              <View style={{ flexDirection: "row", alignItems: "center", padding: 14, gap: 14 }}>
-                {/* Avatar — circular, role-colored with gold luxury ring */}
-                <View style={{ position: "relative" }}>
-                  <View style={{
-                    width: 50, height: 50, borderRadius: 25,
-                    backgroundColor: ROLE_COLOR[e.role] ?? "#F2F2F7",
-                    alignItems: "center", justifyContent: "center",
-                    shadowColor: ROLE_COLOR[e.role] ?? "#000", shadowOpacity: 0.14, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
-                    borderWidth: 1.5, borderColor: e.role === "owner" ? GOLD : (e.active ? "rgba(200,162,74,0.45)" : "rgba(0,0,0,0.08)"),
-                  }}>
-                    <Text style={{ color: e.role === "cashier" ? "#16130c" : "#fff", fontWeight: "600", fontSize: 15 }}>{e.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: padH, paddingVertical: 14 }}>
+                <View>
+                  <View style={{ width: 52, height: 52, borderRadius: 12, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+                    <Text style={{ color: "#8e8e93", fontSize: 17, fontWeight: "700" }}>{e.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
                   </View>
-                  {/* Online dot */}
                   <View style={{
-                    position: "absolute", right: 0, bottom: 0,
+                    position: "absolute", right: -2, bottom: -2,
                     width: 14, height: 14, borderRadius: 7,
-                    backgroundColor: e.isOnline ? "#34C759" : "#C7C7CC",
-                    borderWidth: 2.5, borderColor: "white",
+                    backgroundColor: e.isOnline ? "#34C759" : "#3a3a3c",
+                    borderWidth: 2, borderColor: "#000",
                   }} />
                 </View>
-
-                {/* Name + role + phone — clean single column */}
-                <View style={{ flex: 1, gap: 4 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <Text style={{ fontWeight: "600", fontSize: 17, color: "#16130c", letterSpacing: -0.4 }} numberOfLines={1}>{e.name}</Text>
-                    {isSelf && <Text style={{ fontSize: 11, color: "#837b69", fontWeight: "600", backgroundColor: "#F2F2F7", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>OU</Text>}
-                  </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <View style={{ backgroundColor: meta.bg, borderRadius: 4, paddingHorizontal: 5, paddingVertical: 2 }}>
-                      <Text style={{ fontSize: 11, fontWeight: "600", color: meta.color, letterSpacing: 0.3 }}>{meta.label}</Text>
-                    </View>
-                    <Text style={{ fontSize: 13, color: "#837b69" }} numberOfLines={1}>{e.phone ?? "—"}</Text>
+                    <Text style={{ fontWeight: "600", fontSize: 17, color: "#fff", flexShrink: 1 }} numberOfLines={1}>{e.name}</Text>
+                    {isSelf ? <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", backgroundColor: "#2b2b2b", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>OU</Text> : null}
                   </View>
-                  <Text style={{ fontSize: 13, fontWeight: "600", color: palette.muted2 }} numberOfLines={1}>{canSeeSalary(e) ? `${e.salary} / mwa` : "Konfidansyèl"}</Text>
+                  <Text style={{ fontSize: 14, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{meta.label} · {e.phone ?? "—"}</Text>
+                  <Text style={{ fontSize: 13, color: "#8e8e93", marginTop: 1 }} numberOfLines={1}>{canSeeSalary(e) ? `${e.salary} / mwa` : "Konfidansyèl"}</Text>
                 </View>
-
-                {/* iOS Toggle */}
                 {canToggle(e) ? (
                   <IOSToggle value={e.active} onToggle={() => toggleActive(e)} />
                 ) : null}
               </View>
+              <View style={{ height: 1, backgroundColor: "#262626", marginLeft: padH + 64 }} />
             </Pressable>
           );
         })
       )}
       </ScrollView>
 
-      {canManageEmployees && (
-        <Pressable
-          onPress={() => setShowAdd(true)}
-          style={{ position: "absolute", right: fabRight, bottom: 24, paddingHorizontal: 18, height: 56, borderRadius: 28, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8, shadowColor: "#000", shadowOpacity: 0.3, shadowRadius: 14, shadowOffset: { width: 0, height: 8 }, elevation: 8 }}
-        >
-          <Text style={{ color: "white", fontSize: 22, fontWeight: "500", lineHeight: 24 }}>＋</Text>
-          <Text style={{ color: "white", fontSize: 16, fontWeight: "600" }}>Nouvo Manb</Text>
-        </Pressable>
-      )}
+      {/* Filters sheet — Transactions style */}
+      <Modal visible={showFilters} transparent animationType="slide" onRequestClose={() => setShowFilters(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <Pressable style={{ flex: 1 }} onPress={() => setShowFilters(false)} />
+          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32, maxHeight: "85%" }}>
+            <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff" }}>Filters</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <Pressable
+                  onPress={() => setDraftFilter("all")}
+                  style={{ paddingHorizontal: 20, paddingVertical: 13, borderRadius: 26, backgroundColor: "#2b2b2b" }}
+                >
+                  <Text style={{ fontWeight: "700", fontSize: 14, color: draftFilter !== "all" ? "#fff" : "#6e6e73" }}>Clear All</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => { setFilter(draftFilter); setShowFilters(false); }}
+                  style={{ paddingHorizontal: 26, paddingVertical: 13, borderRadius: 26, backgroundColor: "#fff" }}
+                >
+                  <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>Apply</Text>
+                </Pressable>
+              </View>
+            </View>
+            {(["all", "active", "inactive"] as const).map(key => {
+              const checked = draftFilter === key;
+              const label = key === "all" ? "Tout" : key === "active" ? "Aktif" : "Inaktif";
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => setDraftFilter(key)}
+                  style={{ flexDirection: "row", alignItems: "center", gap: 14, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, paddingVertical: 15, paddingHorizontal: 16, marginBottom: 10 }}
+                >
+                  <View style={{ width: 24, height: 24, borderRadius: 7, borderWidth: 1.5, borderColor: checked ? "#fff" : "#6e6e73", backgroundColor: checked ? "#fff" : "transparent", alignItems: "center", justifyContent: "center" }}>
+                    {checked ? <Ionicons name="checkmark" size={16} color="#000" /> : null}
+                  </View>
+                  <Text style={{ fontSize: 16, fontWeight: "600", color: "#fff" }}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      </Modal>
 
       {/* Add member modal */}
       <Modal visible={showAdd} transparent animationType="slide" onRequestClose={() => setShowAdd(false)}>
@@ -393,7 +466,7 @@ const visibleEmployees = useMemo(() => {
                   if (!canAddRole(newEmpRole)) { setNewEmpError("Ou pa gen dwa kreye wòl sa a — se sèlman siperyè strik ka kreye (pa menm nivo, pa Owner)."); return; }
                   const id = `emp-${Date.now()}`;
                   const secret = String(employees.length + 1);
-                  setEmployees(prev => [...prev, { id, name: newEmpName.trim(), role: newEmpRole as any, phone: newEmpPhone.trim(), address: newEmpAddress.trim(), store: currentStore, emergency: { name: newEmpEmergName.trim(), phone: newEmpEmergPhone.trim(), address: newEmpEmergAddress.trim() }, secret, password: `pass-${Math.random().toString(36).slice(2, 8)}`, lastAction: "Nouvo manm", kpi: "—", salary: newEmpRole === "admin" ? "32,000 HTG" : newEmpRole === "manager" ? "25,000 HTG" : "12,000 HTG", isOnline: false, active: true } as any]);
+                  setEmployees(prev => [...prev, { id, name: newEmpName.trim(), role: newEmpRole as any, phone: newEmpPhone.trim(), address: newEmpAddress.trim(), store: currentStore, emergency: { name: newEmpEmergName.trim(), phone: newEmpEmergPhone.trim(), address: newEmpEmergAddress.trim() }, secret, password: `pass-${Math.random().toString(36).slice(2, 8)}`, lastAction: "Nouvo manm", kpi: "—", salary: newEmpRole === "admin" ? "G 32 000" : newEmpRole === "manager" ? "G 25 000" : "G 12 000", isOnline: false, active: true } as any]);
                   setNewEmpName(""); setNewEmpPhone(""); setNewEmpAddress(""); setNewEmpEmergName(""); setNewEmpEmergPhone(""); setNewEmpEmergAddress(""); setNewEmpRole("cashier"); setNewEmpError("");
                   setShowAdd(false);
                 }}
@@ -408,133 +481,54 @@ const visibleEmployees = useMemo(() => {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Detail modal — Apple profile sheet */}
-      <Modal visible={!!selectedEmp} transparent animationType="slide" onRequestClose={() => setSelectedEmp(null)}>
+      {/* Detail modal — full-screen dark profile */}
+      <Modal visible={!!selectedEmp} transparent={false} animationType="slide" onRequestClose={() => setSelectedEmp(null)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "rgba(22,19,12,0.4)", justifyContent: "flex-end", alignItems: isTablet ? "center" : undefined }}>
-          <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: "#F2F2F7", borderTopLeftRadius: 14, borderTopRightRadius: 14, maxHeight: "88%", overflow: "hidden" }}>
-            {/* Drag indicator */}
-            <View style={{ paddingTop: 8, paddingBottom: 4, alignItems: "center" }}><View style={{ width: 36, height: 5, borderRadius: 3, backgroundColor: "#D1D1D6" }} /></View>
-
-            {/* Profile header */}
-            {selectedEmp && (
-              <View style={{ backgroundColor: "white", paddingTop: 12, paddingBottom: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E5E5EA" }}>
-                {modalView !== "detail" && (
-                  <Animated.View style={{ position: "absolute", top: 6, left: 10, zIndex: 10, transform: [{ translateX: slide }], opacity }}>
-                    <Pressable onPress={() => setModalView("detail")} style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingVertical: 6, paddingHorizontal: 4 }}>
-                      <Text style={{ fontSize: 22, color: "#16130c", fontWeight: "500", lineHeight: 22 }}>‹</Text>
-                      <Text style={{ fontSize: 15, color: "#16130c", fontWeight: "500" }}>Dèyè</Text>
-                    </Pressable>
+          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: 60, paddingBottom: 24 }}>
+            {modalView === "detail" ? (
+              <>
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <Pressable onPress={() => setSelectedEmp(null)} accessibilityLabel="Close" hitSlop={8} style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}>
+                    <Ionicons name="close" size={31} color="#fff" />
+                  </Pressable>
+                  <Animated.View style={{ flex: 1, opacity: titleFade }}>
+                    <Text style={{ textAlign: "center", fontWeight: "800", fontSize: 18, color: "#fff" }} numberOfLines={1}>{empLastName}</Text>
                   </Animated.View>
-                )}
-                <View style={{ alignItems: "center" }}>
-                  <View style={{ position: "relative" }}>
-                    <View style={{
-                      width: 64, height: 64, borderRadius: 32,
-                      backgroundColor: ROLE_COLOR[selectedEmp.role] ?? "#F2F2F7",
-                      alignItems: "center", justifyContent: "center",
-                      shadowColor: ROLE_COLOR[selectedEmp.role] ?? "#000", shadowOpacity: 0.2, shadowRadius: 10, shadowOffset: { width: 0, height: 4 },
-                      borderWidth: 1.5, borderColor: selectedEmp.role === "owner" ? GOLD : "rgba(200,162,74,0.45)",
-                    }}>
-                      <Text style={{ color: selectedEmp.role === "cashier" ? "#16130c" : "#fff", fontWeight: "600", fontSize: 20 }}>{selectedEmp.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
-                    </View>
-                    <View style={{ position: "absolute", right: 0, bottom: 0, width: 16, height: 16, borderRadius: 8, backgroundColor: selectedEmp.isOnline ? "#34C759" : "#C7C7CC", borderWidth: 3, borderColor: "white" }} />
-                  </View>
-                  <Text style={{ fontWeight: "600", fontSize: 20, color: "#16130c", marginTop: 10, letterSpacing: -0.4 }}>{selectedEmp.name}</Text>
-                  <View style={{ flexDirection: "row", gap: 6, marginTop: 6 }}>
-                    <View style={{ backgroundColor: (ROLE_META[selectedEmp.role] ?? ROLE_META.cashier).bg, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 3 }}>
-                      <Text style={{ fontSize: 11, fontWeight: "600", color: (ROLE_META[selectedEmp.role] ?? ROLE_META.cashier).color }}>{(ROLE_META[selectedEmp.role] ?? ROLE_META.cashier).label}</Text>
-                    </View>
-                    <View style={{ backgroundColor: selectedEmp.isOnline ? "#EAF6ED" : "#F2F2F7", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 3 }}>
-                      <Text style={{ fontSize: 11, fontWeight: "500", color: selectedEmp.isOnline ? "#34C759" : "#837b69" }}>{selectedEmp.isOnline ? "En ligne" : "Hors ligne"}</Text>
-                    </View>
-                  </View>
+                  <View style={{ width: 44 }} />
                 </View>
+
+            {modalView === "detail" && selectedEmp && <ScrollView ref={detailScrollRef} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false} scrollEventThrottle={16} onScroll={e => setEmpNameCollapsed(e.nativeEvent.contentOffset.y > 100)}>
+              <View style={{ marginTop: 10 }}>
+              <EmployeeProfileBody
+                employee={selectedEmp}
+                stats={empStats}
+                canSeeSalary={canSeeSalary(selectedEmp)}
+                roleLabel={(ROLE_META[selectedEmp.role] ?? ROLE_META.cashier).label}
+                storeLabel={STORE_LABELS[selectedEmp.store ?? ""] ?? selectedEmp.store}
+                isSelf={selectedEmp.id === currentUser?.id}
+                canToggleActive={canToggle(selectedEmp)}
+                canEditRole={canAffect(selectedEmp) && selectedEmp.role !== "owner" && selectedEmp.id !== currentUser?.id}
+                canEditCredentials={canChangeSelf(selectedEmp) || canResetOther(selectedEmp)}
+                onToggleActive={() => { toggleActive(selectedEmp); setSelectedEmp({ ...selectedEmp, active: !selectedEmp.active }); }}
+                onEditRole={() => { setEditingEmp(selectedEmp); setEditEmpRole(selectedEmp.role); setModalView("edit"); }}
+                onEditCredentials={() => {
+                  if (canChangeSelf(selectedEmp)) { setSelfEditEmp(selectedEmp); setSelfSecret(""); setSelfPassword(""); setModalView("selfEdit"); }
+                  else { setResetTargetEmp(selectedEmp); setModalView("reset"); }
+                }}
+              />
               </View>
-            )}
-
-            {modalView === "detail" && <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ paddingTop: 8 }} contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-              {/* Info section */}
-              {selectedEmp && (
-                <View style={{ backgroundColor: "white", marginHorizontal: 16, borderRadius: 12, overflow: "hidden" }}>
-                  <View style={{ paddingHorizontal: 14, paddingTop: 12, paddingBottom: 6 }}>
-                    <Text style={{ fontSize: 11, fontWeight: "800", color: "#9C7A1E", textTransform: "uppercase", letterSpacing: 0.8 }}>Enfòmasyon</Text>
-                  </View>
-                  {[
-                    { label: "Telefon", value: selectedEmp.phone ?? "—" },
-                    { label: "Adrès", value: selectedEmp.address ?? "—" },
-                    { label: "Magazen", value: STORE_LABELS[selectedEmp.store ?? ""] ?? selectedEmp.store ?? "—" },
-                    { label: "Salè", value: canSeeSalary(selectedEmp) ? `${selectedEmp.salary} / mwa` : "Konfidansyèl" },
-                    { label: "Kòd", value: "••••" },
-                  ].map((row, i, arr) => (
-                    <View key={row.label} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: i < arr.length - 1 ? StyleSheet.hairlineWidth : 0, borderBottomColor: "#E5E5EA" }}>
-                      <Text style={{ fontSize: 15, color: "#3C3C43", fontWeight: "400" }}>{row.label}</Text>
-                      <Text style={{ fontSize: 15, color: "#16130c", fontWeight: "500" }}>{row.value}</Text>
-                    </View>
-                  ))}
-                </View>
-              )}
-
-              {/* Emergency section */}
-              {selectedEmp?.emergency ? (
-                <View style={{ backgroundColor: "white", marginHorizontal: 16, marginTop: 20, borderRadius: 12, overflow: "hidden" }}>
-                  <View style={{ paddingHorizontal: 14, paddingTop: 12, paddingBottom: 6 }}>
-                    <Text style={{ fontSize: 11, fontWeight: "800", color: "#9C7A1E", textTransform: "uppercase", letterSpacing: 0.8 }}>Kontak ijans</Text>
-                  </View>
-                  {[
-                    { label: "Non", value: selectedEmp.emergency.name },
-                    { label: "Telefon", value: selectedEmp.emergency.phone },
-                    { label: "Adrès", value: selectedEmp.emergency.address },
-                  ].map((row, i, arr) => (
-                    <View key={row.label} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: i < arr.length - 1 ? StyleSheet.hairlineWidth : 0, borderBottomColor: "#E5E5EA" }}>
-                      <Text style={{ fontSize: 15, color: "#3C3C43" }}>{row.label}</Text>
-                      <Text style={{ fontSize: 15, color: "#16130c", fontWeight: "500" }}>{row.value}</Text>
-                    </View>
-                  ))}
-                </View>
-              ) : null}
-
-              {/* Actions section */}
-              {selectedEmp && (
-                <View style={{ backgroundColor: "white", marginHorizontal: 16, marginTop: 20, borderRadius: 12, overflow: "hidden" }}>
-                  <View style={{ paddingHorizontal: 14, paddingTop: 12, paddingBottom: 6 }}>
-                    <Text style={{ fontSize: 11, fontWeight: "800", color: "#9C7A1E", textTransform: "uppercase", letterSpacing: 0.8 }}>Aksyon</Text>
-                  </View>
-                  {canToggle(selectedEmp) && (
-                    <Pressable onPress={() => toggleActive(selectedEmp)} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E5E5EA" }}>
-                      <Ionicons name={selectedEmp.active ? "pause-circle-outline" : "play-circle-outline"} size={20} color="#FF3B30" style={{ marginRight: 12 }} />
-                      <Text style={{ fontSize: 15, color: "#FF3B30", fontWeight: "500" }}>{selectedEmp.active ? "Dezaktive" : "Aktive"}</Text>
-                    </Pressable>
-                  )}
-                  {canAffect(selectedEmp) && selectedEmp.role !== "owner" && selectedEmp.id !== currentUser?.id ? (
-                    <Pressable onPress={() => { setEditingEmp(selectedEmp); setEditEmpRole(selectedEmp.role); setModalView("edit"); }} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E5E5EA" }}>
-                      <Ionicons name="shield-checkmark-outline" size={20} color="#FF3B30" style={{ marginRight: 12 }} />
-                      <Text style={{ fontSize: 15, color: "#FF3B30", fontWeight: "500" }}>Modifye wòl</Text>
-                    </Pressable>
-                  ) : null}
-                  {canChangeSelf(selectedEmp) ? (
-                    <Pressable onPress={() => { setSelfEditEmp(selectedEmp); setSelfSecret(""); setSelfPassword(""); setModalView("selfEdit"); }} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E5E5EA" }}>
-                      <Ionicons name="key-outline" size={20} color="#FF3B30" style={{ marginRight: 12 }} />
-                      <Text style={{ fontSize: 15, color: "#FF3B30", fontWeight: "500" }}>Chanje kòd / modpas</Text>
-                    </Pressable>
-                  ) : canResetOther(selectedEmp) ? (
-                    <Pressable onPress={() => { setResetTargetEmp(selectedEmp); setModalView("reset"); }} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E5E5EA" }}>
-                      <Ionicons name="refresh-outline" size={20} color="#FF3B30" style={{ marginRight: 12 }} />
-                      <Text style={{ fontSize: 15, color: "#FF3B30", fontWeight: "500" }}>Reyinisyialize kòd / modpas</Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              )}
             </ScrollView>}
-
-            {/* Detail view footer */}
-            {modalView === "detail" && (
-              <View style={{ padding: 16, paddingBottom: 28, backgroundColor: "white", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#E5E5EA" }}>
-                <Pressable onPress={() => setSelectedEmp(null)} style={{ backgroundColor: "#16130c", borderRadius: 12, paddingVertical: 14, alignItems: "center", borderWidth: 1, borderColor: "rgba(200,162,74,0.35)" }}>
-                  <Text style={{ color: "white", fontWeight: "600", fontSize: 17 }}>Fèmen</Text>
-                </Pressable>
-              </View>
-            )}
+              </>
+            ) : (
+              <>
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <Pressable onPress={() => setModalView("detail")} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10, paddingRight: 16 }}>
+                    <Text style={{ fontSize: 24, color: "#fff", fontWeight: "500", lineHeight: 24 }}>‹</Text>
+                    <Text style={{ fontSize: 16, color: "#fff", fontWeight: "500", marginLeft: 4 }}>Dèyè</Text>
+                  </Pressable>
+                  <View style={{ flex: 1 }} />
+                </View>
+                <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }}>
 
             {/* Edit role — inside modal */}
             {modalView === "edit" && editingEmp && (
@@ -640,7 +634,9 @@ const visibleEmployees = useMemo(() => {
                 </View>
               </Animated.View>
             )}
-          </View>
+                </ScrollView>
+              </>
+            )}
           </View>
         </KeyboardAvoidingView>
       </Modal>

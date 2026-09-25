@@ -9,8 +9,8 @@ export type Props = SalesTabProps;
 
 export default function SalesTab(props: SalesTabProps) {
   const { isTablet, isLandscape } = useResponsive();
-  // Tablet 2x2 grid needs landscape width; portrait tablets use phone stack.
-  if (isTablet && isLandscape) {
+  // Tablet 2x2 grid shows in portrait; landscape tablets use phone stack.
+  if (isTablet && !isLandscape) {
     return <SalesTablet {...props} />;
   }
   return <SalesPhone {...props} />;

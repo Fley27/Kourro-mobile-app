@@ -6,7 +6,7 @@ import { useResponsive } from "../../responsive";
 import { BRAND, RangeSelector, type SalesTabProps } from "./SalesShared";
 import type { TeamKPI } from "./types";
 import { RANGES } from "./types";
-import { fmt, monoStyle } from "../../format";
+import { fmtG, fmt, monoStyle } from "../../format";
 
 // ---------------------------------------------------------------------------
 // Tablet-only presentational variants (web card design language).
@@ -87,7 +87,7 @@ function TabletPieCashCredit({ kpi }: { kpi: TeamKPI }) {
       : [{ value: 1, color: BRAND.goldBg }];
   return (
     <TCard>
-      <TCardHeader title="Cash / Crédit" subtitle="Répartition des ventes" pill={`${fmt(total)} HTG`} />
+      <TCardHeader title="Cash / Crédit" subtitle="Répartition des ventes" pill={`${fmtG(total)}`} />
       <TDivider />
       <View style={tStyles.chartRow}>
         <PieChart
@@ -100,7 +100,7 @@ function TabletPieCashCredit({ kpi }: { kpi: TeamKPI }) {
           centerLabelComponent={() => (
             <View style={tStyles.pieCenter}>
               <Text style={tStyles.pieCenterValue}>{fmt(total)}</Text>
-              <Text style={tStyles.pieCenterLabel}>HTG</Text>
+              <Text style={tStyles.pieCenterLabel}>G</Text>
             </View>
           )}
         />
@@ -124,7 +124,7 @@ function TabletDonutCashMobile({ kpi }: { kpi: TeamKPI }) {
       : [{ value: 1, color: BRAND.goldBg }];
   return (
     <TCard>
-      <TCardHeader title="Cash vs Mobile" subtitle="Ventes encaissées vs paiement mobile" pill={`${fmt(total)} HTG`} />
+      <TCardHeader title="Cash vs Mobile" subtitle="Ventes encaissées vs paiement mobile" pill={`${fmtG(total)}`} />
       <TDivider />
       <View style={tStyles.chartRow}>
         <PieChart
@@ -136,7 +136,7 @@ function TabletDonutCashMobile({ kpi }: { kpi: TeamKPI }) {
           centerLabelComponent={() => (
             <View style={tStyles.pieCenter}>
               <Text style={tStyles.pieCenterValue}>{fmt(total)}</Text>
-              <Text style={tStyles.pieCenterLabel}>HTG</Text>
+              <Text style={tStyles.pieCenterLabel}>G</Text>
             </View>
           )}
           strokeWidth={0}
@@ -160,7 +160,7 @@ function TabletGaugeCreditCollection({ kpi }: { kpi: TeamKPI }) {
     <TCard>
       <TCardHeader
         title="Recouvrement du Crédit"
-        subtitle={`Objectif : ${fmt(goal)} HTG émis`}
+        subtitle={`Objectif : ${fmtG(goal)} émis`}
         pill={hasCredit ? `${pct}%` : "—"}
         accentPill={hasCredit}
       />
@@ -187,11 +187,11 @@ function TabletGaugeCreditCollection({ kpi }: { kpi: TeamKPI }) {
         />
       </View>
       <View style={tStyles.legendList}>
-        <TLegendRow color={BRAND.gold} label="Collecté" value={collected} unit="HTG" />
-        <TLegendRow color={BRAND.goldDeep} label="Restant" value={outstanding} unit="HTG" isLast />
+        <TLegendRow color={BRAND.gold} label="Collecté" value={collected} unit="G" />
+        <TLegendRow color={BRAND.goldDeep} label="Restant" value={outstanding} unit="G" isLast />
       </View>
       <View style={tStyles.footerBar}>
-        <Text style={tStyles.footerBarLabel}>Total émis : {fmt(goal)} HTG</Text>
+        <Text style={tStyles.footerBarLabel}>Total émis : {fmtG(goal)}</Text>
       </View>
     </TCard>
   );
@@ -218,7 +218,7 @@ function TabletProfitStackedBar({ kpi, width }: { kpi: TeamKPI; width: number })
       <TCardHeader
         title="Valeur brute (Profit)"
         subtitle="Cash sales + crédit (collecté + restant)"
-        pill={`${fmt(barTotal)} HTG`}
+        pill={`${fmtG(barTotal)}`}
       />
       <TDivider />
       <View style={tStyles.barChartWrap}>
@@ -236,12 +236,12 @@ function TabletProfitStackedBar({ kpi, width }: { kpi: TeamKPI; width: number })
         />
       </View>
       <View style={tStyles.legendList}>
-        <TLegendRow color={BRAND.ink} label="Ventes Cash" value={cashSales} unit="HTG" />
-        <TLegendRow color={BRAND.gold} label="Crédit collecté" value={collectedCredit} unit="HTG" />
-        <TLegendRow color={BRAND.red} label="Crédit restant" value={outstandingCredit} unit="HTG" isLast />
+        <TLegendRow color={BRAND.ink} label="Ventes Cash" value={cashSales} unit="G" />
+        <TLegendRow color={BRAND.gold} label="Crédit collecté" value={collectedCredit} unit="G" />
+        <TLegendRow color={BRAND.red} label="Crédit restant" value={outstandingCredit} unit="G" isLast />
       </View>
       <View style={tStyles.footerBar}>
-        <Text style={tStyles.footerBarLabel}>Total brut : {fmt(barTotal)} HTG</Text>
+        <Text style={tStyles.footerBarLabel}>Total brut : {fmtG(barTotal)}</Text>
       </View>
     </TCard>
   );

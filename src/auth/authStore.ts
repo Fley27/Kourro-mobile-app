@@ -194,14 +194,19 @@ export function useAuthState(): AuthState {
 }
 
 // Restore on boot: live session → profile; else cached → PIN screen; else login.
+// NOTE: the cached profile lives in SecureStore (HARD memory / disk), so it
+// survives Metro rebundles + cold restarts. We must read it even in mock
+// (non-live Supabase) mode — otherwise every rebundle wipes the session and
+// forces a full login, looking like data loss.
 async function restore() {
+  const cache = await readCachedProfile();
+  if (cache) useAuthStore.setState({ cached: cache });
   if (!isLiveSupabase) {
-    // Local dev: no real Supabase — always open the login screen (demo entry there).
+    // Local dev: no real Supabase — if a profile was cached on disk, keep it
+    // so LoginScreen can offer PIN unlock (!user && cached). Else login.
     useAuthStore.setState({ status: "signedout", error: null });
     return;
   }
-  const cache = await readCachedProfile();
-  if (cache) useAuthStore.setState({ cached: cache });
   const { data: { session } } = await supabase.auth.getSession();
   if (session?.user) {
     await hydrateFromSession(session.user.id, cache);

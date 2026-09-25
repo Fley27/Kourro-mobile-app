@@ -4,6 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { palette, radius, shadow } from "../../theme";
 import { useResponsive, centerBox, sheetBox, dialogBox } from "../../responsive";
 import { generateUniqueCode } from "./storeCodes";
+import type { BusinessType } from "../../users";
 
 type StoreItem = { id: string; name: string; location: string; code: string; createdAt: string; disabled?: boolean; breachFlagged?: boolean; breachedAt?: string; revokedBy?: string };
 
@@ -15,6 +16,8 @@ type Props = {
   setActiveStoreId: (id: string) => void;
   appDisabled: boolean;
   setAppDisabled: (v: boolean | ((prev: boolean) => boolean)) => void;
+  businessType?: BusinessType;
+  onBusinessTypeChange?: (t: BusinessType) => void;
   onClose: () => void;
 };
 
@@ -22,7 +25,7 @@ const MAX_STORES = 3;
 
 export default function AccountCenter({
   role, stores, setStores, activeStoreId, setActiveStoreId,
-  appDisabled, setAppDisabled, onClose,
+  appDisabled, setAppDisabled, businessType = "retail", onBusinessTypeChange, onClose,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -92,12 +95,34 @@ export default function AccountCenter({
             <Text style={{ color: "#fff", fontSize: 10, fontWeight: "700" }}>{active?.location ?? ""}</Text>
           </View>
         </View>
-        {justSwitched && (
-          <View style={{ marginTop: 8, backgroundColor: palette.successBg, borderRadius: radius.sm, padding: 8 }}>
-            <Text style={{ fontWeight: "800", fontSize: 12, color: palette.success, textAlign: "center" }}>✓ Ou ap itilize kounye a: {stores.find(s => s.id === justSwitched)?.name}</Text>
+          {justSwitched && (
+            <View style={{ marginTop: 8, backgroundColor: palette.successBg, borderRadius: radius.sm, padding: 8 }}>
+              <Text style={{ fontWeight: "800", fontSize: 12, color: palette.success, textAlign: "center" }}>✓ Ou ap itilize kounye a: {stores.find(s => s.id === justSwitched)?.name}</Text>
+            </View>
+          )}
+        </View>
+        {role === "owner" && (
+          <View style={{ backgroundColor: palette.surface, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.md, padding: 12, marginTop: 10 }}>
+            <Text style={{ fontWeight: "800", fontSize: 13, color: palette.ink }}>Tip Biznis</Text>
+            <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 2 }}>Tout magazen eritye tip sa a • Sèlman pwopriyetè ka chanje l</Text>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+              {(["retail", "bar", "resto"] as BusinessType[]).map(t => {
+                const active = businessType === t;
+                return (
+                  <Pressable
+                    key={t}
+                    onPress={() => onBusinessTypeChange?.(t)}
+                    style={{ flex: 1, paddingVertical: 10, borderRadius: radius.sm, borderWidth: 1, borderColor: active ? palette.ink2 : palette.hairline, backgroundColor: active ? palette.ink2 : palette.surface, alignItems: "center" }}
+                  >
+                    <Text style={{ fontWeight: "800", fontSize: 12, color: active ? "#fff" : palette.ink }}>
+                      {t === "retail" ? "Retail" : t === "bar" ? "Bar" : "Resto"}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
           </View>
         )}
-      </View>
 
       {/* Stat cards */}
       <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>

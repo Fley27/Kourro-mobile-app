@@ -1,4 +1,4 @@
-import { fmt } from "./format";
+import { fmtG, fmt } from "./format";
 import { getUserById } from "./users";
 import { insertOutbox } from "./db";
 import { buildReceipts } from "./receipts";
@@ -156,7 +156,8 @@ export async function changeSalePaymentMethod(
     storeName: opts.storeName,
     createdAt: sale.created_at ?? now,
     cashier: { id: sale.seller_id ?? null, name: cashierName, role: sale.seller_role ?? "cashier" },
-    customer: customer ? { name: customer.name, idCard: customer.id_card_number ?? null, phone: customer.phone ?? null } : null,
+    customer: customer ? { name: customer.name, idCard: customer.id_card_number ?? null, phone: customer.phone ?? null, email: customer.email ?? null } : null,
+    customerId: customer?.id ?? null,
     items: receiptItems,
     subtotal: Number(sale.subtotal ?? total),
     discount: Number(sale.discount ?? 0),
@@ -186,5 +187,5 @@ export function salePaymentLabel(p: string): string {
 }
 
 export function formatMoney(n: number): string {
-  return `${fmt(n)} HTG`;
+  return `${fmtG(n)}`;
 }

@@ -2,12 +2,15 @@ import React, { useState, useEffect } from "react";
 import { View, Text, Pressable, Modal, TextInput, Alert, ScrollView, KeyboardAvoidingView, Platform } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb } from "../../db";
-import { fmt, monoStyle } from "../../format";
+import { fmtG, fmt, monoStyle } from "../../format";
 import { getUserById, USERS } from "../../users";
 import { notifyLocal } from "../../notifications";
 import { palette, radius, shadow } from "../../theme";
 import { findSaleDetail, changeSalePaymentMethod, describeChange, salePaymentLabel, formatMoney, type SaleDetail } from "../../salesCorrection";
 import { useResponsive, centerBox, sheetBox } from "../../responsive";
+// STAGING-PICKUP: single gated import — delete this + the STAGING block below to remove.
+import PickupToggleCard from "../../pickup-staging/PickupToggleCard";
+import PickupRedeemEntry from "../../pickup-staging/PickupRedeemEntry";
 
 export type StoreItem = { id: string; name: string; location: string; code: string; createdAt: string; disabled?: boolean; breachFlagged?: boolean }; 
 
@@ -155,7 +158,7 @@ export default function StoreScreen({
       const shifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
       const existing = shifts.find((s: any) => s.status === "open" && s.cashier_id === currentUser.id);
       if (existing) {
-        Alert.alert("Chanjman kòmanse ✓", `Ou gen yon chanjman ouvè a ${fmt(existing.opening_balance)} HTG. Ou pa bezwen rekòmanse konfimasyon an.`);
+        Alert.alert("Chanjman kòmanse ✓", `Ou gen yon chanjman ouvè a ${fmtG(existing.opening_balance)}. Ou pa bezwen rekòmanse konfimasyon an.`);
         setShowRegister(false);
         if (onGoSales) onGoSales();
         return;
@@ -175,10 +178,10 @@ export default function StoreScreen({
       const notifTargets = USERS.filter(u => (u.store === (activeStore?.name ?? "") || storeId === "demo-store-id") && (u.role === "admin" || u.role === "manager" || u.role === "owner"));
       for (const t of notifTargets) {
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [`notif-${Date.now()}-${t.id}-${Math.random().toString(36).slice(2, 5)}`, t.id, "shift_opening", shiftId, `${currentUser.name} kòmanse chanjman ak ${fmt(program)} HTG.`, "pending", ts]);
+          [`notif-${Date.now()}-${t.id}-${Math.random().toString(36).slice(2, 5)}`, t.id, "shift_opening", shiftId, `${currentUser.name} kòmanse chanjman ak ${fmtG(program)}.`, "pending", ts]);
       }
-      notifyLocal("Chanjman kòmanse", `Kes la dakò a ${fmt(program)} HTG. Ou ka kòmanse vann kounye a.`);
-      Alert.alert("Dakò ✓", `Kes la konfime pou ${fmt(program)} HTG. Chanjman kòmanse — ou ka kòmanse vann, pèsonn pap mande ou ankò.`);
+      notifyLocal("Chanjman kòmanse", `Kes la dakò a ${fmtG(program)}. Ou ka kòmanse vann kounye a.`);
+      Alert.alert("Dakò ✓", `Kes la konfime pou ${fmtG(program)}. Chanjman kòmanse — ou ka kòmanse vann, pèsonn pap mande ou ankò.`);
       setRegStated(""); setRegView("ask"); setShowRegister(false);
       loadChecks();
       onShiftResolved?.();
@@ -209,8 +212,8 @@ export default function StoreScreen({
         [`reg-${Date.now()}`, storeId, "", cashier.id, ts2.slice(0,10), amount, amount, "approved", "set_program", approver.id, approver.role ?? "manager", 0, approver.id, amount, ts2]
       );
       setRegProgram(String(amount));
-      notifyLocal("Montan kes chanje", `${approver.name} mete montan ouvèti kes ${cashier.name} a sou ${fmt(amount)} HTG`);
-      Alert.alert("Anrejistre ✓", `Montan ouvèti kes ${cashier.name} a mete sou ${fmt(amount)} HTG. Kesye a wè l lè li ouvri kes la. Ou ka chanje pou yon lòt kesye oswa fèmen.`);
+      notifyLocal("Montan kes chanje", `${approver.name} mete montan ouvèti kes ${cashier.name} a sou ${fmtG(amount)}`);
+      Alert.alert("Anrejistre ✓", `Montan ouvèti kes ${cashier.name} a mete sou ${fmtG(amount)}. Kesye a wè l lè li ouvri kes la. Ou ka chanje pou yon lòt kesye oswa fèmen.`);
       loadChecks();
       setSetupCashier("");
       setSetupCashierDropdown(false);
@@ -242,10 +245,10 @@ export default function StoreScreen({
         if (t.id === currentUser.id) continue;
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
           [`notif-${Date.now()}-${t.id}-${Math.random().toString(36).slice(2, 5)}`, t.id, "reg_complaint", `reg-${Date.now()}`,
-            `${currentUser.name} pa dakò ak kes la: li konte ${fmt(stated)} HTG olye de ${fmt(program)} HTG. Chanjman an sispann (atant yo). Yon sipèvizè dwe revize.`, "pending", ts]);
+            `${currentUser.name} pa dakò ak kes la: li konte ${fmtG(stated)} olye de ${fmtG(program)}. Chanjman an sispann (atant yo). Yon sipèvizè dwe revize.`, "pending", ts]);
       }
-      notifyLocal("Plent Kach", `${currentUser.name} pa dakò ak kes la (konte ${fmt(stated)} HTG, atann ${fmt(program)} HTG)`);
-      Alert.alert("Plent voye", `Ou pa dakò ak kes la (${fmt(stated)} HTG). Chanjman ou make "ap tann" — Notifikasyon voye bay Admin/Manadjè/Owner. Ou pa ka kòmanse jiskaske yo konfime.`);
+      notifyLocal("Plent Kach", `${currentUser.name} pa dakò ak kes la (konte ${fmtG(stated)}, atann ${fmtG(program)})`);
+      Alert.alert("Plent voye", `Ou pa dakò ak kes la (${fmtG(stated)}). Chanjman ou make "ap tann" — Notifikasyon voye bay Admin/Manadjè/Owner. Ou pa ka kòmanse jiskaske yo konfime.`);
       setRegStated(""); setRegView("ask"); setShowRegister(false);
       loadChecks();
       onShiftResolved?.();
@@ -348,8 +351,8 @@ export default function StoreScreen({
       const msg = action === "disagree"
         ? `${actingUser.name} pa dakò ak tikit ou. Kes ou rete fèmen — al kontakte sipèvizè a pou repati.`
         : action === "set"
-          ? `${actingUser.name} fikse kes ou sou ${fmt(dayAmount)} HTG. Chanjman ou kòmanse — sales debloke, ou ka kòmanse vann.`
-          : `${actingUser.name} konfime kes ou a ${fmt(dayAmount)} HTG. Chanjman ou kòmanse — sales debloke, ou ka kòmanse vann.`;
+          ? `${actingUser.name} fikse kes ou sou ${fmtG(dayAmount)}. Chanjman ou kòmanse — sales debloke, ou ka kòmanse vann.`
+          : `${actingUser.name} konfime kes ou a ${fmtG(dayAmount)}. Chanjman ou kòmanse — sales debloke, ou ka kòmanse vann.`;
       const cashierMsg = msg;
       for (const t of notifTargets) {
         if (t.id === actingUser.id) continue;
@@ -404,8 +407,8 @@ export default function StoreScreen({
         "INSERT INTO cash_movements (id, shift_id, store_id, type, amount, reason, created_by, taken_by, validated_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         [`cm-inv-${Date.now()}`, shiftId, storeId, "inventory", amt, invComment || "Retrè kach", currentUser.id, cashier.id, `${currentUser.name}`, new Date().toISOString()]
       );
-      Alert.alert("Kach anrejistre", `${fmt(amt)} HTG retire depi kès ${cashier.name} (${invComment || "retrè kach"}) — anrejistre pa ${currentUser.name}. Li ap reflete imedyatman nan rapò jounen kesye a.`);
-      notifyLocal("Retire Kach", `${fmt(amt)} HTG retire depi kès ${cashier.name} — ${invComment || "retrè kach"}`);
+      Alert.alert("Kach anrejistre", `${fmtG(amt)} retire depi kès ${cashier.name} (${invComment || "retrè kach"}) — anrejistre pa ${currentUser.name}. Li ap reflete imedyatman nan rapò jounen kesye a.`);
+      notifyLocal("Retire Kach", `${fmtG(amt)} retire depi kès ${cashier.name} — ${invComment || "retrè kach"}`);
       setInvAmt(""); setInvComment(""); setInvSecret("");
       setShowInv(false);
     } catch (e) {
@@ -644,6 +647,11 @@ export default function StoreScreen({
         </View>
       )}
 
+      {/* STAGING-PICKUP: manager toggle (device-local). Delete block to remove. */}
+      <PickupToggleCard storeId={storeId} role={role} />
+      {/* STAGING-PICKUP: cashier redemption entry (flag-gated). Delete block to remove. */}
+      <PickupRedeemEntry storeId={storeId} cashierId={currentUser?.id ?? null} storeName={activeStore?.name ?? null} cashierName={currentUser?.name ?? null} />
+
       {/* Non-owner note */}
       {!isOwner && (
         <View style={{ backgroundColor: palette.surface, borderRadius: radius.lg, padding: 16, borderWidth: 0.5, borderColor: palette.hairline }}>
@@ -714,23 +722,23 @@ export default function StoreScreen({
               </View>
             )}
 
-            <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 16 }}>Montan (HTG) *</Text>
-            <TextInput value={invAmt} onChangeText={setInvAmt} keyboardType="numeric" placeholder="5000" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.hairlineStrong, borderRadius: radius.sm, padding: 13, minHeight: 50, marginTop: 6, color: palette.ink, fontFamily: "Quicksand_700Bold", fontWeight: "700", backgroundColor: palette.bg }} />
+            <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 16 }}>Montan (G) *</Text>
+            <TextInput value={invAmt} onChangeText={setInvAmt} keyboardType="numeric" placeholder="5000" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.hairlineStrong, borderRadius: radius.sm, padding: 13, minHeight: 50, marginTop: 6, color: palette.ink, fontFamily: "Inter_700Bold", fontWeight: "700", backgroundColor: palette.bg }} />
 
             <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 12 }}>Rezon / Kòmantè</Text>
             <TextInput value={invComment} onChangeText={setInvComment} placeholder="Fason yo pral itilize kach la (eg. envantè, faktirite)" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.hairlineStrong, borderRadius: radius.sm, padding: 13, minHeight: 50, marginTop: 6, color: palette.ink, backgroundColor: palette.bg }} />
 
             {/* Supervisor secret */}
             <View style={{ marginTop: 12, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: palette.accentGoldSoft, borderRadius: radius.md, padding: 12 }}>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🔐 Kòd sekrè ou</Text>
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Sèlman sipèvizè ka anrejistre</Text>
-              <TextInput value={invSecret} onChangeText={setInvSecret} secureTextEntry keyboardType="numeric" placeholder="Antre kòd sekrè ou" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.accentGold, borderRadius: radius.sm, padding: 12, minHeight: 48, marginTop: 8, backgroundColor: palette.surface, fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink }} />
+              <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🔐 Kòd sekrè ou</Text>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Sèlman sipèvizè ka anrejistre</Text>
+              <TextInput value={invSecret} onChangeText={setInvSecret} secureTextEntry keyboardType="numeric" placeholder="Antre kòd sekrè ou" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.accentGold, borderRadius: radius.sm, padding: 12, minHeight: 48, marginTop: 8, backgroundColor: palette.surface, fontFamily: "Inter_700Bold", fontWeight: "700", color: palette.ink }} />
             </View>
 
             <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
-              <Pressable onPress={() => setShowInv(false)} style={{ flex: 1, padding: 13, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, alignItems: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink }}>Anile</Text></Pressable>
+              <Pressable onPress={() => setShowInv(false)} style={{ flex: 1, padding: 13, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, alignItems: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", color: palette.ink }}>Anile</Text></Pressable>
               <Pressable onPress={handleInventoryPickup} style={{ flex: 1, padding: 13, backgroundColor: palette.ink2, borderRadius: radius.md, alignItems: "center", ...shadow.soft }}>
-                <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>Anrejistre</Text>
+                <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700" }}>Anrejistre</Text>
               </Pressable>
             </View>
               </View>
@@ -817,12 +825,12 @@ export default function StoreScreen({
                             <View style={{ marginTop: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, padding: 10, gap: 6 }}>
                               <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                                 <Text style={{ fontSize: 11, color: palette.muted2 }}>Kesye te konte</Text>
-                                <Text style={{ fontSize: 13, fontWeight: "800", color: palette.danger, textAlign: "right", ...monoStyle }}>{fmt(c.stated_amount)} HTG</Text>
+                                <Text style={{ fontSize: 13, fontWeight: "800", color: palette.danger, textAlign: "right", ...monoStyle }}>{fmtG(c.stated_amount)}</Text>
                               </View>
                               <View style={{ height: 0.5, backgroundColor: palette.hairline }} />
                               <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                                 <Text style={{ fontSize: 11, color: palette.muted2 }}>Pwogram nan atann</Text>
-                                <Text style={{ fontSize: 13, fontWeight: "800", color: palette.ink, textAlign: "right", ...monoStyle }}>{fmt(c.program_amount)} HTG</Text>
+                                <Text style={{ fontSize: 13, fontWeight: "800", color: palette.ink, textAlign: "right", ...monoStyle }}>{fmtG(c.program_amount)}</Text>
                               </View>
                             </View>
 
@@ -906,9 +914,9 @@ export default function StoreScreen({
 
                   <View style={{ marginTop: 14, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, padding: 12, borderWidth: 0.5, borderColor: palette.hairline }}>
                     <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase" }}>
-                      Montan ouvèti kes la — {setupCashier ? activeCashiers.find(c => c.id === setupCashier)?.name : "kite vid oswa kitite"} (HTG)
+                      Montan ouvèti kes la — {setupCashier ? activeCashiers.find(c => c.id === setupCashier)?.name : "kite vid oswa kitite"} (G)
                     </Text>
-                    <TextInput value={regProgram} onChangeText={setRegProgram} keyboardType="numeric" placeholder="10000" placeholderTextColor={palette.muted3} editable={!!setupCashier && !setupLocked} style={{ borderWidth: 0.5, borderColor: setupLocked ? palette.hairline : palette.hairlineStrong, borderRadius: radius.sm, padding: 13, minHeight: 52, marginTop: 6, color: palette.ink, fontFamily: "Quicksand_700Bold", fontWeight: "700", backgroundColor: palette.bg, opacity: setupCashier && !setupLocked ? 1 : 0.6 }} />
+                    <TextInput value={regProgram} onChangeText={setRegProgram} keyboardType="numeric" placeholder="10000" placeholderTextColor={palette.muted3} editable={!!setupCashier && !setupLocked} style={{ borderWidth: 0.5, borderColor: setupLocked ? palette.hairline : palette.hairlineStrong, borderRadius: radius.sm, padding: 13, minHeight: 52, marginTop: 6, color: palette.ink, fontFamily: "Inter_700Bold", fontWeight: "700", backgroundColor: palette.bg, opacity: setupCashier && !setupLocked ? 1 : 0.6 }} />
                     <Text style={{ fontSize: 10, color: palette.muted2, marginTop: 6, lineHeight: 14 }}>
                       {setupLocked
                         ? "🔒 Montan sa a fiks nan app la. Li te mete yon fwa — pèsonn pa ka chanje l oswa reset l ankò."
@@ -920,14 +928,14 @@ export default function StoreScreen({
                   {setupLocked ? (
                     <View style={{ marginTop: 14, backgroundColor: palette.successBg, borderWidth: 0.5, borderColor: palette.success, borderRadius: radius.md, padding: 14, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8 }}>
                       <Ionicons name="lock-closed" size={18} color={palette.success} />
-                      <Text style={{ color: palette.success, fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14 }}>Fiks — Pa ka Chanje</Text>
+                      <Text style={{ color: palette.success, fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 14 }}>Fiks — Pa ka Chanje</Text>
                     </View>
                   ) : (
                     <Pressable onPress={saveProgramAmount} android_ripple={{ color: "rgba(255,255,255,0.2)" }} style={({ pressed }) => [{
                       marginTop: 14, backgroundColor: palette.accentGold, borderRadius: radius.md, padding: 14, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, ...shadow.soft,
                     }, pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] }]}>
                       <Ionicons name="checkmark-circle" size={20} color="#fff" />
-                      <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15 }}>Anrejistre Montan Kes</Text>
+                      <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 15 }}>Anrejistre Montan Kes</Text>
                     </Pressable>
                   )}
                   <Text style={{ fontSize: 10, color: palette.muted2, marginTop: 10, lineHeight: 15 }}>Ou ka mete yon montan diferan pou chak kesye.</Text>
@@ -939,7 +947,7 @@ export default function StoreScreen({
                 {/* Program opening amount */}
                 <View style={{ marginTop: 16, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, padding: 12, borderWidth: 0.5, borderColor: palette.hairline }}>
                   <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase" }}>Montan pwogram nan atann</Text>
-                  <Text style={{ fontWeight: "900", fontSize: 18, color: palette.accentGold, marginTop: 2, textAlign: "left", ...monoStyle }}>{fmt(regProgram || PROGRAM_OPENING)} HTG</Text>
+                  <Text style={{ fontWeight: "900", fontSize: 18, color: palette.accentGold, marginTop: 2, textAlign: "left", ...monoStyle }}>{fmtG(regProgram || PROGRAM_OPENING)}</Text>
                   <Text style={{ fontSize: 10, color: palette.muted2, marginTop: 2 }}>Sa pwogram nan deklare kes la genyen kòm kach ouvèti</Text>
                 </View>
 
@@ -958,7 +966,7 @@ export default function StoreScreen({
                     }, pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] }]}
                   >
                     <Ionicons name="close-circle" size={20} color={palette.danger} />
-                    <Text style={{ color: palette.danger, fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15 }}>Pa dakò</Text>
+                    <Text style={{ color: palette.danger, fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 15 }}>Pa dakò</Text>
                   </Pressable>
                   <Pressable
                     onPress={agreeRegister}
@@ -973,7 +981,7 @@ export default function StoreScreen({
                     }, pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] }]}
                   >
                     <Ionicons name="checkmark-circle" size={20} color="#fff" />
-                    <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15 }}>Dakò</Text>
+                    <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 15 }}>Dakò</Text>
                   </Pressable>
                 </View>
 
@@ -984,7 +992,7 @@ export default function StoreScreen({
                     <View style={{ gap: 8, marginTop: 8 }}>
                       {(effectiveIsSupervisor ? pendingChecks : pendingChecks.filter((c:any)=>c.cashier_id===currentUser?.id)).map((c) => (
                         <View key={c.id} style={{ backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, padding: 12, borderWidth: 0.5, borderColor: palette.hairline }}>
-                          <Text style={{ fontSize: 12, fontWeight: "700", color: palette.ink }}>{getUserById(c.cashier_id)?.name ?? c.cashier_id} — konte {fmt(c.stated_amount)} HTG (atann {fmt(c.program_amount)} HTG)</Text>
+                          <Text style={{ fontSize: 12, fontWeight: "700", color: palette.ink }}>{getUserById(c.cashier_id)?.name ?? c.cashier_id} — konte {fmtG(c.stated_amount)} (atann {fmtG(c.program_amount)})</Text>
                           {effectiveIsSupervisor && (
                             <View style={{ marginTop: 8, gap: 6 }}>
                               <View style={{ flexDirection: "row", gap: 6 }}>
@@ -1012,10 +1020,10 @@ export default function StoreScreen({
               </>
             ) : regView === "disagree" ? (
               <>
-                <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 12 }}>Ki kach ou reyèlman konte? (HTG) *</Text>
-                <TextInput value={regStated} onChangeText={setRegStated} keyboardType="numeric" placeholder="Konbyen ou konte tout bon" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.hairlineStrong, borderRadius: radius.sm, padding: 13, minHeight: 50, marginTop: 6, color: palette.ink, fontFamily: "Quicksand_700Bold", fontWeight: "700", backgroundColor: palette.bg }} />
+                <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 12 }}>Ki kach ou reyèlman konte? (G) *</Text>
+                <TextInput value={regStated} onChangeText={setRegStated} keyboardType="numeric" placeholder="Konbyen ou konte tout bon" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.hairlineStrong, borderRadius: radius.sm, padding: 13, minHeight: 50, marginTop: 6, color: palette.ink, fontFamily: "Inter_700Bold", fontWeight: "700", backgroundColor: palette.bg }} />
                 <Pressable onPress={fileRegisterComplaint} style={{ marginTop: 16, backgroundColor: palette.ink2, borderRadius: radius.md, padding: 14, alignItems: "center", ...shadow.soft }}>
-                  <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>Voye Plent → Notifye Admin/Manadjè/Owner</Text>
+                  <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700" }}>Voye Plent → Notifye Admin/Manadjè/Owner</Text>
                 </Pressable>
 
                 {/* I am a supervisor — only here, once disagreeing.
@@ -1031,7 +1039,7 @@ export default function StoreScreen({
                 <View style={{ marginTop: 10, backgroundColor: palette.dangerBg, borderWidth: 0.5, borderColor: palette.dangerBd, borderRadius: radius.md, padding: 12 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                     <Ionicons name="time-outline" size={18} color={palette.danger} />
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13, color: palette.danger }}>Tikit ou ap tann verifikasyon</Text>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13, color: palette.danger }}>Tikit ou ap tann verifikasyon</Text>
                   </View>
                   <Text style={{ fontSize: 12, color: palette.ink, marginTop: 6, lineHeight: 17 }}>Ou pa dakò ak kes la. Chanjman ou make "ap tann" — ou pa ka kòmanse jiskaske yon sipèvizè jere tikit la.</Text>
                 </View>
@@ -1041,24 +1049,24 @@ export default function StoreScreen({
                     <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase" }}>Plent ou</Text>
                     <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 8 }}>
                       <Text style={{ fontSize: 12, color: palette.muted2 }}>Ou te konte</Text>
-                      <Text style={{ fontSize: 13, fontWeight: "800", color: palette.ink, textAlign: "right", ...monoStyle }}>{fmt(c.stated_amount)} HTG</Text>
+                      <Text style={{ fontSize: 13, fontWeight: "800", color: palette.ink, textAlign: "right", ...monoStyle }}>{fmtG(c.stated_amount)}</Text>
                     </View>
                     <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
                       <Text style={{ fontSize: 12, color: palette.muted2 }}>Pwogram nan atann</Text>
-                      <Text style={{ fontSize: 13, fontWeight: "800", color: palette.ink, textAlign: "right", ...monoStyle }}>{fmt(c.program_amount)} HTG</Text>
+                      <Text style={{ fontSize: 13, fontWeight: "800", color: palette.ink, textAlign: "right", ...monoStyle }}>{fmtG(c.program_amount)}</Text>
                     </View>
                     <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4, paddingTop: 4, borderTopWidth: 0.5, borderTopColor: palette.hairline }}>
                       <Text style={{ fontSize: 12, color: palette.muted2 }}>Diferans</Text>
                       <Text style={{ fontSize: 13, fontWeight: "800", color: (parseFloat(c.stated_amount) || 0) < (parseFloat(c.program_amount) || 0) ? palette.danger : palette.success }}>
-                        {(parseFloat(c.program_amount) || 0) - (parseFloat(c.stated_amount) || 0)} HTG
+                        {fmtG((parseFloat(c.program_amount) || 0) - (parseFloat(c.stated_amount) || 0))}
                       </Text>
                     </View>
-                    <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 8 }}>⭐ Fòse sou {c.stated_amount} HTG</Text>
+                    <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 8 }}>⭐ Fòse sou {fmtG(c.stated_amount)}</Text>
                   </View>
                 ))}
 
                 <View style={{ marginTop: 12, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: palette.accentGoldSoft, borderRadius: radius.md, padding: 10 }}>
-                  <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🛡️ Yon sipèvizè la bò kote w?</Text>
+                  <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🛡️ Yon sipèvizè la bò kote w?</Text>
                   <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 4, lineHeight: 15 }}>Si yon Owner/Admin/Manadjè la avè w, li ka rezoud tikit la tou dwèt sou aplikasyon w sa a — pa bezwen chanje oswa rekòmanse.</Text>
                 </View>
                 <Pressable onPress={() => { setSupervisorEntry("pending"); setRegView("supervisor"); }} style={{ marginTop: 12, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderRadius: radius.md, borderWidth: 1, borderColor: palette.accentGold, borderStyle: "dashed", backgroundColor: palette.bg }}>
@@ -1069,7 +1077,7 @@ export default function StoreScreen({
             ) : (
               <>
                 <View style={{ marginTop: 10, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: palette.accentGoldSoft, borderRadius: radius.md, padding: 10 }}>
-                  <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🛡️ Rezoud tikit kesye a</Text>
+                  <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🛡️ Rezoud tikit kesye a</Text>
                   <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 4, lineHeight: 15 }}>Sipèvizè ki la prezante sou aplikasyon kesye a rezoud tikit ki ap tann yo isit la. Antre kòd sekrè w la — apre verifikasyon w ap wè menm ekran ak app sipèvizè a.</Text>
                 </View>
                 <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 10 }}>Kiyès sipèvizè a?</Text>
@@ -1098,13 +1106,13 @@ export default function StoreScreen({
                   </View>
                 )}
                 <View style={{ marginTop: 12, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: palette.accentGoldSoft, borderRadius: radius.md, padding: 12 }}>
-                  <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🔐 Kòd sekrè ou</Text>
-                  <TextInput value={superSecret} onChangeText={setSuperSecret} secureTextEntry keyboardType="numeric" placeholder="Antre kòd sekrè ou" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.accentGold, borderRadius: radius.sm, padding: 12, minHeight: 48, marginTop: 8, backgroundColor: palette.surface, fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink }} />
+                  <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 12, color: palette.accentGold }}>🔐 Kòd sekrè ou</Text>
+                  <TextInput value={superSecret} onChangeText={setSuperSecret} secureTextEntry keyboardType="numeric" placeholder="Antre kòd sekrè ou" placeholderTextColor={palette.muted3} style={{ borderWidth: 0.5, borderColor: palette.accentGold, borderRadius: radius.sm, padding: 12, minHeight: 48, marginTop: 8, backgroundColor: palette.surface, fontFamily: "Inter_700Bold", fontWeight: "700", color: palette.ink }} />
                 </View>
 
                 <Pressable onPress={verifySupervisorAndEnterSetup} android_ripple={{ color: "rgba(255,255,255,0.2)" }} style={({ pressed }) => [{ marginTop: 16, backgroundColor: palette.ink2, borderRadius: radius.md, padding: 14, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, ...shadow.soft }, pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] }]}>
                   <Ionicons name="shield-checkmark" size={18} color="#fff" />
-                  <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14 }}>Verifye & Kontinye</Text>
+                  <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 14 }}>Verifye & Kontinye</Text>
                 </Pressable>
                 <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 8, textAlign: "center", lineHeight: 15 }}>Apre verifikasyon w ap wè menm ekran ak app sipèvizè a (plent yo ak menm design).</Text>
               </>
@@ -1145,11 +1153,11 @@ export default function StoreScreen({
                   placeholder="ID oswa nimewo vant (eg. sale-1725…)"
                   placeholderTextColor={palette.muted3}
                   autoCapitalize="none"
-                  style={{ flex: 1, paddingVertical: 12, fontSize: 13, color: palette.ink, fontFamily: "Roboto_400Regular", minHeight: 46 }}
+                  style={{ flex: 1, paddingVertical: 12, fontSize: 13, color: palette.ink, fontFamily: "Inter_400Regular", minHeight: 46 }}
                 />
               </View>
               <Pressable onPress={handleSaleSearch} disabled={searchingSale} style={{ backgroundColor: palette.ink2, borderRadius: radius.sm, paddingHorizontal: 16, paddingVertical: 13, ...shadow.soft }}>
-                <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13 }}>{searchingSale ? "…" : "Chèche"}</Text>
+                <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13 }}>{searchingSale ? "…" : "Chèche"}</Text>
               </Pressable>
             </View>
 
@@ -1165,7 +1173,7 @@ export default function StoreScreen({
                 <View style={{ backgroundColor: palette.surfaceGrouped, borderRadius: radius.lg, padding: 14, borderWidth: 0.5, borderColor: palette.hairline }}>
                   <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                     <View>
-                      <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "800", fontSize: 15, color: palette.ink }}>Vant {saleDetail.sale.sale_number ?? saleDetail.sale.id}</Text>
+                      <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "800", fontSize: 15, color: palette.ink }}>Vant {saleDetail.sale.sale_number ?? saleDetail.sale.id}</Text>
                       <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 2 }}>{new Date(saleDetail.sale.created_at ?? new Date()).toLocaleDateString()} • {new Date(saleDetail.sale.created_at ?? new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
                     </View>
                     <View style={{ backgroundColor: saleDetail.sale.payment_method === "credit" ? palette.warningBg : palette.successBg, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 0.5, borderColor: saleDetail.sale.payment_method === "credit" ? palette.accentGoldSoft : palette.successBd }}>
@@ -1220,13 +1228,13 @@ export default function StoreScreen({
                   {saleDetail.sale.payment_method === "credit" && (
                     <Pressable onPress={() => setPendingChange("cash")} style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: palette.successBg, borderRadius: radius.md, padding: 14, borderWidth: 0.5, borderColor: palette.successBd }}>
                       <Ionicons name="cash-outline" size={17} color={palette.success} />
-                      <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "800", fontSize: 13, color: palette.success }}>Rektifye an Kach (vant te Kach)</Text>
+                      <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "800", fontSize: 13, color: palette.success }}>Rektifye an Kach (vant te Kach)</Text>
                     </Pressable>
                   )}
                   {saleDetail.sale.payment_method === "cash" && effectiveIsSupervisor && (
                     <Pressable onPress={() => setPendingChange("credit")} style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: palette.accentGoldSoft, borderRadius: radius.md, padding: 14, borderWidth: 0.5, borderColor: palette.accentGold }}>
                       <Ionicons name="pricetag-outline" size={17} color={palette.accentGold} />
-                      <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "800", fontSize: 13, color: palette.accentGold }}>Chanje an Kredi (sipèvizè)</Text>
+                      <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "800", fontSize: 13, color: palette.accentGold }}>Chanje an Kredi (sipèvizè)</Text>
                     </Pressable>
                   )}
                   {saleDetail.sale.payment_method === "cash" && !effectiveIsSupervisor && (
@@ -1242,7 +1250,7 @@ export default function StoreScreen({
             {/* Confirmation panel */}
             {saleDetail && pendingChange && (
               <View style={{ marginTop: 14, backgroundColor: saleDetail.sale.payment_method === "credit" ? palette.successBg : palette.accentGoldSoft, borderWidth: 0.5, borderColor: saleDetail.sale.payment_method === "credit" ? palette.successBd : palette.accentGold, borderRadius: radius.lg, padding: 14 }}>
-                <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "800", fontSize: 14, color: palette.ink }}>Konfime koreksyon</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "800", fontSize: 14, color: palette.ink }}>Konfime koreksyon</Text>
                 <Text style={{ fontSize: 11, color: palette.muted2, marginTop: 3, lineHeight: 16 }}>Koreksyon sa pral mete ajou analytics, rapò jounen an ak resi yo otomatikman.</Text>
                 <View style={{ marginTop: 10, gap: 6 }}>
                   <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
@@ -1272,10 +1280,10 @@ export default function StoreScreen({
                 </View>
                 <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
                   <Pressable onPress={() => setPendingChange(null)} style={{ flex: 1, padding: 13, backgroundColor: palette.surface, borderRadius: radius.md, alignItems: "center", borderWidth: 0.5, borderColor: palette.hairline }}>
-                    <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", color: palette.ink }}>Anile</Text>
+                    <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", color: palette.ink }}>Anile</Text>
                   </Pressable>
                   <Pressable onPress={handleApplyChange} disabled={applyingChange} style={{ flex: 1, padding: 13, backgroundColor: palette.ink2, borderRadius: radius.md, alignItems: "center", ...shadow.soft }}>
-                    <Text style={{ color: "#fff", fontFamily: "Quicksand_700Bold", fontWeight: "700" }}>{applyingChange ? "Aplike…" : "Konfime ✓"}</Text>
+                    <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700" }}>{applyingChange ? "Aplike…" : "Konfime ✓"}</Text>
                   </Pressable>
                 </View>
               </View>

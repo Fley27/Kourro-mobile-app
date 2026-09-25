@@ -4,7 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { palette, radius, shadow } from "../../theme";
 import type { RangeKey, BestItem, ProfitStats } from "./types";
 import { RANGES } from "./types";
-import { fmt, monoStyle } from "../../format";
+import { fmtG, fmt, monoStyle } from "../../format";
 
 export const KR_RANGE: Record<string, string> = {
   today: "Jodi a",
@@ -89,7 +89,7 @@ export function getFocus(args: {
 }): AnalyticsFocus {
   const { lowStockCount, lowStockValue, growthPct, profitStats } = args;
   if (lowStockCount > 0)
-    return { tone: "warn", icon: "warning-outline", title: `${lowStockCount} pwodui nan dezespwa`, body: `Reyaprovizyonne kounye a (${fmt(lowStockValue)} HTG) pou pa pèdi vant.` } as const;
+    return { tone: "warn", icon: "warning-outline", title: `${lowStockCount} pwodui nan dezespwa`, body: `Reyaprovizyonne kounye a (${fmtG(lowStockValue)}) pou pa pèdi vant.` } as const;
   if (growthPct < 0)
     return { tone: "warn", icon: "trending-down", title: "Revni ap bese", body: `Bese ${Math.abs(growthPct)}%. Revize pri oswa lanse yon pwomosyon pou ranvèse tandans la.` } as const;
   if (profitStats.margin < 10)
@@ -134,13 +134,13 @@ export function Greeting({ role = "seller", currentUser }: { role?: string; curr
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 2 }}>
       <View style={{ width: 40, height: 40, borderRadius: 13, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: palette.accentGold }}>
-        <Text style={{ fontFamily: "Quicksand_700Bold", color: "#fff", fontWeight: "700", fontSize: 15 }}>{(name || role).slice(0, 1).toUpperCase()}</Text>
+        <Text style={{ fontFamily: "Inter_700Bold", color: "#fff", fontWeight: "700", fontSize: 15 }}>{(name || role).slice(0, 1).toUpperCase()}</Text>
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15, color: palette.ink, letterSpacing: -0.2 }} numberOfLines={1}>Bonjou{name ? `, ${name}` : ""}</Text>
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: palette.muted2, marginTop: 1 }}>{ROLE_KR[role] ?? role} • Panèl Desizyon</Text>
+        <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 15, color: palette.ink, letterSpacing: -0.2 }} numberOfLines={1}>Bonjou{name ? `, ${name}` : ""}</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted2, marginTop: 1 }}>{ROLE_KR[role] ?? role} • Panèl Desizyon</Text>
       </View>
-      <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2 }}>{new Date().toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}</Text>
+      <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2 }}>{new Date().toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}</Text>
     </View>
   );
 }
@@ -152,7 +152,7 @@ export function RangePills({ range, setRange }: { range: RangeKey; setRange: (r:
         const active = range === r.key;
         return (
           <Pressable key={r.key} onPress={() => setRange(r.key)} style={{ paddingVertical: 6, paddingHorizontal: 2, borderBottomWidth: active ? 2 : 0, borderBottomColor: active ? palette.accentGold : "transparent" }}>
-            <Text style={{ fontFamily: "Quicksand_700Bold", fontSize: 13, fontWeight: active ? "700" : "500", color: active ? palette.ink : palette.muted2 }}>{KR_RANGE[r.key] ?? r.label}</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontSize: 13, fontWeight: active ? "700" : "500", color: active ? palette.ink : palette.muted2 }}>{KR_RANGE[r.key] ?? r.label}</Text>
           </Pressable>
         );
       })}
@@ -179,32 +179,32 @@ export function HeroCard({
         <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: palette.accentGoldSoft, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.35)" }}>
           <Ionicons name="cash-outline" size={19} color={palette.accentGold} />
         </View>
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Revni Jodi a</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Revni Jodi a</Text>
       </View>
-      <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 36, color: palette.ink, letterSpacing: -0.8, marginTop: 6, textAlign: "right", ...monoStyle }}>{fmt(todayTotal)} <Text style={{ fontSize: 15, color: palette.muted2 }}>HTG</Text></Text>
+      <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 36, color: palette.ink, letterSpacing: -0.8, marginTop: 6, textAlign: "right", ...monoStyle }}>{fmt(todayTotal)} <Text style={{ fontSize: 15, color: palette.muted2 }}>G</Text></Text>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 }}>
         <View style={{ paddingHorizontal: 9, paddingVertical: 4, borderRadius: radius.pill, backgroundColor: growthPct >= 0 ? palette.successBg : palette.dangerBg }}>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontSize: 12, fontWeight: "700", color: growthPct >= 0 ? palette.success : palette.danger }}>{growthPct >= 0 ? "↗" : "↘"} {growthPct >= 0 ? `+${growthPct}%` : `${growthPct}%`}</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 12, fontWeight: "700", color: growthPct >= 0 ? palette.success : palette.danger }}>{growthPct >= 0 ? "↗" : "↘"} {growthPct >= 0 ? `+${growthPct}%` : `${growthPct}%`}</Text>
         </View>
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted2 }}>{todayCount} antre • {dbSalesLength ? "live" : "demo"}</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted2 }}>{todayCount} antre • {dbSalesLength ? "live" : "demo"}</Text>
       </View>
 
       <View style={{ height: 0.5, backgroundColor: palette.separator, marginTop: 16 }} />
 
       <View style={{ flexDirection: "row", backgroundColor: palette.surface2, borderRadius: radius.md, padding: 12, marginTop: 12 }}>
         <View style={{ flex: 1, alignItems: "center" }}>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>Mwayèn Dekòk</Text>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15, color: palette.ink, marginTop: 2 }}>{fmt(avgBasket)} HTG</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>Mwayèn Dekòk</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 15, color: palette.ink, marginTop: 2 }}>{fmtG(avgBasket)}</Text>
         </View>
         <View style={{ width: 1, backgroundColor: palette.separator }} />
         <View style={{ flex: 1, alignItems: "center" }}>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>Bòdwo</Text>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15, color: palette.ink, marginTop: 2 }}>{todayCount}</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>Bòdwo</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 15, color: palette.ink, marginTop: 2 }}>{todayCount}</Text>
         </View>
         <View style={{ width: 1, backgroundColor: palette.separator }} />
         <View style={{ flex: 1, alignItems: "center" }}>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>Kwasans</Text>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 15, color: growthPct >= 0 ? palette.success : palette.danger, marginTop: 2 }}>{growthPct >= 0 ? `+${growthPct}%` : `${growthPct}%`}</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>Kwasans</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 15, color: growthPct >= 0 ? palette.success : palette.danger, marginTop: 2 }}>{growthPct >= 0 ? `+${growthPct}%` : `${growthPct}%`}</Text>
         </View>
       </View>
     </View>
@@ -218,8 +218,8 @@ export function FocusBanner({ focus }: { focus: AnalyticsFocus }) {
         <Ionicons name={focus.icon} size={19} color={focus.tone === "good" ? palette.success : palette.accentGold} />
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13, color: focus.tone === "good" ? palette.success : palette.warning }}>{focus.title}</Text>
-        <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 11, color: focus.tone === "good" ? palette.success : palette.warning, marginTop: 2 }}>{focus.body}</Text>
+        <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13, color: focus.tone === "good" ? palette.success : palette.warning }}>{focus.title}</Text>
+        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: focus.tone === "good" ? palette.success : palette.warning, marginTop: 2 }}>{focus.body}</Text>
       </View>
     </View>
   );
@@ -233,28 +233,28 @@ export function ProfitCard({ profitStats, rangeLabel }: { profitStats: ProfitSta
           <View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: profitStats.profit >= 0 ? palette.successBg : palette.dangerBg, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name={profitStats.profit >= 0 ? "checkmark-circle-outline" : "warning-outline"} size={18} color={profitStats.profit >= 0 ? palette.success : palette.danger} />
           </View>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Pwofi • {rangeLabel}</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.7 }}>Pwofi • {rangeLabel}</Text>
         </View>
         <View style={{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: radius.pill, backgroundColor: profitStats.margin >= 20 ? palette.successBg : profitStats.margin >= 10 ? palette.warningBg : palette.dangerBg }}>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontSize: 11, fontWeight: "700", color: profitStats.margin >= 20 ? palette.success : profitStats.margin >= 10 ? palette.warning : palette.danger }}>{profitStats.margin.toFixed(1)}% marj</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 11, fontWeight: "700", color: profitStats.margin >= 20 ? palette.success : profitStats.margin >= 10 ? palette.warning : palette.danger }}>{profitStats.margin.toFixed(1)}% marj</Text>
         </View>
       </View>
-      <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 30, color: profitStats.profit >= 0 ? palette.ink : palette.danger, letterSpacing: -0.8, marginTop: 8 }}>{fmt(profitStats.profit)} HTG</Text>
+      <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 30, color: profitStats.profit >= 0 ? palette.ink : palette.danger, letterSpacing: -0.8, marginTop: 8 }}>{fmtG(profitStats.profit)}</Text>
       <View style={{ height: 0.5, backgroundColor: palette.separator, marginTop: 12 }} />
       <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
         <View style={{ flex: 1, alignItems: "center" }}>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.3 }}>Revni</Text>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, marginTop: 3 }}>{fmt(profitStats.revenue)} HTG</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.3 }}>Revni</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, marginTop: 3 }}>{fmtG(profitStats.revenue)}</Text>
         </View>
         <View style={{ width: 1, backgroundColor: palette.separator }} />
         <View style={{ flex: 1, alignItems: "center" }}>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.3 }}>Depans</Text>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, marginTop: 3 }}>{fmt(profitStats.cost)} HTG</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.3 }}>Depans</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, marginTop: 3 }}>{fmtG(profitStats.cost)}</Text>
         </View>
         <View style={{ width: 1, backgroundColor: palette.separator }} />
         <View style={{ flex: 1, alignItems: "center" }}>
-          <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.3 }}>Marj</Text>
-          <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, marginTop: 3 }}>{profitStats.margin.toFixed(1)}%</Text>
+          <Text style={{ fontFamily: "Inter_400Regular", fontSize: 9, color: palette.muted2, fontWeight: "500", textTransform: "uppercase", letterSpacing: 0.3 }}>Marj</Text>
+          <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 14, color: palette.ink, marginTop: 3 }}>{profitStats.margin.toFixed(1)}%</Text>
         </View>
       </View>
     </View>
@@ -272,19 +272,19 @@ export function PaymentMixCard({
 }) {
   return (
     <View style={{ marginTop: 14, backgroundColor: palette.surface, borderRadius: radius.xl, padding: 16, borderWidth: 0.5, borderColor: palette.hairline, ...shadow.soft }}>
-      <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13 }}>Peye pa Mwayen</Text>
-      <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 10, color: palette.muted2, marginTop: 2 }}>{rangeLabel}</Text>
+      <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13 }}>Peye pa Mwayen</Text>
+      <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 2 }}>{rangeLabel}</Text>
       <View style={{ gap: 8, marginTop: 10 }}>
         {payments.map(p => {
           const pct = Math.round((p.value / mixTotal) * 100);
           return (
             <View key={p.label} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
               <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: p.c }} />
-              <Text style={{ fontFamily: "Roboto_400Regular", fontSize: 12, color: palette.muted2, width: 70 }}>{p.label}</Text>
+              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.muted2, width: 70 }}>{p.label}</Text>
               <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: palette.surfaceGrouped }}>
                 <View style={{ width: `${pct}%`, height: 5, borderRadius: 3, backgroundColor: p.c }} />
               </View>
-              <Text style={{ fontFamily: "Quicksand_700Bold", fontWeight: "700", fontSize: 13, color: palette.ink, width: 84, textAlign: "right" }}>{p.value ? fmt(p.value) + " HTG" : "—"}</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13, color: palette.ink, width: 84, textAlign: "right" }}>{p.value ? fmtG(p.value) : "—"}</Text>
             </View>
           );
         })}

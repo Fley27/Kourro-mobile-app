@@ -1,4 +1,7 @@
 import { SCHEMA_SQL } from "./schema";
+import { fmtG } from "../format";
+import { seedDevCatalogIfNeeded, buildDevCatalogMemory, devSeedEnabled } from "./devSeed";
+import { runCatalogCutover, cleanupAutoBaseJunk, migrateInventoryBatches, backfillSkus } from "./cutoverCatalog";
 
 // Web fallback: in-memory mock when expo-sqlite not available (Expo web)
 let SQLite: any = null;
@@ -9,29 +12,33 @@ try {
 }
 
 let db: any | null = null;
+
+// Which storage backend is actually serving queries. "sqlite" = jesyon.db
+// file on disk (HARD memory, survives rebundles/restarts). "memory" = RAM
+// mock (data evaporates on every JS reload — only acceptable on web).
+// Use getDbBackend() to inspect at runtime; getDb() logs transitions.
+let backend: "unknown" | "sqlite" | "memory" = "unknown";
+export function getDbBackend(): "unknown" | "sqlite" | "memory" {
+  return backend;
+}
 const memStore = new Map<string, any[]>();
 
-const mockProductsSeed = [
-  { id: "prod-1", store_id: "demo-store-id", sku: "RICE-25KG", name: "Rice 25kg", name_ht: "Diri 25kg", unit: "sack", cost_price: 2500, selling_price: 3200, stock_quantity: 40, current_amount_available: 40, low_stock_threshold: 5 },
-  { id: "prod-2", store_id: "demo-store-id", sku: "OIL-5L", name: "Cooking Oil 5L", name_ht: "Lwil 5L", unit: "pcs", cost_price: 800, selling_price: 1100, stock_quantity: 25, current_amount_available: 25, low_stock_threshold: 5 },
-  { id: "prod-3", store_id: "demo-store-id", sku: "PREST-330", name: "Prestige Beer", name_ht: "Prestige", unit: "pcs", cost_price: 75, selling_price: 100, stock_quantity: 3, current_amount_available: 3, low_stock_threshold: 20 },
-  { id: "prod-4", store_id: "demo-store-id", sku: "SOAP-001", name: "Laundry Soap", name_ht: "Savon", unit: "pcs", cost_price: 30, selling_price: 50, stock_quantity: 200, current_amount_available: 200, low_stock_threshold: 30 },
-  { id: "prod-5", store_id: "demo-store-id", sku: "FARIN-25KG", name: "Flour 25kg", name_ht: "Farin 25kg", unit: "sack", cost_price: 2200, selling_price: 2800, stock_quantity: 30, current_amount_available: 30, low_stock_threshold: 5 },
-  { id: "prod-6", store_id: "demo-store-id", sku: "SIK-10KG", name: "White Sugar 10kg", name_ht: "Sik Blan 10kg", unit: "sack", cost_price: 700, selling_price: 950, stock_quantity: 35, current_amount_available: 35, low_stock_threshold: 5 },
-  { id: "prod-7", store_id: "demo-store-id", sku: "PASTA-500", name: "Spaghetti 500g", name_ht: "Pasta 500g", unit: "pcs", cost_price: 45, selling_price: 75, stock_quantity: 80, current_amount_available: 80, low_stock_threshold: 15 },
-  { id: "prod-8", store_id: "demo-store-id", sku: "TOMAT-400", name: "Tomato Paste 400g", name_ht: "Tomat 400g", unit: "pcs", cost_price: 80, selling_price: 120, stock_quantity: 60, current_amount_available: 60, low_stock_threshold: 10 },
-  { id: "prod-9", store_id: "demo-store-id", sku: "SARDINE-120", name: "Sardine Tin 120g", name_ht: "Sardine 120g", unit: "pcs", cost_price: 55, selling_price: 85, stock_quantity: 100, current_amount_available: 100, low_stock_threshold: 20 },
-  { id: "prod-10", store_id: "demo-store-id", sku: "LET-400", name: "Milk Powder 400g", name_ht: "Lèt 400g", unit: "pcs", cost_price: 480, selling_price: 650, stock_quantity: 40, current_amount_available: 40, low_stock_threshold: 8 },
-  { id: "prod-11", store_id: "demo-store-id", sku: "KAFE-200", name: "Rea Coffee 200g", name_ht: "Kafe 200g", unit: "pcs", cost_price: 320, selling_price: 450, stock_quantity: 50, current_amount_available: 50, low_stock_threshold: 10 },
-  { id: "prod-12", store_id: "demo-store-id", sku: "BISK-30", name: "Sayo Biscuit", name_ht: "Biskè Sayo", unit: "pcs", cost_price: 15, selling_price: 25, stock_quantity: 150, current_amount_available: 150, low_stock_threshold: 30 },
-  { id: "prod-13", store_id: "demo-store-id", sku: "KOLA-500", name: "Couronne Cola 500ml", name_ht: "Kola 500ml", unit: "pcs", cost_price: 30, selling_price: 50, stock_quantity: 90, current_amount_available: 90, low_stock_threshold: 20 },
-  { id: "prod-14", store_id: "demo-store-id", sku: "DLO-19L", name: "Water 5gal", name_ht: "Dlo 5 gal", unit: "pcs", cost_price: 100, selling_price: 150, stock_quantity: 25, current_amount_available: 25, low_stock_threshold: 5 },
-  { id: "prod-15", store_id: "demo-store-id", sku: "SAVON-DET", name: "Detergent Powder 1kg", name_ht: "Savon Poud 1kg", unit: "pcs", cost_price: 85, selling_price: 120, stock_quantity: 45, current_amount_available: 45, low_stock_threshold: 10 },
-  { id: "prod-16", store_id: "demo-store-id", sku: "PAT-COLG", name: "Colgate Toothpaste", name_ht: "Pat Colgate", unit: "pcs", cost_price: 130, selling_price: 180, stock_quantity: 60, current_amount_available: 60, low_stock_threshold: 10 },
-  { id: "prod-17", store_id: "demo-store-id", sku: "MAYI-10KG", name: "Corn Meal 10kg", name_ht: "Mayi 10kg", unit: "sack", cost_price: 600, selling_price: 800, stock_quantity: 20, current_amount_available: 20, low_stock_threshold: 5 },
-  { id: "prod-18", store_id: "demo-store-id", sku: "SEL-5KG", name: "Salt 5kg", name_ht: "Sèl 5kg", unit: "sack", cost_price: 200, selling_price: 300, stock_quantity: 30, current_amount_available: 30, low_stock_threshold: 5 },
-];
-memStore.set("products", [...mockProductsSeed]);
+// NOTE: catalog demo data used to live here as inline mockProductsSeed (18 rows).
+// It now comes from packages/mock-catalog via src/db/devSeed.ts (seed-once, dev-only).
+if (devSeedEnabled()) {
+  try {
+    const mem = buildDevCatalogMemory(new Date().toISOString());
+    memStore.set("products", mem.products);
+    memStore.set("categories", mem.categories);
+    memStore.set("category_links", mem.category_links);
+    memStore.set("product_categories", mem.product_categories);
+    memStore.set("product_units", mem.product_units);
+    memStore.set("product_prices", mem.product_prices);
+    memStore.set("product_bundles", mem.product_bundles);
+    memStore.set("suppliers", mem.suppliers);
+    memStore.set("product_supplier_costs", mem.product_supplier_costs);
+  } catch (e) { console.log("[dev seed] memory catalog skipped:", String(e)); }
+}
 
 const customersSeed = [
   { id: "cust-1", store_id: "demo-store-id", name: "Jean Baptiste", id_card_number: "004-123-4567", phone: "+509 3810 0001", address: "Delmas 33, Port-au-Prince", total_debt: 3500, credit_limit: 5000, credit_limit_source: "manual", is_high_risk: true, open_debt_count: 1 },
@@ -47,7 +54,25 @@ export async function getDb(): Promise<any> {
   if (SQLite) {
     try {
       db = await SQLite.openDatabaseAsync("jesyon.db");
-      await db.execAsync(SCHEMA_SQL);
+      // Run schema statement-by-statement (not one giant exec): a single
+      // failing statement must not abort the whole init and silently drop
+      // us onto the RAM mock (which loses all sales on rebundle).
+      // IMPORTANT: strip `--` line comments BEFORE splitting on ";", since
+      // several comment blocks contain semicolons (e.g. "source of truth;",
+      // "never UPDATE/DELETE;") — splitting first orphans the CREATE TABLE
+      // that follows the comment and that table never gets created.
+      // (Verified: no `--` occurs inside a quoted literal in schema.ts.)
+      const statements = SCHEMA_SQL.replace(/--[^\n]*/g, "")
+        .split(";")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      for (const stmt of statements) {
+        try {
+          await db.execAsync(stmt + ";");
+        } catch (e) {
+          console.warn("[db] schema statement failed (continuing):", String(e), stmt.slice(0, 140));
+        }
+      }
       try { await db.execAsync("ALTER TABLE customers ADD COLUMN address TEXT"); } catch {}
       // --- migrations for sales seller attribution + created_at ---
       try { await db.execAsync("ALTER TABLE sales ADD COLUMN seller_id TEXT"); } catch {}
@@ -76,6 +101,11 @@ export async function getDb(): Promise<any> {
       // Legacy rows hit the shelf before this migration, so treat them as delivered
       try { await db.execAsync("UPDATE stock_batches SET status = 'delivered' WHERE status IS NULL"); } catch {}
       try { await db.execAsync("UPDATE stock_movements SET status = 'delivered' WHERE status IS NULL"); } catch {}
+      // --- migration: catalog item types (goods vs service) + availability ---
+      try { await db.execAsync("ALTER TABLE products ADD COLUMN item_type TEXT DEFAULT 'goods'"); } catch {}
+      try { await db.execAsync("ALTER TABLE products ADD COLUMN is_available INTEGER DEFAULT 1"); } catch {}
+      try { await db.execAsync("UPDATE products SET item_type = 'goods' WHERE item_type IS NULL"); } catch {}
+      try { await db.execAsync("UPDATE products SET is_available = 1 WHERE is_available IS NULL"); } catch {}
       // --- migration: multi-variant selling model (units / prices / bundles) ---
       try {
         const flagged = await db.getAllAsync("SELECT * FROM _meta WHERE key = ?", ["seed_variants_v1"]);
@@ -114,12 +144,65 @@ export async function getDb(): Promise<any> {
       // sale_items variant tracking (how each line was sold: unit + variant)
       try { await db.execAsync("ALTER TABLE sale_items ADD COLUMN unit_id TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE sale_items ADD COLUMN variant TEXT"); } catch {}
+      // --- migration: catalog x supplier (global join + unit condition + gratis flags) ---
+      try { await db.execAsync("ALTER TABLE product_units ADD COLUMN condition TEXT"); } catch {}
+      try { await db.execAsync("CREATE UNIQUE INDEX IF NOT EXISTS idx_product_units_unique ON product_units(product_id, unit_name, COALESCE(condition, ''))"); } catch {}
+      try { await db.execAsync(`CREATE TABLE IF NOT EXISTS product_supplier_costs (
+        id TEXT PRIMARY KEY, product_id TEXT NOT NULL, supplier_id TEXT NOT NULL,
+        unit_id TEXT NOT NULL, cost REAL NOT NULL DEFAULT 0, last_updated TEXT,
+        device_id TEXT, lamport_clock INTEGER DEFAULT 0, updated_at TEXT,
+        is_deleted INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
+      )`); } catch {}
+      try { await db.execAsync("CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_unique ON product_supplier_costs(product_id, supplier_id, unit_id)"); } catch {}
+      try { await db.execAsync("CREATE INDEX IF NOT EXISTS idx_psc_product ON product_supplier_costs(product_id)"); } catch {}
+      try { await db.execAsync("CREATE INDEX IF NOT EXISTS idx_psc_supplier ON product_supplier_costs(supplier_id)"); } catch {}
+      try { await db.execAsync("ALTER TABLE stock_batches ADD COLUMN supplier_id TEXT"); } catch {}
+      try { await db.execAsync("ALTER TABLE sales ADD COLUMN is_complimentary INTEGER DEFAULT 0"); } catch {}
+      try { await db.execAsync("ALTER TABLE sales ADD COLUMN complimentary_reason TEXT"); } catch {}
+      try { await db.execAsync("ALTER TABLE sales ADD COLUMN approved_by TEXT"); } catch {}
+      try { await db.execAsync("ALTER TABLE sale_items ADD COLUMN is_complimentary INTEGER DEFAULT 0"); } catch {}
+      try { await db.execAsync("ALTER TABLE sale_items ADD COLUMN approved_by TEXT"); } catch {}
+      // --- migration: category polyhierarchy (DAG edges) ---
+      try { await db.execAsync(`CREATE TABLE IF NOT EXISTS category_links (
+        id TEXT PRIMARY KEY, child_id TEXT NOT NULL, parent_id TEXT NOT NULL,
+        device_id TEXT, lamport_clock INTEGER DEFAULT 0, updated_at TEXT,
+        is_deleted INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
+      )`); } catch {}
+      try { await db.execAsync("CREATE UNIQUE INDEX IF NOT EXISTS idx_category_links_unique ON category_links(child_id, parent_id)"); } catch {}
+      try { await db.execAsync("CREATE INDEX IF NOT EXISTS idx_category_links_child ON category_links(child_id)"); } catch {}
+      try { await db.execAsync("CREATE INDEX IF NOT EXISTS idx_category_links_parent ON category_links(parent_id)"); } catch {}
       // opening register FSM columns
       try { await db.execAsync("ALTER TABLE cash_register_checks ADD COLUMN check_date TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE cash_register_checks ADD COLUMN set_by TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE cash_register_checks ADD COLUMN set_by_role TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE cash_register_checks ADD COLUMN is_default INTEGER DEFAULT 0"); } catch {}
       try { await db.execAsync("ALTER TABLE credit_payments ADD COLUMN collected_by TEXT"); } catch {}
+      // Customer email for receipt-by-email (post-payment options)
+      try { await db.execAsync("ALTER TABLE customers ADD COLUMN email TEXT"); } catch {}
+      // Structured customer fields, saved as received from the form
+      for (const col of ["first_name TEXT", "last_name TEXT", "birth_day TEXT", "birth_month TEXT", "birth_year TEXT", "country TEXT", "department TEXT", "commune TEXT", "address_line1 TEXT", "address_line2 TEXT", "marketing_consent INTEGER DEFAULT 0"]) {
+        try { await db.execAsync(`ALTER TABLE customers ADD COLUMN ${col}`); } catch {}
+      }
+      // Free-text customer notes
+      try { await db.execAsync(`CREATE TABLE IF NOT EXISTS customer_notes (
+        id TEXT PRIMARY KEY, store_id TEXT NOT NULL, customer_id TEXT NOT NULL,
+        text TEXT NOT NULL, created_by TEXT, created_at TEXT
+      )`); } catch {}
+      try { await db.execAsync("CREATE INDEX IF NOT EXISTS idx_customer_notes_customer ON customer_notes(customer_id, created_at)"); } catch {}
+      // --- staging: partial pickup / delivery tracking (additive only, dormant when OFF) ---
+      try { await db.execAsync("ALTER TABLE sale_items ADD COLUMN quantity_delivered REAL DEFAULT 0"); } catch {}
+      try { await db.execAsync(`CREATE TABLE IF NOT EXISTS sale_pickups (
+        id TEXT PRIMARY KEY, store_id TEXT NOT NULL, sale_id TEXT NOT NULL,
+        sale_item_id TEXT NOT NULL, quantity REAL NOT NULL,
+        picked_up_by TEXT, created_at TEXT
+      )`); } catch {}
+      try { await db.execAsync("CREATE INDEX IF NOT EXISTS idx_sale_pickups_sale ON sale_pickups(sale_id)"); } catch {}
+      try { await db.execAsync("CREATE INDEX IF NOT EXISTS idx_sale_pickups_item ON sale_pickups(sale_item_id)"); } catch {}
+      // Existing rows were fully taken: backfill delivered = quantity where unset
+      try { await db.execAsync("UPDATE sale_items SET quantity_delivered = quantity WHERE quantity_delivered IS NULL"); } catch {}
+      // Repair rows written while delivered defaulted to 0 with no pickup history:
+      // no pickup action = all products delivered together.
+      try { await db.execAsync("UPDATE sale_items SET quantity_delivered = quantity WHERE quantity_delivered = 0 AND NOT EXISTS (SELECT 1 FROM sale_pickups WHERE sale_pickups.sale_item_id = sale_items.id)"); } catch {}
       // deficit settlements table
       try { await db.execAsync(`CREATE TABLE IF NOT EXISTS deficit_settlements (
         id TEXT PRIMARY KEY, store_id TEXT NOT NULL, cashier_id TEXT NOT NULL,
@@ -127,45 +210,31 @@ export async function getDb(): Promise<any> {
         total REAL DEFAULT 0, paid REAL DEFAULT 0, status TEXT DEFAULT 'open',
         created_by TEXT, paid_by TEXT, paid_at TEXT, created_at TEXT, updated_at TEXT
       )`); } catch {}
-      // --- first-launch demo seed (persistent, runs once) ---
+      // --- dev mock catalog (mock-catalog JSON, seed-once, dev-only) ---
+      try { await seedDevCatalogIfNeeded(db); } catch (e) { console.log("[dev seed] skipped:", String(e)); }
+      // --- catalog v2: product_suppliers.id added after first create ---
+      try { await db.execAsync("ALTER TABLE product_suppliers ADD COLUMN id TEXT"); } catch {}
+      try { await db.runAsync("UPDATE product_suppliers SET id = product_id || '__' || supplier_id WHERE id IS NULL"); } catch {}
+      // --- catalog v2: smaller_item_id → ref_item_id (refs can be bigger now) ---
+      try { await db.execAsync("ALTER TABLE items ADD COLUMN ref_item_id TEXT"); } catch {}
+      try { await db.runAsync("UPDATE items SET ref_item_id = smaller_item_id WHERE ref_item_id IS NULL"); } catch {}
+      try { await db.execAsync("ALTER TABLE items DROP COLUMN smaller_item_id"); } catch {}
+      // --- catalog v2: product draft status (unfinished chains never list) ---
+      try { await db.execAsync("ALTER TABLE products ADD COLUMN status TEXT DEFAULT 'active'"); } catch {}
+      try { await db.runAsync("UPDATE products SET status = 'active' WHERE status IS NULL"); } catch {}
+      // --- batches: delivery identity + transport share (Inventory cards) ---
+      try { await db.execAsync("ALTER TABLE batches ADD COLUMN delivery_ref TEXT"); } catch {}
+      try { await db.execAsync("ALTER TABLE batches ADD COLUMN transport_share REAL DEFAULT 0"); } catch {}
+      // --- catalog v2 full cutover (option a): migrate old rows, repoint readers ---
+      try { await runCatalogCutover(db); } catch (e) { console.log("[cutover] catalog v2 skipped/failed:", String(e)); }
+      try { await migrateInventoryBatches(db); } catch (e) { console.log("[migrate] inventory batches skipped:", String(e)); }
+      try { await backfillSkus(db); } catch (e) { console.log("[backfill] skus skipped:", String(e)); }
+      try { await cleanupAutoBaseJunk(db); } catch (e) { console.log("[cutover] auto-base cleanup skipped:", String(e)); }
+      // --- demo customers/credits (credit flows need them; independent of catalog) ---
       try {
-        const seeded = await db.getAllAsync("SELECT * FROM _meta WHERE key = ?", ["seed_v1"]);
-        if (seeded.length === 0) {
+        const existing = await db.getAllAsync("SELECT id FROM customers LIMIT 1").catch(() => []);
+        if (existing.length === 0) {
           const now = new Date().toISOString();
-          const CATS = [
-            ["food", "Manje", "🍚", "#0f172a", 1],
-            ["drinks", "Bwason", "🥤", "#0f172a", 2],
-            ["household", "Kay", "🧴", "#0f172a", 3],
-            ["dairy", "Letye", "🥛", "#0f172a", 4],
-            ["bakery", "Boulanjri", "🥐", "#0f172a", 5],
-            ["produce", "Lejume", "🥬", "#0f172a", 6],
-          ];
-          for (const [id, name, icon, color, sort] of CATS) {
-            await db.runAsync("INSERT OR REPLACE INTO categories (id, store_id, name, icon, color, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-              [id, "demo-store-id", name, icon, color, sort, now, now]);
-          }
-          for (const p of mockProductsSeed) {
-            await db.runAsync("INSERT OR REPLACE INTO products (id, store_id, sku, barcode, name, cost_price, stock_quantity, current_amount_available, low_stock_threshold, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-              [p.id, p.store_id, p.sku, p.sku, p.name, p.cost_price, p.stock_quantity, p.current_amount_available, p.low_stock_threshold, now]);
-            // Default sell unit + Regular price (legacy selling_price/unit live on here)
-            await db.runAsync("INSERT OR REPLACE INTO product_units (id, product_id, unit_name, conversion_factor, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-              [`unit-${p.id}-base`, p.id, (p as any).unit ?? "Unit", 1, now, now]);
-            await db.runAsync("INSERT OR REPLACE INTO product_prices (id, unit_id, variant, price, updated_at) VALUES (?,?,?,?,?)",
-              [`price-${p.id}-regular`, `unit-${p.id}-base`, "Regular", (p as any).selling_price ?? 0, now]);
-          }
-          // Demo variant data (spec example): Prestige Cold single 200 HTG, 3 for 500
-          await db.runAsync("INSERT OR REPLACE INTO product_prices (id, unit_id, variant, price, updated_at) VALUES (?,?,?,?,?)",
-            ["price-prod-3-cold", "unit-prod-3-base", "Cold", 200, now]);
-          await db.runAsync("INSERT OR REPLACE INTO product_bundles (id, unit_id, variant, min_quantity, bundle_price, created_at) VALUES (?,?,?,?,?,?)",
-            ["bundle-prod-3-cold-3", "unit-prod-3-base", "Cold", 3, 500, now]);
-          for (const pc of [
-            ["prod-1", "food"], ["prod-2", "drinks"], ["prod-3", "drinks"], ["prod-4", "household"], ["prod-5", "food"],
-            ["prod-6", "food"], ["prod-7", "food"], ["prod-8", "produce"], ["prod-9", "produce"], ["prod-10", "dairy"],
-            ["prod-11", "dairy"], ["prod-12", "bakery"], ["prod-13", "drinks"], ["prod-14", "drinks"], ["prod-15", "household"],
-            ["prod-16", "household"], ["prod-17", "food"], ["prod-18", "food"],
-          ]) {
-            await db.runAsync("INSERT OR REPLACE INTO product_categories (product_id, category_id) VALUES (?,?)", [pc[0], pc[1]]);
-          }
           for (const c of customersSeed) {
             await db.runAsync("INSERT OR REPLACE INTO customers (id, store_id, name, phone, address, id_card_number, total_debt, credit_limit, credit_limit_source, is_high_risk, open_debt_count) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
               [c.id, c.store_id, c.name, c.phone, c.address, c.id_card_number, c.total_debt, c.credit_limit, c.credit_limit_source, c.is_high_risk ? 1 : 0, c.open_debt_count]);
@@ -174,12 +243,17 @@ export async function getDb(): Promise<any> {
             await db.runAsync("INSERT OR REPLACE INTO credits (id, store_id, customer_id, sale_id, amount, amount_paid, balance, status, due_date, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
               [c.id, c.store_id, c.customer_id, c.sale_id, c.amount, c.amount_paid, c.balance, c.status, c.due_date, c.created_at]);
           }
-          await db.runAsync("INSERT OR REPLACE INTO _meta (key, value) VALUES (?,?)", ["seed_v1", "1"]);
         }
       } catch {}
+      backend = "sqlite";
+      console.log("[db] backend=sqlite (jesyon.db on disk — data survives rebundles)");
       return db;
-    } catch {
-      // Fallback to mock if native SQLite fails (e.g. web)
+    } catch (e) {
+      // Fallback to mock if native SQLite fails (e.g. web). LOUD: on a
+      // phone/simulator this means every sale lives in RAM and vanishes on
+      // the next rebundle — check the native module / pods if you see this.
+      console.warn("[db] backend=memory FALLBACK — expo-sqlite init failed, data will NOT survive reload:", String(e));
+      db = null;
       SQLite = null;
     }
   }
@@ -190,17 +264,13 @@ export async function getDb(): Promise<any> {
       { id: "st-delma", name: "Delmas", location: "Dèlma", code: "DL-9034", created_at: new Date().toISOString(), disabled: 0, breach_flagged: 0, breached_at: null, revoked_by: null, currency: "HTG", updated_at: new Date().toISOString() },
     ]);
   }
-  if (!memStore.has("categories")) {
-    memStore.set("categories", [
-      { id: "food", store_id: "demo-store-id", name: "Manje", icon: "🍚", color: "#0f172a", sort_order: 1, created_at: new Date().toISOString() },
-      { id: "drinks", store_id: "demo-store-id", name: "Bwason", icon: "🥤", color: "#0f172a", sort_order: 2, created_at: new Date().toISOString() },
-      { id: "household", store_id: "demo-store-id", name: "Kay", icon: "🧴", color: "#0f172a", sort_order: 3, created_at: new Date().toISOString() },
-      { id: "dairy", store_id: "demo-store-id", name: "Letye", icon: "🥛", color: "#0f172a", sort_order: 4, created_at: new Date().toISOString() },
-      { id: "bakery", store_id: "demo-store-id", name: "Boulanjri", icon: "🥐", color: "#0f172a", sort_order: 5, created_at: new Date().toISOString() },
-      { id: "produce", store_id: "demo-store-id", name: "Lejume", icon: "🥬", color: "#0f172a", sort_order: 6, created_at: new Date().toISOString() },
-    ]);
-  }
+  if (!memStore.has("categories")) memStore.set("categories", []);
+  if (!memStore.has("category_links")) memStore.set("category_links", []);
+  if (!memStore.has("suppliers")) memStore.set("suppliers", []);
+  if (!memStore.has("product_supplier_costs")) memStore.set("product_supplier_costs", []);
   if (!memStore.has("product_categories")) memStore.set("product_categories", []);
+  // Category polyhierarchy edges (DAG)
+  if (!memStore.has("category_links")) memStore.set("category_links", []);
   if (!memStore.has("suspended_sales")) memStore.set("suspended_sales", []);
   if (!memStore.has("suspended_sale_items")) memStore.set("suspended_sale_items", []);
   if (!memStore.has("suspended_sale_events")) memStore.set("suspended_sale_events", []);
@@ -210,27 +280,47 @@ export async function getDb(): Promise<any> {
     memStore.set("product_units", prods.map((p: any) => ({ id: `unit-${p.id}-base`, product_id: p.id, unit_name: p.unit ?? "Unit", conversion_factor: 1, created_at: nowm, updated_at: nowm })));
   }
   if (!memStore.has("product_prices")) {
+    // Safety net: base unit + Regular price for products lacking pricing.
     const nowm = new Date().toISOString();
     const units = memStore.get("product_units") ?? [];
     const prices = units.map((u: any) => {
       const prod = (memStore.get("products") ?? []).find((p: any) => p.id === u.product_id);
       return { id: `price-${u.product_id}-regular`, unit_id: u.id, variant: "Regular", price: Number(prod?.selling_price ?? 0), updated_at: nowm };
     });
-    prices.push({ id: "price-prod-3-cold", unit_id: "unit-prod-3-base", variant: "Cold", price: 200, updated_at: nowm });
     memStore.set("product_prices", prices);
   }
-  if (!memStore.has("product_bundles")) {
-    memStore.set("product_bundles", [{ id: "bundle-prod-3-cold-3", unit_id: "unit-prod-3-base", variant: "Cold", min_quantity: 3, bundle_price: 500, created_at: new Date().toISOString() }]);
-  }
+  if (!memStore.has("product_bundles")) memStore.set("product_bundles", []);
+  // Catalog v2 tables (populated by the cutover from old-model seed data).
+  if (!memStore.has("items")) memStore.set("items", []);
+  if (!memStore.has("product_suppliers")) memStore.set("product_suppliers", []);
+  if (!memStore.has("batches")) memStore.set("batches", []);
+  if (!memStore.has("variants")) memStore.set("variants", []);
+  if (!memStore.has("variant_prices")) memStore.set("variant_prices", []);
+  // Catalog x Supplier join (global, no store scope)
+  if (!memStore.has("product_supplier_costs")) memStore.set("product_supplier_costs", []);
   if (!memStore.has("stock_batches")) memStore.set("stock_batches", []);
   if (!memStore.has("stock_movements")) memStore.set("stock_movements", []);
   if (!memStore.has("_meta")) memStore.set("_meta", []);
   if (!memStore.has("receipts")) memStore.set("receipts", []);
   if (!memStore.has("report_reviews")) memStore.set("report_reviews", []);
+  // Staging: partial pickup history (dormant when flag OFF)
+  if (!memStore.has("sale_pickups")) memStore.set("sale_pickups", []);
+  // Repair: rows with delivered=0 and no pickup history were fully taken together.
+  try {
+    const picks = memStore.get("sale_pickups") ?? [];
+    const withHist = new Set(picks.map((p: any) => p.sale_item_id));
+    for (const it of memStore.get("sale_items") ?? []) {
+      if (Number(it.quantity_delivered ?? 0) === 0 && !withHist.has(it.id) && Number(it.quantity ?? 0) > 0) {
+        it.quantity_delivered = it.quantity;
+      }
+    }
+  } catch {}
   // Seed sales for demo shift report (today)
   if (!memStore.has("sales")) {
     memStore.set("sales", []);
     memStore.set("sale_items", []);
+    memStore.set("sale_pickups", memStore.get("sale_pickups") ?? []);
+    memStore.set("customer_notes", memStore.get("customer_notes") ?? []);
     memStore.set("customers", [...customersSeed]);
     memStore.set("customer_history", []);
     memStore.set("employees", [
@@ -258,7 +348,11 @@ export async function getDb(): Promise<any> {
     memStore.set("credits", [...creditsSeed]);
     memStore.set("credit_payments", []);
   }
-  // in-memory mock for web
+  // in-memory mock for web (RAM only — data lost on every reload)
+  if (backend !== "memory") {
+    console.warn("[db] backend=memory (RAM mock — data will NOT survive reloads)");
+  }
+  backend = "memory";
   db = {
     execAsync: async () => {},
     runAsync: async (sql: string, params: any[]) => {
@@ -268,19 +362,25 @@ export async function getDb(): Promise<any> {
         memStore.set("outbox", arr);
       } else if (sql.includes("INSERT INTO products")) {
         const products = memStore.get("products") ?? [];
+        const cols = (sql.match(/INTO products\s*\((.*?)\)/i)?.[1] ?? "id,store_id,sku,name").split(",").map(s => s.trim());
+        const at = (name: string): any => {
+          const i = cols.indexOf(name);
+          return i >= 0 ? params[i] : undefined;
+        };
         const id = params[0];
         if (!products.some((p: any) => p.id === id)) {
           products.push({
-            id: params[0],
-            store_id: params[1],
-            sku: params[2],
-            barcode: params[2],
-            name: params[3],
-            category_id: params[4],
-            cost_price: Number(params[5] ?? 0),
-            stock_quantity: Number(params[6] ?? 0),
-            current_amount_available: Number(params[6] ?? 0),
-            low_stock_threshold: Number(params[7] ?? 5),
+            id,
+            store_id: at("store_id") ?? params[1],
+            sku: at("sku") ?? params[2],
+            barcode: at("barcode") ?? at("sku") ?? params[2],
+            name: at("name") ?? params[3],
+            category_id: at("category_id") ?? params[4],
+            stock_quantity: Number(at("stock_quantity") ?? 0),
+            current_amount_available: Number(at("current_amount_available") ?? at("stock_quantity") ?? 0),
+            low_stock_threshold: Number(at("low_stock_threshold") ?? 5),
+            item_type: at("item_type") ?? "goods",
+            is_available: at("is_available") ?? 1,
             updated_at: new Date().toISOString(),
             is_deleted: 0,
             dirty: 1,
@@ -289,7 +389,12 @@ export async function getDb(): Promise<any> {
         }
       } else if (sql.includes("INTO product_units")) {
         const arr = memStore.get("product_units") ?? [];
-        const rec = { id: params[0], product_id: params[1], unit_name: params[2], conversion_factor: Number(params[3] ?? 1), created_at: params[4] ?? new Date().toISOString(), updated_at: params[5] ?? new Date().toISOString() };
+        const colPart = (sql.match(/\(\s*id\s*,(.*?)\)\s*VALUES/i)?.[1] ?? "").split(",").map(s => s.trim());
+        const at = (name: string): any => {
+          const i = colPart.indexOf(name);
+          return i >= 0 ? params[i + 1] : undefined;
+        };
+        const rec = { id: params[0], product_id: params[1], unit_name: at("unit_name") ?? params[2], condition: at("condition") ?? null, conversion_factor: Number(at("conversion_factor") ?? params[3] ?? 1), created_at: at("created_at") ?? params[4] ?? new Date().toISOString(), updated_at: at("updated_at") ?? params[5] ?? new Date().toISOString() };
         const ui = arr.findIndex((x: any) => x.id === rec.id);
         if (ui >= 0) arr[ui] = { ...arr[ui], ...rec }; else arr.push(rec);
         memStore.set("product_units", arr);
@@ -301,10 +406,80 @@ export async function getDb(): Promise<any> {
         memStore.set("product_prices", arr);
       } else if (sql.includes("INTO product_bundles")) {
         const arr = memStore.get("product_bundles") ?? [];
-        const rec = { id: params[0], unit_id: params[1], variant: params[2], min_quantity: Number(params[3] ?? 0), bundle_price: Number(params[4] ?? 0), created_at: params[5] ?? new Date().toISOString() };
+        const cols = (sql.match(/INTO product_bundles\s*\((.*?)\)/i)?.[1] ?? "id,unit_id,variant,min_quantity,bundle_price,created_at").split(",").map(s => s.trim());
+        const at = (name: string): any => {
+          const i = cols.indexOf(name);
+          return i >= 0 ? params[i] : undefined;
+        };
+        const rec = { id: params[0], unit_id: at("unit_id"), variant_id: at("variant_id") ?? null, variant: at("variant") ?? params[2], min_quantity: Number(at("min_quantity") ?? params[3] ?? 0), bundle_price: Number(at("bundle_price") ?? params[4] ?? 0), created_at: at("created_at") ?? params[5] ?? new Date().toISOString() };
         const ui = arr.findIndex((x: any) => x.id === rec.id);
         if (ui >= 0) arr[ui] = { ...arr[ui], ...rec }; else arr.push(rec);
         memStore.set("product_bundles", arr);
+      } else if (
+        sql.includes("INTO items") ||
+        sql.includes("INTO variants") ||
+        sql.includes("INTO variant_prices") ||
+        sql.includes("INTO batches") ||
+        sql.includes("INTO product_suppliers")
+      ) {
+        // Catalog v2 generic upsert: column list parsed from the statement.
+        const m = sql.match(/INTO\s+(\w+)\s*\((.*?)\)/i);
+        const table = m?.[1] ?? "items";
+        const cols = (m?.[2] ?? "id").split(",").map(c => c.trim());
+        const arr = memStore.get(table) ?? [];
+        const rec: any = {};
+        cols.forEach((col, i) => { if (col) rec[col] = params[i] ?? null; });
+        if (typeof rec.is_deleted === "undefined") rec.is_deleted = 0;
+        let ui = arr.findIndex((x: any) => x.id != null && rec.id != null && x.id === rec.id);
+        if (ui < 0 && table === "product_suppliers") {
+          ui = arr.findIndex((x: any) => x.product_id === rec.product_id && x.supplier_id === rec.supplier_id);
+        }
+        if (ui >= 0) arr[ui] = { ...arr[ui], ...rec }; else arr.push(rec);
+        memStore.set(table, arr);
+      } else if (sql.includes("INTO product_supplier_costs")) {
+        // Global join upsert: one row per (product, supplier, unit).
+        const arr = memStore.get("product_supplier_costs") ?? [];
+        const cols = (sql.match(/INTO product_supplier_costs\s*\((.*?)\)/i)?.[1] ?? "id,product_id,supplier_id,unit_id,cost,last_updated").split(",").map(c => c.trim());
+        const rec: any = {};
+        cols.forEach((col, i) => { if (col) rec[col] = params[i] ?? null; });
+        rec.cost = Number(rec.cost ?? 0);
+        rec.last_updated = rec.last_updated ?? new Date().toISOString();
+        rec.updated_at = rec.updated_at ?? rec.last_updated;
+        rec.is_deleted = rec.is_deleted ? 1 : 0;
+        const ui = arr.findIndex((x: any) => x.product_id === rec.product_id && x.supplier_id === rec.supplier_id && x.unit_id === rec.unit_id);
+        if (ui >= 0) arr[ui] = { ...arr[ui], ...rec, id: arr[ui].id };
+        else {
+          if (!rec.id) rec.id = `psc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          arr.push(rec);
+        }
+        memStore.set("product_supplier_costs", arr);
+      } else if (sql.includes("UPDATE product_supplier_costs SET")) {
+        const arr = memStore.get("product_supplier_costs") ?? [];
+        const id = params[params.length - 1];
+        const rec = arr.find((x: any) => x.id === id);
+        if (rec) {
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          setPart.split(",").forEach((c, i) => {
+            const plain = c.trim().match(/^(\w+)\s*=\s*\?$/);
+            if (plain && params[i] !== undefined) (rec as any)[plain[1]] = params[i];
+          });
+          rec.updated_at = new Date().toISOString();
+        }
+      } else if (/UPDATE\s+(items|variants|variant_prices|batches)\s+SET/i.test(sql)) {
+        // Catalog v2 generic update-by-id (manage screens).
+        const table = (sql.match(/UPDATE\s+(\w+)\s+SET/i)?.[1] ?? "items") as string;
+        const arr = memStore.get(table) ?? [];
+        const id = params[params.length - 1];
+        const rec = arr.find((x: any) => x.id === id);
+        if (rec) {
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          setPart.split(",").forEach((c, i) => {
+            const plain = c.trim().match(/^(\w+)\s*=\s*\?$/);
+            if (plain && params[i] !== undefined) (rec as any)[plain[1]] = params[i];
+          });
+          rec.updated_at = new Date().toISOString();
+        }
+        memStore.set(table, arr);
       } else if (sql.includes("UPDATE product_prices SET") || sql.includes("UPDATE product_units SET")) {
         const target = sql.includes("UPDATE product_prices SET") ? "product_prices" : "product_units";
         const arr = memStore.get(target) ?? [];
@@ -318,7 +493,7 @@ export async function getDb(): Promise<any> {
           });
           rec.updated_at = new Date().toISOString();
         }
-      } else if (sql.includes("UPDATE products SET") && sql.includes("current_amount_available")) {
+      } else if (sql.includes("UPDATE products SET")) {
         const products = memStore.get("products") ?? [];
         const id = params[params.length - 1];
         const p = products.find((x: any) => x.id === id);
@@ -463,9 +638,32 @@ export async function getDb(): Promise<any> {
         memStore.set("salary_deductions", arr);
       } else if (sql.includes("INSERT INTO sale_items")) {
         const items = memStore.get("sale_items") ?? [];
-        // params: id,store_id,sale_id,product_id,product_name,unit_id,variant,quantity,unit_price,cost_price,line_total,updated_at
-        items.push({ id: params[0], store_id: params[1], sale_id: params[2], product_id: params[3], product_name: params[4], unit_id: params[5] ?? null, variant: params[6] ?? null, quantity: params[7], unit_price: params[8], cost_price: params[9], line_total: params[10], created_at: params[11] ?? new Date().toISOString() });
+        // Column-parsed (handles 12-col legacy + 13-col with quantity_delivered).
+        // No pickup action = all products delivered together: delivered defaults to quantity.
+        const colPart = (sql.match(/\(\s*id\s*,(.*?)\)\s*VALUES/i)?.[1] ?? "").split(",").map(s => s.trim());
+        const at = (name: string): any => {
+          const i = colPart.indexOf(name);
+          return i >= 0 ? params[i + 1] : undefined;
+        };
+        const qty = Number(at("quantity") ?? params[7] ?? 0);
+        const qd = at("quantity_delivered");
+        items.push({ id: params[0], store_id: params[1], sale_id: params[2], product_id: params[3], product_name: params[4], unit_id: params[5] ?? null, variant: params[6] ?? null, quantity: qty, unit_price: at("unit_price") ?? params[8], cost_price: at("cost_price") ?? params[9], line_total: at("line_total") ?? params[10], quantity_delivered: qd ?? qty, created_at: at("created_at") ?? at("updated_at") ?? params[11] ?? new Date().toISOString() });
         memStore.set("sale_items", items);
+      } else if (sql.includes("INTO sale_pickups")) {
+        // Staging only: append-only pickup history. Dormant when flag OFF.
+        const arr = memStore.get("sale_pickups") ?? [];
+        arr.push({ id: params[0], store_id: params[1], sale_id: params[2], sale_item_id: params[3], quantity: Number(params[4] ?? 0), picked_up_by: params[5] ?? null, created_at: params[6] ?? new Date().toISOString() });
+        memStore.set("sale_pickups", arr);
+      } else if (sql.includes("UPDATE sale_items SET")) {
+        // Staging only: quantity_delivered adjustments. Generic SET parser (dormant when OFF).
+        const items = memStore.get("sale_items") ?? [];
+        const id = params[params.length - 1];
+        const it = items.find((x: any) => x.id === id);
+        if (it) {
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          const cols = setPart.split(",").map(p => p.trim().replace(/\s*=\s*\??$/, "").trim());
+          cols.forEach((col, i) => { if (params[i] !== undefined) (it as any)[col] = params[i]; });
+        }
       } else if (sql.includes("INTO receipts")) {
         const arr = memStore.get("receipts") ?? [];
         const idx = arr.findIndex((x: any) => x.id === params[0]);
@@ -516,7 +714,7 @@ export async function getDb(): Promise<any> {
         // Notify all supervisors of the store on any cash movement OUT (withdrawal / inventory)
         if (cm.type === "withdrawal" || cm.type === "inventory") {
           const notifs = memStore.get("notifications") ?? [];
-          const label = cm.type === "inventory" ? `Kach envantè ${cm.amount} HTG` : `Retrè ${cm.amount} HTG`;
+          const label = cm.type === "inventory" ? `Kach envantè ${fmtG(cm.amount)}` : `Retrè ${fmtG(cm.amount)}`;
           for (const sup of ["owner-1", "admin-1", "manager-1"]) {
             if (sup === cm.created_by) continue;
             notifs.push({ id: `notif-${Date.now()}-${sup}-${Math.random().toString(36).slice(2, 4)}`, user_id: sup, type: cm.type === "inventory" ? "inventory_pickup" : "withdrawal", reference_id: cm.id, message: `${label} — ${cm.reason ?? ""}`.trim(), status: "pending", created_at: new Date().toISOString() });
@@ -531,6 +729,10 @@ export async function getDb(): Promise<any> {
         const history = memStore.get("customer_history") ?? [];
         history.push({ id: params[0], customer_id: params[1], user_id: params[2], action: params[3], field_name: params[4], old_value: params[5], new_value: params[6], created_at: params[7] });
         memStore.set("customer_history", history);
+      } else if (sql.includes("INTO customer_notes")) {
+        const arr = memStore.get("customer_notes") ?? [];
+        arr.push({ id: params[0], store_id: params[1], customer_id: params[2], text: params[3], created_by: params[4] ?? null, created_at: params[5] ?? new Date().toISOString() });
+        memStore.set("customer_notes", arr);
       } else if (sql.includes("INSERT INTO cash_requests")) {
         const crs = memStore.get("cash_requests") ?? [];
         crs.push({ id: params[0], shift_id: params[1], amount: params[2], reason: params[3], created_by: params[4], status: params[5], created_at: params[6] });
@@ -565,6 +767,62 @@ export async function getDb(): Promise<any> {
           if (sql.includes("online_status")) emp.online_status = params[0];
           emp.updated_at = new Date().toISOString();
         }
+      } else if (sql.includes("INTO suppliers")) {
+        const arr = memStore.get("suppliers") ?? [];
+        const cols = (sql.match(/INTO suppliers\s*\((.*?)\)/i)?.[1] ?? "id,store_id,name,phone,address,payment_terms,bank_info,notes,created_at").split(",").map(c => c.trim());
+        const rec: any = {};
+        cols.forEach((col, i) => { if (col) rec[col] = params[i] ?? null; });
+        if (!rec.id) { /* no-op without id */ } else {
+          rec.created_at = rec.created_at ?? new Date().toISOString();
+          rec.updated_at = rec.updated_at ?? rec.created_at;
+          rec.is_deleted = rec.is_deleted ? 1 : 0;
+          const idx = arr.findIndex((x: any) => x.id === rec.id);
+          if (idx >= 0) arr[idx] = { ...arr[idx], ...rec };
+          else arr.push(rec);
+          memStore.set("suppliers", arr);
+        }
+      } else if (sql.includes("UPDATE suppliers SET")) {
+        const arr = memStore.get("suppliers") ?? [];
+        const id = params[params.length - 1];
+        const rec = arr.find((x: any) => x.id === id);
+        if (rec) {
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          const cols = setPart.split(",").map(p => p.trim().replace(/\s*=\s*\??$/, "").trim());
+          cols.forEach((col, i) => { if (params[i] !== undefined) (rec as any)[col] = params[i]; });
+          rec.updated_at = new Date().toISOString();
+        }
+      } else if (sql.includes("DELETE FROM suppliers")) {
+        const arr = memStore.get("suppliers") ?? [];
+        memStore.set("suppliers", arr.filter((x: any) => x.id !== params[0]));
+      } else if (sql.includes("INTO orders")) {
+        const arr = memStore.get("orders") ?? [];
+        const cols = (sql.match(/INTO orders\s*\((.*?)\)/i)?.[1] ?? "id,store_id,item_name,qty,unit,supplier_name,note,requested_by,requested_by_name,created_at").split(",").map(c => c.trim());
+        const rec: any = {};
+        cols.forEach((col, i) => { if (col) rec[col] = params[i] ?? null; });
+        if (!rec.id) { /* no-op without id */ } else {
+          if (rec.qty == null) rec.qty = 1;
+          if (!rec.status) rec.status = "requested";
+          rec.created_at = rec.created_at ?? new Date().toISOString();
+          rec.updated_at = rec.updated_at ?? rec.created_at;
+          rec.is_deleted = rec.is_deleted ? 1 : 0;
+          const idx = arr.findIndex((x: any) => x.id === rec.id);
+          if (idx >= 0) arr[idx] = { ...arr[idx], ...rec };
+          else arr.push(rec);
+          memStore.set("orders", arr);
+        }
+      } else if (sql.includes("UPDATE orders SET")) {
+        const arr = memStore.get("orders") ?? [];
+        const id = params[params.length - 1];
+        const rec = arr.find((x: any) => x.id === id);
+        if (rec) {
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          const cols = setPart.split(",").map(p => p.trim().replace(/\s*=\s*\??$/, "").trim());
+          cols.forEach((col, i) => { if (params[i] !== undefined) (rec as any)[col] = params[i]; });
+          rec.updated_at = new Date().toISOString();
+        }
+      } else if (sql.includes("DELETE FROM orders")) {
+        const arr = memStore.get("orders") ?? [];
+        memStore.set("orders", arr.filter((x: any) => x.id !== params[0]));
       } else if (sql.includes("INSERT INTO cash_discrepancies")) {
         const cds = memStore.get("cash_discrepancies") ?? [];
         cds.push({ id: params[0], shift_id: params[1], manager_amount: params[2], cashier_amount: params[3], difference: params[4], status: params[5], created_by: params[6], reassigned_amount: params[7] ?? null, created_at: params[8] ?? new Date().toISOString() });
@@ -572,7 +830,7 @@ export async function getDb(): Promise<any> {
         // Create notifications for all supervisors
         const notifs = memStore.get("notifications") ?? [];
         for (const sup of ["owner-1", "admin-1", "manager-1"]) {
-          notifs.push({ id: `notif-${Date.now()}-${sup}-${Math.random().toString(36).slice(2,4)}`, user_id: sup, type: "cash_discrepancy", reference_id: params[0], message: `Kesye rapòte ${params[3]} HTG olye de ${params[2]} HTG — manke ${params[4]} HTG`, status: "pending", created_at: new Date().toISOString() });
+          notifs.push({ id: `notif-${Date.now()}-${sup}-${Math.random().toString(36).slice(2,4)}`, user_id: sup, type: "cash_discrepancy", reference_id: params[0], message: `Kesye rapòte ${fmtG(params[3])} olye de ${fmtG(params[2])} — manke ${fmtG(params[4])}`, status: "pending", created_at: new Date().toISOString() });
         }
         memStore.set("notifications", notifs);
       } else if (sql.includes("UPDATE notifications SET")) {
@@ -588,9 +846,9 @@ export async function getDb(): Promise<any> {
         const newId = params[0];
         if (!customers.some((c: any) => c.id === newId)) {
           if (params.length === 11) {
-            customers.push({ id: params[0], store_id: params[1], name: params[2], phone: params[3], address: params[4], id_card_number: params[5], total_debt: params[6], credit_limit: params[7], credit_limit_source: params[8], is_high_risk: params[9], open_debt_count: params[10] });
+            customers.push({ id: params[0], store_id: params[1], name: params[2], phone: params[3], address: params[4], id_card_number: params[5], total_debt: params[6], credit_limit: params[7], credit_limit_source: params[8], is_high_risk: params[9], open_debt_count: params[10], email: null, first_name: null, last_name: null, birth_day: null, birth_month: null, birth_year: null, country: null, department: null, commune: null, address_line1: null, address_line2: null, marketing_consent: 0 });
           } else {
-            customers.push({ id: params[0], store_id: params[1], name: params[2], phone: params[3], id_card_number: params[4], total_debt: params[5], credit_limit: params[6], credit_limit_source: params[7], is_high_risk: params[8], open_debt_count: params[9], address: null });
+            customers.push({ id: params[0], store_id: params[1], name: params[2], phone: params[3], id_card_number: params[4], total_debt: params[5], credit_limit: params[6], credit_limit_source: params[7], is_high_risk: params[8], open_debt_count: params[9], address: null, email: null, first_name: null, last_name: null, birth_day: null, birth_month: null, birth_year: null, country: null, department: null, commune: null, address_line1: null, address_line2: null, marketing_consent: 0 });
           }
           memStore.set("customers", customers);
         }
@@ -599,21 +857,19 @@ export async function getDb(): Promise<any> {
         const id = params[params.length - 1];
         const c = customers.find((x: any) => x.id === id);
         if (c) {
-          if (sql.includes("total_debt")) c.total_debt = params[0];
-          if (sql.includes("credit_limit")) c.credit_limit = params[0];
-          if (sql.includes("credit_limit_source")) c.credit_limit_source = params[0];
-          if (sql.includes("is_high_risk")) c.is_high_risk = params[0];
-          if (sql.includes("open_debt_count")) c.open_debt_count = params[0];
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          const cols = setPart.split(",").map(p => p.trim().replace(/\s*=\s*\??$/, "").trim());
+          cols.forEach((col, i) => { if (params[i] !== undefined) (c as any)[col] = params[i]; });
         }
       } else if (sql.includes("UPDATE credits SET")) {
         const credits = memStore.get("credits") ?? [];
         const id = params[params.length - 1];
         const credit = credits.find((x: any) => x.id === id);
         if (credit) {
-          if (sql.includes("amount_paid")) credit.amount_paid = params[0];
-          if (sql.includes("balance")) credit.balance = params[0];
-          if (sql.includes("status")) credit.status = params[0];
-          if (sql.includes("updated_at")) credit.updated_at = params[0];
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          const cols = setPart.split(",").map(p => p.trim().replace(/\s*=\s*\??$/, "").trim());
+          cols.forEach((col, i) => { if (params[i] !== undefined) (credit as any)[col] = params[i]; });
+          credit.updated_at = new Date().toISOString();
         }
       } else if (sql.includes("UPDATE cash_requests SET")) {
         const crs = memStore.get("cash_requests") ?? [];
@@ -774,11 +1030,29 @@ export async function getDb(): Promise<any> {
         const key = params[params.length - 1];
         const m = meta.find((x: any) => x.key === key);
         if (m) m.value = params[0];
+      } else if (sql.includes("INTO category_links")) {
+        const arr = memStore.get("category_links") ?? [];
+        const cols = (sql.match(/INTO category_links\s*\((.*?)\)/i)?.[1] ?? "id,child_id,parent_id").split(",").map(c => c.trim());
+        const rec: any = {};
+        cols.forEach((col, i) => { if (col) rec[col] = params[i] ?? null; });
+        if (!rec.id) rec.id = `${rec.child_id}__${rec.parent_id}`;
+        rec.updated_at = rec.updated_at ?? new Date().toISOString();
+        rec.is_deleted = rec.is_deleted ? 1 : 0;
+        const ui = arr.findIndex((x: any) => x.child_id === rec.child_id && x.parent_id === rec.parent_id);
+        if (ui >= 0) arr[ui] = { ...arr[ui], ...rec };
+        else arr.push(rec);
+        memStore.set("category_links", arr);
       } else if (sql.includes("INTO product_categories")) {
         const pcs = memStore.get("product_categories") ?? [];
         if (!pcs.some((r: any) => r.product_id === params[0] && r.category_id === params[1])) {
           pcs.push({ product_id: params[0], category_id: params[1] });
           memStore.set("product_categories", pcs);
+        }
+      } else if (sql.includes("INTO employee_stores")) {
+        const rows = memStore.get("employee_stores") ?? [];
+        if (!rows.some((r: any) => r.employee_id === params[0] && r.store_id === params[1])) {
+          rows.push({ employee_id: params[0], store_id: params[1] });
+          memStore.set("employee_stores", rows);
         }
       } else if (sql.includes("DELETE FROM product_categories")) {
         const pcs = memStore.get("product_categories") ?? [];
@@ -787,10 +1061,23 @@ export async function getDb(): Promise<any> {
         } else {
           memStore.set("product_categories", pcs.filter((r: any) => r.product_id !== params[0]));
         }
+      } else if (sql.includes("DELETE FROM employee_stores")) {
+        const rows = memStore.get("employee_stores") ?? [];
+        if (sql.includes("store_id")) {
+          memStore.set("employee_stores", rows.filter((r: any) => !(r.employee_id === params[0] && r.store_id === params[1])));
+        } else {
+          memStore.set("employee_stores", rows.filter((r: any) => r.employee_id !== params[0]));
+        }
       } else if (sql.includes("INTO stock_batches")) {
         const batches = memStore.get("stock_batches") ?? [];
         const id = params[0];
-        const rec = { id: params[0], store_id: params[1], reference: params[2], supplier: params[3], transport_cost: Number(params[4] ?? 0), notes: params[5], total_items_cost: Number(params[6] ?? 0), total_cost: Number(params[7] ?? 0), received_at: params[8] ?? null, created_by: params[9], created_at: params[10] ?? new Date().toISOString(), updated_at: params[11] ?? new Date().toISOString(), status: params[12] ?? 'delivered', delivered_at: params[13] ?? null };
+        // Column-mapped (supports both legacy 14-col and new 15-col with supplier_id).
+        const colPart = (sql.match(/\(\s*id\s*,(.*?)\)\s*VALUES/i)?.[1] ?? "").split(",").map(s => s.trim());
+        const at = (name: string): any => {
+          const i = colPart.indexOf(name);
+          return i >= 0 ? params[i + 1] : undefined;
+        };
+        const rec = { id: params[0], store_id: params[1], reference: at("reference") ?? params[2], supplier: at("supplier") ?? params[3], supplier_id: at("supplier_id") ?? null, transport_cost: Number(at("transport_cost") ?? params[4] ?? 0), notes: at("notes") ?? params[5], total_items_cost: Number(at("total_items_cost") ?? params[6] ?? 0), total_cost: Number(at("total_cost") ?? params[7] ?? 0), received_at: at("received_at") ?? params[8] ?? null, created_by: at("created_by") ?? params[9], created_at: at("created_at") ?? params[10] ?? new Date().toISOString(), updated_at: at("updated_at") ?? params[11] ?? new Date().toISOString(), status: at("status") ?? params[12] ?? 'delivered', delivered_at: at("delivered_at") ?? params[13] ?? null };
         const idx = batches.findIndex((b: any) => b.id === id);
         if (idx >= 0) batches[idx] = { ...batches[idx], ...rec };
         else batches.push(rec);
@@ -853,22 +1140,50 @@ export async function getDb(): Promise<any> {
       } else if (sql.includes("DELETE FROM suspended_sale_items")) {
         const arr = memStore.get("suspended_sale_items") ?? [];
         memStore.set("suspended_sale_items", arr.filter((x: any) => x.suspended_sale_id !== params[0]));
+      } else if (sql.includes("UPDATE receipts SET")) {
+        // Post-sale customer attach: patch stored receipt JSON content.
+        const arr = memStore.get("receipts") ?? [];
+        const id = params[params.length - 1];
+        const rec = arr.find((x: any) => x.id === id);
+        if (rec) {
+          const setPart = (sql.match(/SET\s+(.*?)\s+WHERE/i)?.[1] ?? "").trim();
+          const cols = setPart.split(",").map(p => p.trim().replace(/\s*=\s*\??$/, "").trim());
+          cols.forEach((col, i) => { if (params[i] !== undefined) (rec as any)[col] = params[i]; });
+        }
+      } else if (sql.includes("DELETE FROM receipts")) {
+        // "No receipt" choice: remove stored copies so no receipt exists at all.
+        const arr = memStore.get("receipts") ?? [];
+        if (sql.includes("WHERE sale_id")) {
+          memStore.set("receipts", arr.filter((x: any) => x.sale_id !== params[0]));
+        } else {
+          memStore.set("receipts", arr.filter((x: any) => x.id !== params[0]));
+        }
       }
       return { lastInsertRowId: 0, changes: 1 };
     },
     getAllAsync: async (sql: string, params?: any[]) => {
       if (sql.includes("FROM outbox")) return memStore.get("outbox") ?? [];
       if (sql.includes("FROM products")) {
-        const all = memStore.get("products") ?? [];
+        const all = (memStore.get("products") ?? []).map((p: any) => ({
+          ...p,
+          item_type: p.item_type ?? "goods",
+          is_available: p.is_available ?? 1,
+          status: p.status ?? "active",
+        }));
         if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
         if (sql.includes("WHERE store_id")) { const v = params?.[0]; return all.filter((x: any) => x.store_id === v); }
         return all;
       }
       if (sql.includes("FROM sales")) {
         const all = memStore.get("sales") ?? [];
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
         if (sql.includes("WHERE customer_id")) {
           const cid = params?.[0];
           return all.filter((x: any) => x.customer_id === cid);
+        }
+        if (sql.includes("WHERE seller_id")) {
+          const sid = params?.[0];
+          return all.filter((x: any) => x.seller_id === sid);
         }
         return all;
       }
@@ -880,6 +1195,26 @@ export async function getDb(): Promise<any> {
         }
         return all;
       }
+      if (sql.includes("FROM employee_stores")) {
+        const all = memStore.get("employee_stores") ?? [];
+        if (sql.includes("WHERE employee_id")) {
+          const eid = params?.[0];
+          return all.filter((x: any) => x.employee_id === eid);
+        }
+        return all;
+      }
+      if (sql.includes("FROM sale_pickups")) {
+        const all = memStore.get("sale_pickups") ?? [];
+        if (sql.includes("WHERE sale_id")) {
+          const saleId = params?.[0];
+          return all.filter((x: any) => x.sale_id === saleId);
+        }
+        if (sql.includes("WHERE sale_item_id")) {
+          const iid = params?.[0];
+          return all.filter((x: any) => x.sale_item_id === iid);
+        }
+        return all;
+      }
       if (sql.includes("FROM receipts")) {
         const all = memStore.get("receipts") ?? [];
         if (sql.includes("WHERE sale_id")) {
@@ -888,8 +1223,24 @@ export async function getDb(): Promise<any> {
         }
         return all;
       }
-      if (sql.includes("FROM customers")) return memStore.get("customers") ?? [];
+      if (sql.includes("FROM customers")) {
+        const all = memStore.get("customers") ?? [];
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        return all;
+      }
       if (sql.includes("FROM employees")) return memStore.get("employees") ?? [];
+      if (sql.includes("FROM suppliers")) {
+        const all = (memStore.get("suppliers") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        if (sql.includes("WHERE store_id")) { const v = params?.[0]; return all.filter((x: any) => x.store_id === v); }
+        return all;
+      }
+      if (sql.includes("FROM orders")) {
+        const all = (memStore.get("orders") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        if (sql.includes("WHERE store_id")) { const v = params?.[0]; return all.filter((x: any) => x.store_id === v); }
+        return all;
+      }
       if (sql.includes("FROM customer_history")) {
         const history = memStore.get("customer_history") ?? [];
         if (sql.includes("WHERE customer_id")) {
@@ -898,15 +1249,42 @@ export async function getDb(): Promise<any> {
         }
         return history;
       }
+      if (sql.includes("FROM customer_notes")) {
+        const arr = memStore.get("customer_notes") ?? [];
+        if (sql.includes("WHERE customer_id")) {
+          const cid = params?.[0];
+          return arr.filter((x: any) => x.customer_id === cid);
+        }
+        return arr;
+      }
       if (sql.includes("FROM credits")) {
         const all = memStore.get("credits") ?? [];
         if (sql.includes("WHERE customer_id")) {
           const cid = params?.[0];
           return all.filter((x: any) => x.customer_id === cid);
         }
+        if (sql.includes("WHERE sale_id")) {
+          const v = params?.[0];
+          return all.filter((x: any) => x.sale_id === v);
+        }
+        if (sql.includes("WHERE id")) {
+          const v = params?.[0];
+          return all.filter((x: any) => x.id === v);
+        }
         return all;
       }
-      if (sql.includes("FROM credit_payments")) return memStore.get("credit_payments") ?? [];
+      if (sql.includes("FROM credit_payments")) {
+        const all = memStore.get("credit_payments") ?? [];
+        if (sql.includes("credit_id") || sql.includes("debt_id")) {
+          const v = params?.[0];
+          return all.filter((x: any) => x.credit_id === v || x.debt_id === v);
+        }
+        if (sql.includes("receipt_number")) {
+          const v = params?.[0];
+          return all.filter((x: any) => x.receipt_number === v);
+        }
+        return all;
+      }
       if (sql.includes("FROM shifts")) return memStore.get("shifts") ?? [];
       if (sql.includes("FROM cash_movements")) {
         const all = memStore.get("cash_movements") ?? [];
@@ -1005,6 +1383,12 @@ export async function getDb(): Promise<any> {
         if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
         return all;
       }
+      if (sql.includes("FROM category_links")) {
+        const all = (memStore.get("category_links") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE child_id")) { const v = params?.[0]; return all.filter((x: any) => x.child_id === v); }
+        if (sql.includes("WHERE parent_id")) { const v = params?.[0]; return all.filter((x: any) => x.parent_id === v); }
+        return all;
+      }
       if (sql.includes("FROM product_categories")) {
         const all = memStore.get("product_categories") ?? [];
         if (sql.includes("WHERE product_id") && sql.includes("category_id")) { const pid = params?.[0]; const cid = params?.[1]; return all.filter((x: any) => x.product_id === pid && x.category_id === cid); }
@@ -1044,6 +1428,49 @@ export async function getDb(): Promise<any> {
         if (sql.includes("WHERE unit_id")) { const v = params?.[0]; return all.filter((x: any) => x.unit_id === v); }
         return all;
       }
+      if (sql.includes("FROM product_supplier_costs")) {
+        const all = (memStore.get("product_supplier_costs") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE product_id") && sql.includes("supplier_id")) {
+          return all.filter((x: any) => x.product_id === params?.[0] && x.supplier_id === params?.[1]);
+        }
+        if (sql.includes("WHERE product_id")) { const v = params?.[0]; return all.filter((x: any) => x.product_id === v); }
+        if (sql.includes("WHERE supplier_id")) { const v = params?.[0]; return all.filter((x: any) => x.supplier_id === v); }
+        if (sql.includes("WHERE unit_id")) { const v = params?.[0]; return all.filter((x: any) => x.unit_id === v); }
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        return all;
+      }
+      if (sql.includes("FROM items")) {
+        const all = (memStore.get("items") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE product_id")) { const v = params?.[0]; return all.filter((x: any) => x.product_id === v); }
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        return all;
+      }
+      if (sql.includes("FROM product_suppliers")) {
+        const all = (memStore.get("product_suppliers") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE product_id")) { const v = params?.[0]; return all.filter((x: any) => x.product_id === v); }
+        if (sql.includes("WHERE supplier_id")) { const v = params?.[0]; return all.filter((x: any) => x.supplier_id === v); }
+        return all;
+      }
+      if (sql.includes("FROM batches")) {
+        const all = (memStore.get("batches") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE item_id")) { const v = params?.[0]; return all.filter((x: any) => x.item_id === v); }
+        if (sql.includes("WHERE supplier_id")) { const v = params?.[0]; return all.filter((x: any) => x.supplier_id === v); }
+        if (sql.includes("WHERE status")) { const v = params?.[0]; return all.filter((x: any) => x.status === v); }
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        return all;
+      }
+      if (sql.includes("FROM variant_prices")) {
+        const all = (memStore.get("variant_prices") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE variant_id")) { const v = params?.[0]; return all.filter((x: any) => x.variant_id === v); }
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        return all;
+      }
+      if (sql.includes("FROM variants")) {
+        const all = (memStore.get("variants") ?? []).filter((x: any) => !x.is_deleted);
+        if (sql.includes("WHERE item_id")) { const v = params?.[0]; return all.filter((x: any) => x.item_id === v); }
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        return all;
+      }
       if (sql.includes("FROM suspended_sale_items")) {
         const all = memStore.get("suspended_sale_items") ?? [];
         if (sql.includes("WHERE suspended_sale_id")) { const v = params?.[0] ?? sql.match(/suspended_sale_id\s*=\s*'([^']+)'/i)?.[1]; return all.filter((x: any) => x.suspended_sale_id === v); }
@@ -1074,6 +1501,11 @@ export async function getDb(): Promise<any> {
       return [];
     },
   };
+  // Memory backend gets the same catalog v2 cutover so web shows migrated data.
+  try { await runCatalogCutover(db); } catch (e) { console.log("[cutover] memory skipped:", String(e)); }
+  try { await migrateInventoryBatches(db); } catch (e) { console.log("[migrate] memory inventory skipped:", String(e)); }
+  try { await backfillSkus(db); } catch (e) { console.log("[backfill] memory skus skipped:", String(e)); }
+  try { await cleanupAutoBaseJunk(db); } catch (e) { console.log("[cutover] memory auto-base cleanup skipped:", String(e)); }
   return db;
 }
 

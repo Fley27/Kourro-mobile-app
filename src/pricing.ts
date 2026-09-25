@@ -1,18 +1,24 @@
 /**
  * Multi-variant pricing helpers (Hot/Cold, Box/Unit, Bundle logic).
  *
- * Model:
- * - product_units: ways to sell a product (Unit factor 1, Box factor 24...).
- *   Quantities in stock_movements / stock_quantity / current_amount_available
- *   are ALWAYS stored in base units (factor 1).
- * - product_prices: price per (unit_id, variant) — Cold, Hot, Regular...
- * - product_bundles: (unit_id, variant, min_quantity) -> bundle_price.
+ * Catalog v2 model (source of truth):
+ * - items: purchasable containers chained by ref_item_id + ratio.
+ *   Stock (stock_quantity) is ALWAYS stored in base units (factor 1).
+ * - variants: sellable presentations of an item (Cold, Regular...).
+ * - variant_prices: effective-dated rows; current = latest date ≤ now.
+ * - product_bundles: re-keyed to variant_id (see cutoverCatalog.ts).
+ *
+ * PricingMaps below is an in-memory VIEW over the v2 tables so every
+ * existing reader (POS selectors, display price, bundle math) keeps its
+ * signatures. loadPricing is the only function that touches storage.
  */
 
 export type ProductUnit = {
   id: string;
   product_id: string;
   unit_name: string;
+  /** Second variant dimension: "cold", "room temperature", null = none. */
+  condition?: string | null;
   conversion_factor: number;
   created_at?: string;
   updated_at?: string;
@@ -43,18 +49,61 @@ export type PricingMaps = {
 
 export const DEFAULT_VARIANT = "Regular";
 
-/** Load all pricing rows (catalogs are small; screens keep them in state). */
+/** Load all pricing rows (catalogs are small; screens keep them in state).
+ *  Builds the PricingMaps view from the v2 tables (items → pseudo-units
+ *  with cumulative base factors, current variant prices, variant bundles).
+ *  Old tables (product_units/prices) are no longer read after the cutover.
+ */
+import { loadCatalogModel, currentVariantPrice, itemFactor } from "./catalogModel";
 export async function loadPricing(db: any): Promise<PricingMaps> {
-  const [units, prices, bundles] = await Promise.all([
-    db.getAllAsync("SELECT * FROM product_units").catch(() => []),
-    db.getAllAsync("SELECT * FROM product_prices").catch(() => []),
-    db.getAllAsync("SELECT * FROM product_bundles").catch(() => []),
-  ]);
-  return {
-    units: (units ?? []) as ProductUnit[],
-    prices: (prices ?? []) as ProductPrice[],
-    bundles: (bundles ?? []) as ProductBundle[],
-  };
+  const now = new Date().toISOString();
+  try {
+    const m = await loadCatalogModel(db);
+    const liveItems = m.items.filter((i: any) => !i.is_deleted);
+    const factorOf = (id: string): number => itemFactor(liveItems as any, id);
+    const units: ProductUnit[] = liveItems
+      .map((it: any) => ({
+        id: it.id,
+        product_id: it.product_id,
+        unit_name: it.name,
+        conversion_factor: factorOf(it.id) || 1,
+        created_at: it.created_at,
+        updated_at: it.updated_at,
+      }))
+      .filter(u => u.conversion_factor > 0);
+    const prices: ProductPrice[] = [];
+    for (const v of m.variants.filter((x: any) => !x.is_deleted)) {
+      const cur = currentVariantPrice(m.variantPrices, v.id, now);
+      prices.push({
+        id: cur?.id ?? `noprice-${v.id}`,
+        unit_id: v.item_id,
+        variant: v.name,
+        price: cur ? Number(cur.price) || 0 : 0,
+        updated_at: cur?.updated_at ?? v.updated_at,
+      });
+    }
+    const variantById = new Map(m.variants.map((v: any) => [v.id, v]));
+    const bundles: ProductBundle[] = [];
+    let rawBundles: any[] = [];
+    try {
+      rawBundles = ((await db.getAllAsync("SELECT * FROM product_bundles").catch(() => [])) ?? []) as any[];
+    } catch { rawBundles = []; }
+    for (const b of rawBundles) {
+      const v = variantById.get(String(b.variant_id ?? ""));
+      if (!v || (v as any).is_deleted) continue;
+      bundles.push({
+        id: String(b.id),
+        unit_id: (v as any).item_id,
+        variant: (v as any).name,
+        min_quantity: Number(b.min_quantity) || 0,
+        bundle_price: Number(b.bundle_price) || 0,
+        created_at: b.created_at,
+      });
+    }
+    return { units, prices, bundles };
+  } catch {
+    return { units: [], prices: [], bundles: [] };
+  }
 }
 
 export function getUnitsForProduct(m: PricingMaps, productId: string): ProductUnit[] {
@@ -142,28 +191,32 @@ export function toBaseUnits(qty: number, factor: number): number {
 }
 
 /**
- * Safety net: guarantee at least one unit + one price row for a product,
- * migrated from legacy `selling_price` / `unit` fields when present.
- * No-op when units already exist. Returns units for the product.
+ * Safety net: guarantee at least one (base) item for a product.
+ * No-op when items already exist. Never auto-creates variants or prices —
+ * variant prices are effective-dated history and must come from real entry.
+ * Returns pseudo-units for the product (same shape as loadPricing).
  */
 export async function ensurePricingForProduct(db: any, product: any): Promise<ProductUnit[]> {
   const pid = product?.id;
   if (!pid) return [];
-  const existing = ((await db.getAllAsync("SELECT * FROM product_units WHERE product_id = ?", [pid]).catch(() => [])) ?? []) as ProductUnit[];
-  if (existing.length) return existing;
+  // Drafts are unfinished chains — never plant anchors on them. Units come
+  // from the Inite step only.
+  if ((product as any)?.status === "draft") return [];
+  const existing = (((await db.getAllAsync("SELECT * FROM items WHERE product_id = ?", [pid]).catch(() => [])) ?? []) as any[])
+    .filter((i: any) => !i.is_deleted);
+  if (existing.length) {
+    return existing.map((i: any) => ({
+      id: i.id, product_id: pid, unit_name: i.name, conversion_factor: 1,
+      created_at: i.created_at, updated_at: i.updated_at,
+    }));
+  }
   const now = new Date().toISOString();
-  const legacyUnit = String((product as any).unit ?? "").trim() || "Unit";
-  const legacyPrice = Number((product as any).selling_price ?? 0) || 0;
-  const uid = `unit-${pid}-base`;
+  const iid = `item-${pid}-single`;
   await db.runAsync(
-    "INSERT OR REPLACE INTO product_units (id, product_id, unit_name, conversion_factor, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-    [uid, pid, legacyUnit, 1, now, now]
+    "INSERT OR REPLACE INTO items (id, product_id, name, ref_item_id, ratio, sort_order, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    [iid, pid, "Single", null, null, 0, now, now, 0, 1]
   );
-  await db.runAsync(
-    "INSERT OR REPLACE INTO product_prices (id, unit_id, variant, price, updated_at) VALUES (?,?,?,?,?)",
-    [`price-${pid}-regular`, uid, DEFAULT_VARIANT, legacyPrice, now]
-  );
-  return [{ id: uid, product_id: pid, unit_name: legacyUnit, conversion_factor: 1, created_at: now, updated_at: now }];
+  return [{ id: iid, product_id: pid, unit_name: "Single", conversion_factor: 1, created_at: now, updated_at: now }];
 }
 
 /** Batch version (one round-trip for units, then inserts only for missing). */

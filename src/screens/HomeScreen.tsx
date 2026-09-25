@@ -116,7 +116,7 @@ export default function HomeScreen({ onGoPos, onGoShift, role = "cashier", curre
       const rows = (await db.getAllAsync("SELECT * FROM sales ORDER BY created_at DESC, updated_at DESC")) as any[];
       const custs = (await db.getAllAsync("SELECT * FROM customers")) as any[];
       const items = (await db.getAllAsync("SELECT * FROM sale_items")) as any[];
-      const products = (await db.getAllAsync("SELECT * FROM products")) as any[];
+      const products = (await db.getAllAsync("SELECT * FROM products WHERE (is_deleted=0 OR is_deleted IS NULL) AND (status IS NULL OR status = 'active')")) as any[];
       let creditRows: any[] = [];
       let creditPaymentRows: any[] = [];
       try { creditRows = (await db.getAllAsync("SELECT * FROM credits")) as any[]; } catch {}
@@ -429,9 +429,6 @@ export default function HomeScreen({ onGoPos, onGoShift, role = "cashier", curre
         <View style={{ backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, padding: 3, flexDirection: "row", borderWidth: 0.5, borderColor: palette.hairline }}>
           {[
             { k: "analytics" as TabKey, l: "Analytics" },
-            ...(role === "cashier" ? [] : [{ k: "sales" as TabKey, l: "KPI" }]),
-            ...(role === "cashier" ? [] : [{ k: "employees" as TabKey, l: "Team" }]),
-            { k: "store" as TabKey, l: "Store" },
           ].map(t => {
             const active = tab === t.k;
             return (
@@ -461,9 +458,8 @@ export default function HomeScreen({ onGoPos, onGoShift, role = "cashier", curre
           })}
         </View>
 
-        {tab === "analytics" && (
-          <AnalyticsTab
-            range={range}
+                {tab === "analytics" && (
+          <AnalyticsTab            range={range}
             setRange={setRange}
             todayTotal={todayTotal}
             todayCount={todayCount}
@@ -486,14 +482,6 @@ export default function HomeScreen({ onGoPos, onGoShift, role = "cashier", curre
             dbSalesLength={dbSales.length}
             role={role}
             currentUser={currentUser}
-          />
-        )}
-
-        {tab === "sales" && (
-          <SalesTab
-            teamKPI={teamKPI}
-            range={range}
-            setRange={setRange}
           />
         )}
 

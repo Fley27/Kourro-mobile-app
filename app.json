@@ -5,8 +5,9 @@
     "scheme": "jesyon",
     "version": "1.0.0",
     "orientation": "default",
+    "userInterfaceStyle": "automatic",
     "plugins": ["expo-notifications"],
-    "ios": { "bundleIdentifier": "com.jesyon.magazen", "supportsTablet": true, "requiresFullScreen": false },
+    "ios": { "bundleIdentifier": "com.jesyon.magazen", "supportsTablet": true, "requiresFullScreen": false, "infoPlist": { "NSContactsUsageDescription": "Enpòte kliyan soti nan kontak ou." } },
     "android": { "package": "com.jesyon.magazen", "softwareKeyboardLayoutMode": "pan" }
   }
 }

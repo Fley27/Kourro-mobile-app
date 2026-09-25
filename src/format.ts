@@ -1,4 +1,4 @@
-import { Platform, type TextStyle } from "react-native";
+import type { TextStyle } from "react-native";
 
 /**
  * French/Haitian number style: narrow no-break space thousands,
@@ -27,11 +27,17 @@ export function fmtHTG(n: number | string | null | undefined, decimals = 0): str
   return `${fmt(n, decimals)} HTG`;
 }
 
+/** Gourde-symbol amount: "G 7 000" (no HTG suffix). */
+export function fmtG(n: number | string | null | undefined, decimals = 0): string {
+  return `G ${fmt(n, decimals)}`;
+}
+
 /**
- * Monospace stack for price columns so digits/decimals line up.
- * Spread onto price <Text> styles together with textAlign: "right".
+ * Numeric alignment for price columns. Inter (applied via the fonts token
+ * or the global Text default) with tabular figures so digits/decimals
+ * line up. Intentionally no fontFamily here so the caller's Inter
+ * family-per-weight wins (Android breaks when family + weight combine).
  */
 export const monoStyle: TextStyle = {
-  fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
   fontVariant: ["tabular-nums"],
 };
