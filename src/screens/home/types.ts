@@ -60,7 +60,6 @@ export type TeamKPI = {
   totalCreditIssued: number;
   creditCollected: number;
   creditOutstanding: number;
-  grossProfit: number;
   profitLabels: string[];
   profitSegments: ProfitSegment[];
 };

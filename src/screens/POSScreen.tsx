@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
-import { View, Text, TextInput, Pressable, Alert, Modal, ScrollView, KeyboardAvoidingView, Platform, Animated, Easing } from "react-native";
+import { View, Text, TextInput, Pressable, Alert, Modal, ScrollView, KeyboardAvoidingView, Platform, Animated, Easing, SafeAreaView } from "react-native";
 import { getDb, insertOutbox } from "../db";
 import { ht } from "../i18n";
 import { palette, radius, shadow, topIconBtn } from "../theme";
@@ -13,29 +13,28 @@ import { tabsUI } from "../tabsUI";
 import { fmtG, fmt, monoStyle } from "../format";
 import { Ionicons } from "@expo/vector-icons";
 import ReceiptModal from "../components/ReceiptModal";
-import { type ReceiptData } from "../receipts";
+import { attachLineLabels, type ReceiptData } from "../receipts";
 import { useResponsive, centerBox, sheetBox } from "../responsive";
 import { POSPhone } from "./POSPhone";
 import { POSTablet } from "./POSTablet";
 import type { Product, CartItem, PendingSel, SuspendedTab, SearchMode, CartView, CustomerFlow, SaleRow } from "./POSShared";
-import { CartLineRow, SuspendRow, PayCTA, CartSummary } from "./POSShared";
+import { CartLinesList, SuspendRow, CartTotalBar } from "./POSShared";
+import { ScanSheet } from "../components/ScanSheet";
+import { makePricing, useSaleRows, usePendingLine, useCartLines } from "../picker/hooks";
+import { useSaleCatalog } from "../picker/useSaleCatalog";
+import { normName } from "./CatalogShared";
 import { CartMenuView, CartCustomersView, NewCustomerView, EditCustomerView, CustomerDetailBody, CustomerProfileBody, TxnDetailBody, TenderView } from "./cartViews";
 import { ProfileMenu, tenderLabel } from "../components/CustomerProfile";
 import { validateCheckout, persistSale } from "../sales/checkout";
 import { customerToFormData } from "../sales/customers";
 import { saveCartDraft, loadCartDraft, clearCartDraft } from "../sales/cartDraft";
 import { CreditPayFlow } from "../components/CreditPayFlow";
-import { UploadTransition, minDelay, type UploadPhase } from "../components/UploadTransition";
+import { UploadTransition, minDelay, uploadSuccess, uploadError, type UploadPhase } from "../components/UploadTransition";
 import CustomerForm, {
   EMPTY_CUSTOMER_FORM, fullNameOf, composeAddress,
   type CustomerFormData,
 } from "../components/CustomerForm";
-import CATALOG_ALL from "../data/catalog.products.json";
-// Empty-DB fallback: ubiquitous tier first (recognizable best-sellers).
-const CATALOG_FALLBACK = (CATALOG_ALL as any[])
-  .slice()
-  .sort((a, b) => "UCNE".indexOf(a.tier ?? "C") - "UCNE".indexOf(b.tier ?? "C"))
-  .slice(0, 30);
+import { MoneyInput } from "../components/maskedInput";
 export default function POSScreen({
   storeId,
   deviceId,
@@ -47,6 +46,7 @@ export default function POSScreen({
   onTabsChanged,
   attachCustomer = null,
   onAttachCustomerConsumed,
+  canSell = true,
 }: {
   storeId: string;
   deviceId: string;
@@ -58,6 +58,7 @@ export default function POSScreen({
   onTabsChanged?: () => void;
   attachCustomer?: any | null;
   onAttachCustomerConsumed?: () => void;
+  canSell?: boolean;
 }) {
   const responsive = useResponsive();
   const { width, height, isTablet, isLandscape, padH } = responsive;
@@ -65,8 +66,6 @@ export default function POSScreen({
   // Tablet layout shows in portrait; landscape tablets
   // render the phone layout (with its cart sheet + floating bar).
   const showTablet = isTablet && !isLandscape;
-  const [products, setProducts] = useState<Product[]>([]);
-  const [catNames, setCatNames] = useState<Record<string, string>>({});
   const [cart, setCart] = useState<CartItem[]>([]);
   const [search, setSearch] = useState("");
   const [searchMode, setSearchMode] = useState<SearchMode>("name");
@@ -134,7 +133,7 @@ export default function POSScreen({
       } catch {}
       setPendingPayReceipt(pair);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Resi echwe");
+      uploadError("Erè", e?.message ?? "Resi echwe");
     }
   }
 
@@ -159,8 +158,6 @@ export default function POSScreen({
   const [savingEdit, setSavingEdit] = useState(false);
   const [editInitial, setEditInitial] = useState<Partial<CustomerFormData>>({});
   const editFormRef = useRef<{ data: CustomerFormData; valid: boolean }>({ data: EMPTY_CUSTOMER_FORM, valid: false });
-  const [editingQtyId, setEditingQtyId] = useState<string | null>(null);
-  const [editingQtyVal, setEditingQtyVal] = useState<string>("");
   const [customerSearch, setCustomerSearch] = useState("");
   type PaymentMethod = "cash" | "mobile" | "credit";
   const [payment, setPayment] = useState<PaymentMethod>("cash");
@@ -175,16 +172,28 @@ export default function POSScreen({
   const [payTitle, setPayTitle] = useState("");
   const [payMsg, setPayMsg] = useState("");
 
-  // Non-intrusive pending quantity (10s auto-add)
-  const [pending, setPending] = useState<{ product: Product; qty: number; remaining: number } & PendingSel | null>(null);
-  const [pendingInput, setPendingInput] = useState<string>("");
-  const pendingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Catalog (products / pricing / cost + factor maps) — one loader shared
+  // with the Orders in-screen item picker.
+  const { products, catNames, pricing, minFactorMap, getBaseCost } = useSaleCatalog();
 
-  // Multi-variant pricing (units / Cold-Hot variants / bundles)
-  const [pricing, setPricing] = useState<PricingMaps>({ units: [], prices: [], bundles: [] });
-  const [costMap, setCostMap] = useState<Map<string, number>>(new Map());
-  const getBaseCost = (pid: string) => costMap.get(pid) ?? 0;
-  const [minFactorMap, setMinFactorMap] = useState<Map<string, number>>(new Map());
+  // Shared sale logic (pricing / pending countdown / cart qty edits / sale
+  // rows) — extracted to src/picker/hooks.ts so the Orders item picker
+  // reuses the exact same behavior.
+  const { defaultSelFor, priceFor, mergeLine } = makePricing(pricing, minFactorMap);
+  const {
+    pending, setPending, pendingInput, setPendingInput, pendingLine, pendingMaxQ,
+    handleProductPress, adjustPending, setPendingCustom, commitPendingWithInput,
+  } = usePendingLine({
+    pricing,
+    minFactorMap,
+    onCommit: (p, q, s) => setCart(prev => mergeLine(prev, p, s, Math.max(1, q))),
+    onRowPress: () => setSearch(""),
+  });
+  const {
+    editingQtyId, setEditingQtyId, editingQtyVal, setEditingQtyVal,
+    decQty, incQty, removeFromCart, setCustomQty,
+  } = useCartLines({ cart, setCart, products, pricing, minFactorMap });
+  const filtered = useSaleRows({ products, pricing, minFactorMap, catNames, search });
 
   // Open sales / tabs (Vant an Atann): suspended carts with frozen variant prices
   const [tabs, setTabs] = useState<SuspendedTab[]>([]);
@@ -278,9 +287,9 @@ export default function POSScreen({
       setShowCartSheet(false);
       setResumedTabId(null); setResumedTabLabel("");
       await loadTabs();
-      Alert.alert("Tab mete ajou ✓", `Nouvo pwodwi yo ajoute nan tab la • ${fmtG(total)}. Tab la rete ouvè.`);
+      uploadSuccess("Tab mete ajou ✓", `Nouvo pwodwi yo ajoute nan tab la • ${fmtG(total)}. Tab la rete ouvè.`);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete ajou echwe");
     }
   }
 
@@ -318,7 +327,7 @@ export default function POSScreen({
       await loadTabs();
       setSuspendPhase("success");
       setSuspendMsg(`${label} • ${fmtG(total)} sove. Pri yo jele.`);
-      await new Promise(r => setTimeout(r, 3500));
+      await new Promise(r => setTimeout(r, 1500));
       setSuspendBusy(false);
     } catch (e: any) {
       setSuspendPhase("error");
@@ -386,9 +395,9 @@ export default function POSScreen({
       setShowTabs(false);
       // Open after the tabs sheet dismisses — same-tick modal swaps get dropped on iOS
       setTimeout(() => setShowCartSheet(true), 350);
-      if (clamped) Alert.alert("Stòk chanje", `${clamped} liy te koupe paske stòk bese depi suspansyon an. Pri yo rete jele.`);
+      if (clamped) uploadSuccess("Stòk chanje", `${clamped} liy te koupe paske stòk bese depi suspansyon an. Pri yo rete jele.`);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Reprann tab echwe");
+      uploadError("Erè", e?.message ?? "Reprann tab echwe");
     }
   }
 
@@ -405,7 +414,7 @@ export default function POSScreen({
             try { await insertOutbox("suspended_sales", "update", { id: t.id, status: "voided" }); } catch {}
             if (resumedTabId === t.id) { setResumedTabId(null); setResumedTabLabel(""); }
             await loadTabs();
-          } catch (e: any) { Alert.alert("Erè", e?.message ?? "Anile tab echwe"); }
+          } catch (e: any) { uploadError("Erè", e?.message ?? "Anile tab echwe"); }
         })(); },
       },
     ]);
@@ -422,14 +431,14 @@ export default function POSScreen({
       try { await insertOutbox("suspended_sales", "update", { id: t.id, cashier_id: target.id }); } catch {}
       setTransferTabId(null);
       await loadTabs();
-      Alert.alert("Tab transfere ✓", `"${t.label}" kounye a pou ${target.name}.`);
+      uploadSuccess("Tab transfere ✓", `"${t.label}" kounye a pou ${target.name}.`);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Transfè echwe");
+      uploadError("Erè", e?.message ?? "Transfè echwe");
     }
   }
 
   // Credit sales are manager+ only; cashiers are read-only for customer records.
-  const canRegisterCustomer = ["owner", "admin", "manager"].includes(role || "cashier");
+  const canRegisterCustomer = ["owner", "admin", "manager", "cashier", "associate"].includes(role || "cashier");
   const canProcessCreditSale = ["owner", "admin", "manager"].includes(role || "cashier");
   const isCreditFlow = !!selectedCreditCustomer;
   // If cashier, Kredi is not an available payment option — ensure selection falls back to cash (except credit flow)
@@ -534,71 +543,11 @@ export default function POSScreen({
       selectCashCustomer(fresh);
       setCartCustSearch("");
       setCartView("cart");
-      Alert.alert("Kliyan ajoute ✓", fresh.name);
+      uploadSuccess("Kliyan ajoute ✓", fresh.name);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute kliyan echwe");
+      uploadError("Erè", e?.message ?? "Ajoute kliyan echwe");
     }
   }
-
-  useEffect(() => {
-    (async () => {
-      try {
-      const db = await getDb();
-      const rows = (await db.getAllAsync("SELECT * FROM products WHERE is_deleted=0 AND (status IS NULL OR status = 'active') ORDER BY name LIMIT 50")) as Product[];
-      try {
-        const cats = ((await db.getAllAsync("SELECT id, name FROM categories")) as any[]) ?? [];
-        const map: Record<string, string> = {};
-        for (const c of cats) map[String(c.id)] = String(c.name ?? "");
-        setCatNames(map);
-      } catch {}
-      const withRank = rows
-        .map(p => ({
-          ...p,
-          item_type: (p.item_type ?? "goods") as "goods" | "service",
-          is_available: p.is_available ?? 1,
-          sales_count: p.sales_count ?? 30,
-          barcode: p.barcode ?? p.sku ?? "",
-          category_id: p.category_id ?? "",
-        }))
-        // Services toggled off (86) never reach ordering screens.
-        .filter(p => p.item_type !== "service" || (p.is_available !== 0 && (p.is_available as any) !== false));
-      withRank.sort((a, b) => (b.sales_count! - a.sales_count!));
-      if (withRank.length === 0) {
-        // Empty DB (seed disabled/off): fall back to the mock catalog's
-        // ubiquitous tier so POS still opens with recognizable best-sellers.
-        setProducts(
-          CATALOG_FALLBACK.map(p => ({
-            id: p.id, name: p.name, name_ht: p.name_ht, barcode: p.barcode, sku: p.sku,
-            selling_price: p.units?.[0]?.sell ?? 0, stock_quantity: p.stock ?? 0,
-            cost_price: 0, sales_count: 60,
-          }))
-        );
-      } else {
-        setProducts(withRank);
-      }
-      try {
-        // Multi-variant pricing: units / Cold-Hot prices / bundles (+ legacy defaults)
-        const pm = await ensurePricingForProducts(db, withRank);
-        setPricing(pm);
-      } catch (e) { console.log("[POS pricing] failed:", e); }
-      try {
-        // v2 cost basis per product (dropped products.cost_price) + chain minima.
-        const { loadCatalogModel, currentBaseCost, minItemFactor } = await import("../catalogModel");
-        const m = await loadCatalogModel(db);
-        const map = new Map<string, number>();
-        const mins = new Map<string, number>();
-        for (const p of withRank) {
-          map.set(p.id, currentBaseCost(m.items, m.batches, p.id));
-          mins.set(p.id, minItemFactor(m.items, p.id));
-        }
-        setCostMap(map);
-        setMinFactorMap(mins);
-      } catch { setCostMap(new Map()); setMinFactorMap(new Map()); }
-      } catch (e) {
-        console.log("[POS products] failed:", e);
-      }
-    })();
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -648,220 +597,8 @@ export default function POSScreen({
     return () => clearTimeout(t);
   }, [cart, selectedCustomer, storeId, myId]);
 
-  // 10s countdown for pending
-  useEffect(() => {
-    if (!pending) {
-      if (pendingTimer.current) { clearInterval(pendingTimer.current); pendingTimer.current = null; }
-      return;
-    }
-    pendingTimer.current = setInterval(() => {
-      setPending(prev => {
-        if (!prev) return null;
-        if (prev.remaining <= 1) {
-          // auto-add
-          commitPending(prev.product, prev.qty, { unitId: (prev as any).unitId ?? "", unitName: (prev as any).unitName ?? "pcs", factor: (prev as any).factor ?? 1, variant: (prev as any).variant ?? "Regular" });
-          return null;
-        }
-        return { ...prev, remaining: prev.remaining - 1 };
-      });
-    }, 1000);
-    return () => { if (pendingTimer.current) clearInterval(pendingTimer.current); };
-  }, [pending?.product.id]);
-
-  // ---- multi-variant pricing (bound to pricing state) ----
-  function legacySel(p: Product): PendingSel {
-    return { unitId: "", unitName: p.unit ?? "pcs", factor: 1, variant: "Regular" };
-  }
-  function defaultSelFor(p: Product): PendingSel {
-    const units = getUnitsForProduct(pricing, p.id).filter(u => getPricesForUnit(pricing, u.id).some(r => Number(r.price) > 0));
-    const u = getDefaultUnit(units);
-    if (!u) return legacySel(p);
-    const rows = getPricesForUnit(pricing, u.id).filter(r => Number(r.price) > 0);
-    const v = rows.find(r => r.variant === "Regular") ?? rows[0];
-    return { unitId: u.id, unitName: u.unit_name, factor: Number(u.conversion_factor) || 1, variant: v?.variant ?? "Regular" };
-  }
-
-  function maxQtyFor(p: Product, factor: number): number {
-    // Services never clamp on stock (availability toggle decides).
-    if (p.item_type === "service") return 999999;
-    // Canonical stock ÷ canonical factor (identical numbers for legacy chains).
-    const minF = minFactorMap.get(p.id) ?? 1;
-    const eff = (Number(factor) || 1) / (minF > 0 ? minF : 1);
-    return Math.max(0, Math.floor(Number(p.stock_quantity ?? 0) / eff));
-  }
-  function priceFor(p: Product, sel: PendingSel, qty: number, frozenBase?: number) {
-    if (!sel.unitId) {
-      const up = frozenBase != null && !isNaN(frozenBase) ? Number(frozenBase) : Number(p.selling_price ?? 0) || 0;
-      const lineTotal = Math.round(up * Math.max(0, qty) * 100) / 100;
-      return { unitPrice: up, lineTotal, bundleApplied: false };
-    }
-    return resolveLinePrice(pricing, sel.unitId, sel.variant, qty, frozenBase);
-  }
-
-  function cartKey(productId: string, sel: PendingSel): string {
-    return `${productId}|${sel.unitId || "base"}|${sel.variant}`;
-  }
-  function repriceLine(x: CartItem, qty: number): Pick<CartItem, "qty" | "unitPrice" | "lineTotal" | "bundleApplied"> {
-    const pr = priceFor(x, { unitId: x.unitId, unitName: x.unitName, factor: x.factor, variant: x.variant }, qty, x.frozenBase);
-    return { qty, unitPrice: pr.unitPrice, lineTotal: pr.lineTotal, bundleApplied: pr.bundleApplied };
-  }
-  function mergeLine(prev: CartItem[], product: Product, sel: PendingSel, addQty: number): CartItem[] {
-    const key = cartKey(product.id, sel);
-    const maxQ = maxQtyFor(product, sel.factor);
-    const safeAdd = Math.max(0, Math.min(Math.max(1, Math.floor(addQty)), Math.max(0, maxQ)));
-    if (safeAdd <= 0) { Alert.alert("Stòk ensifizan", `Rete sèlman ${product.stock_quantity} nan stòk`); return prev; }
-    const ex = prev.find(x => x.key === key);
-    if (ex) {
-      const newQty = Math.min(ex.qty + safeAdd, Math.max(1, maxQ));
-      if (newQty <= ex.qty) { Alert.alert("Stòk ensifizan", `Rete sèlman ${product.stock_quantity} nan stòk`); return prev; }
-      return prev.map(x => x.key === key ? { ...x, ...repriceLine(x, newQty) } : x);
-    }
-    const pr = priceFor(product, sel, safeAdd);
-    return [...prev, { ...product, key, qty: safeAdd, unitId: sel.unitId, unitName: sel.unitName, factor: sel.factor, variant: sel.variant, unitPrice: pr.unitPrice, lineTotal: pr.lineTotal, bundleApplied: pr.bundleApplied }];
-  }
-
-  function commitPending(product: Product, qty: number, sel?: PendingSel) {
-    if (pendingTimer.current) { clearInterval(pendingTimer.current); pendingTimer.current = null; }
-    const s = sel ?? (pending && pending.product.id === product.id
-      ? { unitId: pending.unitId, unitName: pending.unitName, factor: pending.factor, variant: pending.variant }
-      : defaultSelFor(product));
-    setCart(prev => mergeLine(prev, product, s, Math.max(1, qty)));
-    setPending(null);
-  }
-
-  // The sales list shows variants: tapping a row pendings that exact
-  // (unit, variant) — no chooser sheet, the choice IS the row.
-  function handleProductPress(row: SaleRow) {
-    setSearch("");
-    const p = row.product;
-    if (pending && pending.product.id === p.id && pending.unitId === row.unitId && pending.variant === row.variant) {
-      const maxQ = Math.max(1, maxQtyFor(p, pending.factor));
-      const next = Math.min(pending.qty + 1, maxQ);
-      setPending({ ...pending, qty: next, remaining: 10 });
-      setPendingInput("");
-      return;
-    }
-    if (pending) {
-      commitPending(pending.product, pending.qty, { unitId: pending.unitId, unitName: pending.unitName, factor: pending.factor, variant: pending.variant });
-    }
-    setPending({ product: p, qty: 1, remaining: 10, unitId: row.unitId, unitName: row.unitName, factor: row.factor, variant: row.variant });
-    setPendingInput("");
-  }
-
-  function adjustPending(delta: number) {
-    if (!pending) return;
-    const next = pending.qty + delta;
-    if (next <= 0) {
-      Alert.alert("Anile pwodwi?", `Kantite 0 — vle anile "${pending.product.name}"? Sa p ap afekte pwodwi ki deja nan panyen an.`, [
-        { text: "Kenbe", style: "cancel", onPress: () => setPending({ ...pending, remaining: 10 }) },
-        { text: "Anile", style: "destructive", onPress: () => { setPending(null); setPendingInput(""); } },
-      ]);
-      return;
-    }
-    const maxQ = Math.max(1, maxQtyFor(pending.product, pending.factor));
-    const clamped = Math.max(1, Math.min(next, maxQ));
-    setPending({ ...pending, qty: clamped, remaining: 10 });
-    setPendingInput("");
-  }
-
-  function setPendingCustom(val: string) {
-    if (!pending) return;
-    setPendingInput(val);
-    if (!val.trim()) return; // keep placeholder
-    const n = parseInt(val, 10);
-    if (isNaN(n)) return;
-    if (n === 0) {
-      Alert.alert("Anile pwodwi?", `Kantite 0 — vle anile "${pending.product.name}"? Sa p ap afekte pwodwi ki deja nan panyen an.`, [
-        { text: "Kenbe", style: "cancel", onPress: () => { setPendingInput(""); setPending({ ...pending, remaining: 10 }); } },
-        { text: "Anile", style: "destructive", onPress: () => { setPending(null); setPendingInput(""); } },
-      ]);
-      return;
-    }
-    if (n < 0) return;
-    const maxQ = Math.max(1, maxQtyFor(pending.product, pending.factor));
-    const clamped = Math.max(1, Math.min(n, maxQ));
-    setPending({ ...pending, qty: clamped, remaining: 10 });
-  }
-
-  function commitPendingWithInput() {
-    if (!pending) {
-      Alert.alert("Pa gen pwodwi", "Tape yon pwodwi anvan ou ajoute nan panyen");
-      return;
-    }
-    const raw = pendingInput.trim();
-    const parsed = raw ? parseInt(raw, 10) : NaN;
-    const maxQ = Math.max(1, maxQtyFor(pending.product, pending.factor));
-    const qtyToAdd = !isNaN(parsed) && parsed > 0 ? Math.max(1, Math.min(parsed, maxQ)) : pending.qty;
-    if (qtyToAdd > maxQ) {
-      Alert.alert("Stòk ensifizan", `Rete sèlman ${pending.product.stock_quantity} nan stòk`);
-      return;
-    }
-    commitPending(pending.product, qtyToAdd, { unitId: pending.unitId, unitName: pending.unitName, factor: pending.factor, variant: pending.variant });
-    setPendingInput("");
-  }
-
   const subtotal = cart.reduce((s, it) => s + (Number(it.lineTotal ?? it.qty * (it.unitPrice ?? 0)) || 0), 0);
-  const pendingLine = pending ? priceFor(pending.product, { unitId: pending.unitId, unitName: pending.unitName, factor: pending.factor, variant: pending.variant }, pending.qty) : null;
-  const pendingMaxQ = pending ? maxQtyFor(pending.product, pending.factor) : 0;
   const amountGivenNum = parseFloat(amountGiven.replace(",", ".")) || 0;
-
-  // Sales list = one row per priced variant (unit × variant). Legacy
-  // products without pricing rows fall back to a single selling-price row.
-  const filtered = useMemo(() => {
-    const rows: SaleRow[] = [];
-    for (const p of products) {
-      const units = getUnitsForProduct(pricing, p.id);
-      const priced = units
-        .map(u => ({ u, rs: getPricesForUnit(pricing, u.id).filter(r => Number(r.price) > 0) }))
-        .filter(x => x.rs.length);
-      if (!priced.length) {
-        const legacy = Number(p.selling_price ?? 0) || 0;
-        if (legacy > 0) {
-          rows.push({
-            key: `${p.id}|base|Regular`, product: p, unitId: "", unitName: p.unit ?? "pcs",
-            factor: 1, variant: "Regular", price: legacy, maxQ: maxQtyFor(p, 1),
-            variantCountForItem: 1, isTop: (p.sales_count ?? 0) >= 90,
-          });
-        }
-        continue;
-      }
-      for (const { u, rs } of priced) {
-        const factor = Number(u.conversion_factor) || 1;
-        const maxQ = maxQtyFor(p, factor);
-        for (const r of rs) {
-          rows.push({
-            key: `${p.id}|${u.id}|${r.variant}`, product: p, unitId: u.id,
-            unitName: u.unit_name, factor, variant: r.variant, price: Number(r.price) || 0,
-            maxQ, variantCountForItem: rs.length, isTop: (p.sales_count ?? 0) >= 90,
-          });
-        }
-      }
-    }
-    const outRank = (r: SaleRow) => {
-      const p = r.product;
-      if (p.item_type === "service") return (p.is_available !== 0 && (p.is_available as any) !== false) ? 0 : 1;
-      return r.maxQ <= 0 ? 1 : 0; // out-of-stock rows to bottom
-    };
-    const byStockThenRank = (a: SaleRow, b: SaleRow) => {
-      const ra = outRank(a), rb = outRank(b);
-      if (ra !== rb) return ra - rb;
-      return (b.product.sales_count ?? 0) - (a.product.sales_count ?? 0);
-    };
-    const q = search.trim().toLowerCase();
-    if (!q) return rows.sort(byStockThenRank);
-    // Unified search: name, Kreyòl name, barcode/SKU, category, variant, unit.
-    const list = rows.filter(r => {
-      const p = r.product;
-      if ((p.barcode?.toLowerCase() ?? "") === q || (p.sku?.toLowerCase() ?? "") === q) return true;
-      if (p.name.toLowerCase().includes(q) || (p.name_ht ?? "").toLowerCase().includes(q)) return true;
-      if ((p.barcode ?? "").toLowerCase().includes(q) || (p.sku ?? "").toLowerCase().includes(q)) return true;
-      const cat = catNames[String(p.category_id ?? "")] ?? "";
-      if (cat.toLowerCase().includes(q)) return true;
-      if (r.variant.toLowerCase().includes(q) || r.unitName.toLowerCase().includes(q)) return true;
-      return false;
-    });
-    return list.sort(byStockThenRank);
-  }, [products, pricing, search, catNames, minFactorMap]);
 
   const filteredCustomers = useMemo(() => {
     const q = customerSearch.trim().toLowerCase();
@@ -873,55 +610,6 @@ export default function POSScreen({
       return name.includes(q) || idCard.includes(q) || phone.includes(q);
     });
   }, [customers, customerSearch]);
-
-  function decQty(key: string) {
-    const item = cart.find(x => x.key === key);
-    if (!item) return;
-    if (item.qty <= 1) {
-      Alert.alert("Retire pwodwi?", `Vle retire "${item.name}" nan panyen an?`, [
-        { text: "Anile", style: "cancel" },
-        { text: "Retire", style: "destructive", onPress: () => setCart(prev => prev.filter(x => x.key !== key)) },
-      ]);
-      return;
-    }
-    setCart(prev => prev.map(x => x.key === key ? { ...x, ...repriceLine(x, x.qty - 1) } : x));
-  }
-  function incQty(key: string) {
-    const prod = products.find(p => p.id === cart.find(x => x.key === key)?.id);
-    setCart(prev => {
-      const ex = prev.find(x => x.key === key);
-      if (!ex || !prod) return prev;
-      if ((ex.qty + 1) * ex.factor > prod.stock_quantity) { Alert.alert("Stòk ensifizan"); return prev; }
-      return prev.map(x => x.key === key ? { ...x, ...repriceLine(x, x.qty + 1) } : x);
-    });
-  }
-  function removeFromCart(key: string) {
-    const item = cart.find(x => x.key === key);
-    Alert.alert("Retire pwodwi?", `Vle retire "${item?.name ?? ""}" nan panyen an?`, [
-      { text: "Anile", style: "cancel" },
-      { text: "Retire", style: "destructive", onPress: () => setCart(prev => prev.filter(x => x.key !== key)) },
-    ]);
-  }
-  function setCustomQty(key: string, val: string) {
-    // Placeholder behavior: empty keeps original (placeholder shows current)
-    if (!val.trim()) { setEditingQtyVal(""); return; }
-    const n = parseInt(val, 10);
-    if (isNaN(n)) { setEditingQtyVal(val); return; }
-    const item = cart.find(x => x.key === key);
-    if (n === 0) {
-      Alert.alert("Retire pwodwi?", `Kantite 0 — vle retire "${item?.name ?? ""}" nan panyen an?`, [
-        { text: "Anile", style: "cancel", onPress: () => setEditingQtyVal("") },
-        { text: "Retire", style: "destructive", onPress: () => { setCart(prev => prev.filter(x => x.key !== key)); setEditingQtyId(null); setEditingQtyVal(""); } },
-      ]);
-      return;
-    }
-    if (n < 0 || !item) { setEditingQtyVal(val); return; }
-    const prod = products.find(p => p.id === item.id);
-    const maxQ = Math.max(1, maxQtyFor(prod ?? item, item.factor));
-    if (n > maxQ) { Alert.alert("Stòk ensifizan"); setEditingQtyVal(String(maxQ)); setCart(prev => prev.map(x => x.key === key ? { ...x, ...repriceLine(x, maxQ) } : x)); return; }
-    setCart(prev => prev.map(x => x.key === key ? { ...x, ...repriceLine(x, n) } : x));
-    setEditingQtyVal(val);
-  }
 
   function confirmClearCart() {
     if (!cart.length) return;
@@ -983,9 +671,10 @@ export default function POSScreen({
   async function handleAddCustomer() {
     if (!newCustName.trim()) return Alert.alert("Non obligatwa");
     if (!newCustIdCard.trim()) return Alert.alert("ID obligatwa", "Nimewo kat idantite (NIF/CIN) obligatwa pou distenge kliyan ki gen menm non");
-    if (!canRegisterCustomer) return Alert.alert("Pa gen dwa", "Kesye ka sèlman li lis kliyan yo. Li pa ka kreye nouvo klient.");
-    const limit = newCustLimit.trim() === "" ? null : parseInt(newCustLimit, 10);
-    if (newCustLimit.trim() !== "" && (isNaN(limit as number) || (limit as number) < 0)) return Alert.alert("Limit pa valab");
+    if (!canRegisterCustomer) return Alert.alert("Pa gen dwa", "Ou pa ka enskri nouvo kliyan.");
+    // Credit limit stays manager-only — cashier/associate create the record without one.
+    const limit = !isManagerPlus || newCustLimit.trim() === "" ? null : parseInt(newCustLimit, 10);
+    if (limit !== null && (isNaN(limit) || limit < 0)) return Alert.alert("Limit pa valab");
     const id = `cust-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const newCust = { id, store_id: storeId, name: newCustName.trim(), id_card_number: newCustIdCard.trim(), phone: newCustPhone.trim() || null, address: newCustAddress.trim() || null, credit_limit: limit, credit_limit_source: limit !== null ? "manual" : null, total_debt: 0, is_high_risk: false, open_debt_count: 0, created_at: new Date().toISOString() };
     try {
@@ -1000,12 +689,12 @@ export default function POSScreen({
     setShowAddCustomer(false);
     // auto-selected with full info (incl. address) — proceed to Konfime peye
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute kliyan echwe");
+      uploadError("Erè", e?.message ?? "Ajoute kliyan echwe");
     }
   }
 
   async function handleEditCustomerLimit() {
-    if (!selectedCustomer || !canRegisterCustomer) return;
+    if (!selectedCustomer || !isManagerPlus) return;
     const nextLimit = limitEditValue.trim() === "" ? null : Number(limitEditValue);
     if (nextLimit !== null && (Number.isNaN(nextLimit) || nextLimit < 0)) {
       return Alert.alert("Limit pa valab");
@@ -1017,9 +706,9 @@ export default function POSScreen({
     setSelectedCustomer((prev: any) => prev ? { ...prev, credit_limit: nextLimit, credit_limit_source: nextLimit === null ? null : limitEditSource } : prev);
     setShowLimitEdit(false);
     setLimitEditValue("");
-    Alert.alert("Limit mete ajou", `${selectedCustomer.name} • ${nextLimit === null ? "San limit" : `${fmtG(nextLimit)}`} • Sous: ${limitEditSource === "manual" ? "manyèl" : "otomatik"}`);
+    uploadSuccess("Limit mete ajou", `${selectedCustomer.name} • ${nextLimit === null ? "San limit" : `${fmtG(nextLimit)}`} • Sous: ${limitEditSource === "manual" ? "manyèl" : "otomatik"}`);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete limit ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete limit ajou echwe");
     }
   }
 
@@ -1115,6 +804,7 @@ export default function POSScreen({
     try {
       const db = await getDb();
       const items = ((await db.getAllAsync("SELECT * FROM sale_items WHERE sale_id = ?", [sale.id]).catch(() => [])) as any[]) ?? [];
+      await attachLineLabels(db, items).catch(() => {});
       const credits = ((await db.getAllAsync("SELECT * FROM credits WHERE sale_id = ?", [sale.id]).catch(() => [])) as any[]) ?? [];
       const credit = credits[0] ?? null;
       let payments: any[] = [];
@@ -1137,16 +827,10 @@ export default function POSScreen({
   async function issueTxnReceipt() {
     if (!txnDetail) return;
     try {
-      const { buildReceipts } = await import("../receipts");
+      const { buildReceipts, receiptItemsFrom } = await import("../receipts");
       const db = await getDb();
       const sale = txnDetail.sale;
-      const items = txnDetail.items.map((it: any) => ({
-        name: it.product_name ?? "Atik",
-        variant: it.variant ?? null,
-        qty: Number(it.quantity ?? 0),
-        unitPrice: Number(it.unit_price ?? 0),
-        lineTotal: Number(it.line_total ?? 0),
-      }));
+      const items = await receiptItemsFrom(db, txnDetail.items);
       const total = Number(sale.total ?? 0);
       const amountPaid = Number(sale.amount_paid ?? total);
       const credits = ((await db.getAllAsync("SELECT * FROM credits WHERE sale_id = ?", [sale.id]).catch(() => [])) as any[]) ?? [];
@@ -1180,7 +864,7 @@ export default function POSScreen({
       // Open the receipt after the sheet dismisses — same-tick modal swaps get dropped on iOS
       setTimeout(() => { setShowReceipt(true); }, showTablet ? 60 : 420);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Resi echwe");
+      uploadError("Erè", e?.message ?? "Resi echwe");
     }
   }
 
@@ -1201,7 +885,7 @@ export default function POSScreen({
       setPayNotes(prev => [row, ...prev]);
       setNoteInput("");
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute nòt echwe");
+      uploadError("Erè", e?.message ?? "Ajoute nòt echwe");
     } finally {
       setSavingNote(false);
     }
@@ -1246,9 +930,9 @@ export default function POSScreen({
       setCustomers(prev => (prev.some(c => c.id === fresh.id) ? prev : [...prev, fresh]));
       selectCashCustomer(fresh);
       setPayView("main");
-      Alert.alert("Kliyan ajoute ✓", fresh.name);
+      uploadSuccess("Kliyan ajoute ✓", fresh.name);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute kliyan echwe");
+      uploadError("Erè", e?.message ?? "Ajoute kliyan echwe");
     }
   }
 
@@ -1276,9 +960,9 @@ export default function POSScreen({
       setSelectedCustomer(updated);
       if (detailOrigin === "pay") setPayView("customer");
       else setCartView("custDetail");
-      Alert.alert("Kliyan mete ajou ✓", name);
+      uploadSuccess("Kliyan mete ajou ✓", name);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete ajou echwe");
     } finally {
       setSavingEdit(false);
     }
@@ -1387,7 +1071,7 @@ export default function POSScreen({
       setLastReceipts(receipts);
       setPayPhase("success");
       setPayMsg(`${fmtG(saleTotal)} • vant anrejistre`);
-      await new Promise(r => setTimeout(r, 3500));
+      await new Promise(r => setTimeout(r, 1500));
       resetCheckoutForm();
       setCartView("cart");
       loadTabs();
@@ -1432,6 +1116,12 @@ export default function POSScreen({
   /* Sale pipeline lives in src/sales/checkout.ts (validateCheckout + persistSale). */
 
   const cartCount = cart.reduce((s, it) => s + it.qty, 0);
+
+  // One charge entry point — opens the tender sheet.
+  function onChargePress(closeSheet: boolean) {
+    if (closeSheet) setShowCartSheet(false);
+    setShowTenderType(true);
+  }
 
   // Luxury entrance — Apple-like stagger
   const entrance = useRef(new Animated.Value(0)).current;
@@ -1480,7 +1170,7 @@ export default function POSScreen({
           onEditQtyStart={(key) => { setEditingQtyId(key); setEditingQtyVal(''); }}
           onEditQtyChange={setCustomQty}
           onEditQtyBlur={() => setEditingQtyId(null)}
-          onPay={() => { setShowCartSheet(false); setShowTenderType(true); }}
+          onPay={() => onChargePress(false)}
           onOpenCartMenu={() => setCartView("menu")}
           customerFlow={{
             view: cartView,
@@ -1667,24 +1357,23 @@ export default function POSScreen({
                     <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.7)" />
                   </Pressable>
                 )}
-                <ScrollView style={{ flex: 1, marginTop: 14 }} showsVerticalScrollIndicator={false}>
-                  {cart.map(c => (
-                    <CartLineRow
-                      key={c.key}
-                      item={c}
-                      editingQtyId={editingQtyId}
-                      editingQtyVal={editingQtyVal}
-                      onDec={() => decQty(c.key)}
-                      onInc={() => incQty(c.key)}
-                      onRemove={() => removeFromCart(c.key)}
-                      onEditStart={() => { setEditingQtyId(c.key); setEditingQtyVal(""); }}
-                      onEditChange={(v) => setCustomQty(c.key, v)}
-                      onEditBlur={() => setEditingQtyId(null)}
-                    />
-                  ))}
-                </ScrollView>
-                <CartSummary subtotal={subtotal} />
-                <PayCTA payPulse={payPulse} subtotal={subtotal} onPay={() => { setShowCartSheet(false); setShowTenderType(true); }} />
+                <CartLinesList
+                  cart={cart}
+                  editingQtyId={editingQtyId}
+                  editingQtyVal={editingQtyVal}
+                  onDec={decQty}
+                  onInc={incQty}
+                  onRemove={removeFromCart}
+                  onEditStart={(key) => { setEditingQtyId(key); setEditingQtyVal(""); }}
+                  onEditChange={setCustomQty}
+                  onEditBlur={() => setEditingQtyId(null)}
+                  style={{ marginTop: 14 }}
+                />
+                <CartTotalBar
+                  payPulse={payPulse}
+                  subtotal={subtotal}
+                  onPay={() => onChargePress(true)}
+                />
               </>
             ) : cartView === "customers" ? (
               <View style={{ flex: 1, marginTop: 12 }}>
@@ -2086,8 +1775,8 @@ export default function POSScreen({
             <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
               <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 20, borderTopRightRadius: 20, height: sheetH, padding: 16 }}>
             <View style={{ width: 40, height: 4, backgroundColor: "#e2e8f0", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
-            <Text style={{ fontWeight: "900", fontSize: 16, textAlign: "center" }}>👔 Enskri Kliyan Kredi (Manadjè)</Text>
-            <Text style={{ color: "#64748b", textAlign: "center", fontSize: 11, marginTop: 4 }}>Sèlman non-kesye ka enskri • Kesye pa gen dwa</Text>
+            <Text style={{ fontWeight: "900", fontSize: 16, textAlign: "center" }}>👔 Enskri Nouvo Kliyan</Text>
+            <Text style={{ color: "#64748b", textAlign: "center", fontSize: 11, marginTop: 4 }}>Kesye ak asosye ka enskri • Limit kredi se manadjè</Text>
             <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 12 }}>Non konplè *</Text>
             <TextInput placeholder="Eg. Jean Baptiste" value={newCustName} onChangeText={setNewCustName} style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, paddingVertical: 14, paddingHorizontal: 12, minHeight: 48, marginTop: 6 }} />
             <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 10 }}>Nimewo kat idantite (NIF/CIN) * — pou distenge menm non</Text>
@@ -2097,9 +1786,11 @@ export default function POSScreen({
             <TextInput placeholder="+509 ..." value={newCustPhone} onChangeText={setNewCustPhone} keyboardType="phone-pad" style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, paddingVertical: 14, paddingHorizontal: 12, minHeight: 48, marginTop: 6 }} />
             <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 10 }}>Adrès</Text>
             <TextInput placeholder="Eg. Delmas 33, Pétion-Ville" value={newCustAddress} onChangeText={setNewCustAddress} style={{ borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, paddingVertical: 14, paddingHorizontal: 12, minHeight: 48, marginTop: 6 }} />
+            {isManagerPlus ? (<>
             <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 10 }}>Limit kredi (G) — kite vid pou san limit</Text>
-            <TextInput placeholder="San limit (vid) oswa 5000" value={newCustLimit} onChangeText={setNewCustLimit} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#7c3aed", borderRadius: 10, paddingVertical: 14, paddingHorizontal: 12, minHeight: 48, marginTop: 6, fontWeight: "700" }} />
+            <MoneyInput placeholder="San limit (vid) oswa 5000" value={newCustLimit} onChangeText={setNewCustLimit} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#7c3aed", borderRadius: 10, paddingVertical: 14, paddingHorizontal: 12, minHeight: 48, marginTop: 6, fontWeight: "700" }} />
             <Text style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>Vid = san limit • Manadjè ka mete manyèl oswa sistèm ap mete otomatik 25% apre reta san avi</Text>
+            </>) : null}
             <View style={{ flexDirection: "row", gap: 8, marginTop: 16 }}>
               <Pressable onPress={() => setShowAddCustomer(false)} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: "#f1f5f9", borderRadius: 24, alignItems: "center", justifyContent: "center" }}><Text style={{ fontWeight: "700" }}>Anile</Text></Pressable>
               {canRegisterCustomer && (
@@ -2120,7 +1811,7 @@ export default function POSScreen({
             <Text style={{ fontWeight: "900", fontSize: 16, textAlign: "center" }}>✎ Mete ajou limit kredi</Text>
             <Text style={{ color: "#64748b", textAlign: "center", fontSize: 11, marginTop: 4 }}>{selectedCustomer?.name} • {selectedCustomer?.id_card_number}</Text>
             <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 12 }}>Limit (G) — kite vid pou san limit</Text>
-            <TextInput placeholder={selectedCustomer?.credit_limit == null ? "San limit" : String(selectedCustomer.credit_limit)} value={limitEditValue} onChangeText={setLimitEditValue} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#7c3aed", borderRadius: 10, paddingVertical: 14, paddingHorizontal: 12, minHeight: 48, marginTop: 6, fontWeight: "700" }} />
+            <MoneyInput placeholder={selectedCustomer?.credit_limit == null ? "San limit" : String(selectedCustomer.credit_limit)} value={limitEditValue} onChangeText={setLimitEditValue} keyboardType="numeric" style={{ borderWidth: 1, borderColor: "#7c3aed", borderRadius: 10, paddingVertical: 14, paddingHorizontal: 12, minHeight: 48, marginTop: 6, fontWeight: "700" }} />
             <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 10 }}>Sous limit</Text>
             <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
               <Pressable onPress={() => setLimitEditSource("manual")} style={{ flex: 1, padding: 12, borderRadius: 24, borderWidth: 1, borderColor: limitEditSource === "manual" ? "#7c3aed" : "#e2e8f0", backgroundColor: limitEditSource === "manual" ? "#f5f3ff" : "white", alignItems: "center" }}><Text style={{ fontWeight: "700", color: limitEditSource === "manual" ? "#7c3aed" : "#0f172a" }}>Manyèl</Text></Pressable>
@@ -2137,20 +1828,12 @@ export default function POSScreen({
       </Modal>
 
       {/* Barcode modal */}
-      <Modal visible={showBarcodeModal} transparent animationType="slide">
-        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-          <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16, minHeight: 320 }}>
-            <View style={{ width: 40, height: 4, backgroundColor: "#e2e8f0", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
-            <Text style={{ fontWeight: "900", fontSize: 18, textAlign: "center" }}>📷 {ht.scan}</Text>
-            <View style={{ height: 160, backgroundColor: "#0f172a", borderRadius: 24, marginTop: 16, alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: "#22c55e", borderStyle: "dashed" }}>
-              <Text style={{ color: "#22c55e", fontSize: 40 }}>▢</Text>
-              <Text style={{ color: "white", marginTop: 8, fontWeight: "700" }}>Kamera ap chèche kòd...</Text>
-            </View>
-            <Pressable onPress={simulateScan} style={{ marginTop: 16, backgroundColor: "#22c55e", padding: 14, borderRadius: 24, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "800" }}>Simile Eskane • Ajoute "{products[0]?.name ?? ""}"</Text></Pressable>
-            <Pressable onPress={() => setShowBarcodeModal(false)} style={{ marginTop: 10, padding: 12, alignItems: "center" }}><Text style={{ color: "#64748b", fontWeight: "600" }}>Fèmen</Text></Pressable>
-          </View>
-        </View>
-      </Modal>
+      <ScanSheet
+        visible={showBarcodeModal}
+        onClose={() => setShowBarcodeModal(false)}
+        onSimulate={simulateScan}
+        productLabel={products[0]?.name ?? ""}
+      />
 
       {/* STAGING-PICKUP: pass store/cashier for gated balance step. Delete prop to remove. */}
       <ReceiptModal visible={showReceipt} receipts={lastReceipts} onClose={() => { setShowReceipt(false); setPayReceiptLocked(false); }} staging={{ storeId, cashierId: currentUser?.id ?? null, customerId }} locked={payReceiptLocked} />

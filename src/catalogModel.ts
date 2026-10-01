@@ -4,11 +4,13 @@
 //
 // Chain-only rule (one base item per product) is what keeps per-product
 // stock and cost unambiguous — see schema.ts note.
-import { getDb, insertOutbox } from "./db";
+import { getDb, insertOutbox, recomputeItemCosts } from "./db";
 
 export type Item = {
   id: string; product_id: string; name: string;
   ref_item_id: string | null; ratio: number | null;
+  /** Persisted unit purchase cost (see recomputeItemCosts). 0 = not priced. */
+  cost?: number;
   sort_order?: number; created_at?: string; updated_at?: string;
   is_deleted?: number | boolean; dirty?: number;
 };
@@ -41,29 +43,9 @@ export type VariantPrice = {
   is_deleted?: number | boolean; dirty?: number;
 };
 
-/** Variant names with no distinguishing value — skippable in display. */
-export const GENERIC_VARIANT_NAMES = ["standard", "regular", "default"];
-
-/**
- * Sales-list display string: product first (what the cashier scans for),
- * then variant (the distinguishing choice), then item (container/size).
- * The variant name drops out only when the item has exactly one variant
- * AND that variant's name is generic ("Rice Standard Case" → "Rice Case",
- * but a lone "Cold" still prints: "Corona Cold Single").
- */
-export function formatSaleLine(
-  productName: string,
-  variantName: string | null,
-  itemName: string,
-  variantCountForItem: number
-): string {
-  const showVariant =
-    !!variantName &&
-    !(variantCountForItem <= 1 && GENERIC_VARIANT_NAMES.includes(variantName.trim().toLowerCase()));
-  return [productName, showVariant ? variantName : null, itemName]
-    .filter(Boolean)
-    .join(" ");
-}
+// Display labels live in ./labels (dependency-free) — re-exported here so
+// existing catalog imports keep working.
+export { GENERIC_VARIANT_NAMES, isStandardVariant, formatCheckoutRow, formatSaleLine } from "./labels";
 
 export function itemsForProduct(items: Item[], productId: string): Item[] {
   return items.filter(i => i.product_id === productId && !i.is_deleted);
@@ -248,11 +230,147 @@ export function currentVariantPrice(
   return rows[0];
 }
 
+export type Bundle = {
+  id: string; variant_id: string; min_quantity: number; active?: number | boolean;
+  created_at?: string; updated_at?: string;
+  is_deleted?: number | boolean; dirty?: number;
+};
+
+export type BundlePrice = {
+  id: string; bundle_id: string; price: number;
+  date: string; created_at?: string; updated_at?: string;
+  is_deleted?: number | boolean; dirty?: number;
+};
+
+/** Effective-dated bundle price: latest row dated ≤ now (same rule as variant prices). */
+export function currentBundlePrice(
+  prices: BundlePrice[],
+  bundleId: string,
+  nowIso?: string
+): BundlePrice | null {
+  const now = nowIso ?? new Date().toISOString();
+  const rows = prices.filter(
+    p => p.bundle_id === bundleId && !p.is_deleted && p.date <= now
+  );
+  if (!rows.length) return null;
+  rows.sort((a, b) =>
+    b.date.localeCompare(a.date) ||
+    String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""))
+  );
+  return rows[0];
+}
+
+/**
+ * Append one effective-dated variant price (history is never overwritten).
+ * Returns the row id so callers can surface it. Passing the same `date` as
+ * the current row replaces that row instead of stacking a duplicate.
+ */
+export async function upsertVariantPriceRow(db: any, args: {
+  variantId: string; price: number; date: string;
+}): Promise<string> {
+  const now = new Date().toISOString();
+  const price = Math.max(0, Number(args.price) || 0);
+  const id = `vpr-${args.variantId}-${args.date}-${Math.random().toString(36).slice(2, 6)}`;
+  const rec = {
+    id, variant_id: args.variantId, price, date: args.date,
+    created_at: now, updated_at: now, is_deleted: 0,
+  };
+  await db.runAsync(
+    "INSERT OR REPLACE INTO variant_prices (id, variant_id, price, date, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?)",
+    [rec.id, rec.variant_id, rec.price, rec.date, rec.created_at, rec.updated_at, 0, 1]
+  );
+  try { await insertOutbox("variant_prices", "create", { ...rec, is_deleted: false }); } catch {}
+  return id;
+}
+
+/**
+ * Create or amend a bundle (wizard step 4). `minQuantity`/`active` live on
+ * the bundle record; every price change is a new effective-dated row so the
+ * old price survives. Returns the bundle id.
+ */
+export async function upsertBundleRow(db: any, args: {
+  bundleId?: string; variantId: string; minQuantity: number;
+  price: number; date: string; active?: boolean;
+}): Promise<string> {
+  const now = new Date().toISOString();
+  const id = args.bundleId || `bnd-${args.variantId}-${Math.random().toString(36).slice(2, 8)}`;
+  const minQuantity = Math.max(0, Number(args.minQuantity) || 0);
+  const active = args.active === false ? 0 : 1;
+  const rec = {
+    id, variant_id: args.variantId, min_quantity: minQuantity, active,
+    created_at: now, updated_at: now, is_deleted: 0,
+  };
+  await db.runAsync(
+    "INSERT OR REPLACE INTO bundles (id, variant_id, min_quantity, active, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?)",
+    [rec.id, rec.variant_id, rec.min_quantity, rec.active, rec.created_at, rec.updated_at, 0, 1]
+  );
+  try { await insertOutbox("bundles", "create", { ...rec, is_deleted: false }); } catch {}
+
+  const price = Math.max(0, Number(args.price) || 0);
+  const priceRec = {
+    id: `bpri-${id}-${args.date}`, bundle_id: id, price, date: args.date,
+    created_at: now, updated_at: now, is_deleted: 0,
+  };
+  await db.runAsync(
+    "INSERT OR REPLACE INTO bundle_prices (id, bundle_id, price, date, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?)",
+    [priceRec.id, priceRec.bundle_id, priceRec.price, priceRec.date, priceRec.created_at, priceRec.updated_at, 0, 1]
+  );
+  try { await insertOutbox("bundle_prices", "create", { ...priceRec, is_deleted: false }); } catch {}
+  return id;
+}
+
+/**
+ * Record "supplier S charges X for item I" — the row the cost-comparison
+ * engine reads. Keyed by item_id so it lines up with batch lines; unit_id is
+ * still required by the schema, so it mirrors item_id for v2-written rows.
+ * Always written AFTER the comparison runs, never before.
+ */
+export async function upsertSupplierCost(db: any, args: {
+  productId: string; supplierId: string; itemId: string; cost: number;
+}): Promise<void> {
+  const now = new Date().toISOString();
+  const cost = Math.max(0, Number(args.cost) || 0);
+  const existing = ((await db.getAllAsync(
+    "SELECT * FROM product_supplier_costs WHERE product_id = ? AND supplier_id = ?",
+    [args.productId, args.supplierId]
+  ).catch(() => [])) ?? []) as any[];
+  // Prefer an item-keyed hit, then a legacy unit-keyed hit (pre-backfill row).
+  const hit = existing.find(r => String(r.item_id) === String(args.itemId))
+    ?? existing.find(r => String(r.unit_id) === String(args.itemId));
+  if (hit) {
+    await db.runAsync(
+      "UPDATE product_supplier_costs SET cost = ?, item_id = ?, last_updated = ?, updated_at = ?, dirty = 1 WHERE id = ?",
+      [cost, args.itemId, now, now, String(hit.id)]
+    );
+    try {
+      await insertOutbox("product_supplier_costs", "update", {
+        id: String(hit.id), cost, item_id: args.itemId, last_updated: now, updated_at: now, is_deleted: false,
+      });
+    } catch {}
+    return;
+  }
+  const id = `psc-${args.supplierId}-${args.itemId}-${Math.random().toString(36).slice(2, 8)}`;
+  const rec = {
+    id, product_id: args.productId, supplier_id: args.supplierId,
+    unit_id: args.itemId, item_id: args.itemId, cost,
+    last_updated: now, updated_at: now, is_deleted: 0,
+  };
+  await db.runAsync(
+    "INSERT OR REPLACE INTO product_supplier_costs (id, product_id, supplier_id, unit_id, item_id, cost, last_updated, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    [rec.id, rec.product_id, rec.supplier_id, rec.unit_id, rec.item_id, rec.cost, rec.last_updated, rec.updated_at, 0, 1]
+  );
+  try {
+    await insertOutbox("product_supplier_costs", "create", { ...rec, is_deleted: false });
+  } catch {}
+}
+
 export type UnpricedVariantRow = {
   productId: string; productName: string;
   itemId: string; itemName: string;
   /** Null when the item has no variants yet — saving creates Standard. */
   variantId: string | null; variantName: string;
+  /** Live price when known (prefill for bulk edit). */
+  current?: number;
 };
 
 /**
@@ -265,7 +383,8 @@ export function unpricedVariantRows(
   variants: Variant[],
   prices: VariantPrice[],
   products: { id: string; name: string; status?: string | null; is_deleted?: number | boolean }[],
-  nowIso?: string
+  nowIso?: string,
+  includePriced?: boolean
 ): UnpricedVariantRow[] {
   const now = nowIso ?? new Date().toISOString();
   const liveItems = items.filter(i => !i.is_deleted);
@@ -288,11 +407,13 @@ export function unpricedVariantRows(
       }
       for (const v of vs) {
         const cur = currentVariantPrice(prices, String(v.id), now);
-        if (!cur || !(Number(cur.price) > 0)) {
+        const curNum = cur ? Number(cur.price) || 0 : 0;
+        if (includePriced || !(curNum > 0)) {
           out.push({
             productId: String(p.id), productName: String(p.name ?? "?"),
             itemId: String(it.id), itemName: String(it.name ?? "?"),
             variantId: String(v.id), variantName: String(v.name ?? "?"),
+            current: curNum > 0 ? curNum : undefined,
           });
         }
       }
@@ -460,6 +581,8 @@ export type V2BatchInput = {
   itemId: string; supplierId: string;
   qty: string | number; total: string | number; date: string;
   deliveryRef?: string | null; transportShare?: number;
+  /** One wizard run: groups every batch it writes so transport can be patched later. */
+  sessionRef?: string | null;
   source?: string;
 };
 
@@ -478,11 +601,12 @@ export async function insertV2Batch(
     status: "pending", received_by: null, received_at: null,
     denied_by: null, denied_at: null, reason: null,
     delivery_ref: c.deliveryRef ?? null, transport_share: Number(c.transportShare) || 0,
+    session_ref: c.sessionRef ?? null,
     source: c.source ?? "user", created_at: now, updated_at: now, is_deleted: 0,
   };
   await db.runAsync(
-    "INSERT OR REPLACE INTO batches (id, item_id, supplier_id, date, quantity, total_paid, status, received_by, received_at, denied_by, denied_at, reason, delivery_ref, transport_share, source, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-    [rec.id, rec.item_id, rec.supplier_id, rec.date, rec.quantity, rec.total_paid, rec.status, rec.received_by, rec.received_at, rec.denied_by, rec.denied_at, rec.reason, rec.delivery_ref, rec.transport_share, rec.source, rec.created_at, rec.updated_at, 0, 1]
+    "INSERT OR REPLACE INTO batches (id, item_id, supplier_id, date, quantity, total_paid, status, received_by, received_at, denied_by, denied_at, reason, delivery_ref, transport_share, session_ref, source, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    [rec.id, rec.item_id, rec.supplier_id, rec.date, rec.quantity, rec.total_paid, rec.status, rec.received_by, rec.received_at, rec.denied_by, rec.denied_at, rec.reason, rec.delivery_ref, rec.transport_share, rec.session_ref, rec.source, rec.created_at, rec.updated_at, 0, 1]
   );
   try { await insertOutbox("batches", "create", { ...rec, is_deleted: false }); } catch {}
   return id;
@@ -499,10 +623,19 @@ export async function mergeV2Batch(
   const addQ = Number(c.qty) || 0;
   const addT = Number(c.total) || 0;
   const rows = (((await db.getAllAsync(
-    "SELECT id, quantity, total_paid, transport_share FROM batches WHERE item_id = ? AND supplier_id = ? AND status = 'pending' AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1",
+    "SELECT id, item_id, supplier_id, status, quantity, total_paid, transport_share, session_ref FROM batches WHERE item_id = ? AND supplier_id = ? AND status = 'pending' AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1",
     [c.itemId, c.supplierId]
   ).catch(() => [])) ?? []) as any[]);
-  const hit = rows[0];
+  // Re-asserted in JS (not just SQL) so the memory backend — which applies
+  // only the first WHERE clause it recognises — folds on exactly the same
+  // basis as SQLite. A line never lands on a batch from another wizard run:
+  // that batch already owns its own transport slice.
+  const scoped = rows.filter(r =>
+    String(r.supplier_id ?? "") === String(c.supplierId) &&
+    String(r.status ?? "pending") === "pending" &&
+    (!c.sessionRef || String(r.session_ref ?? "") === String(c.sessionRef))
+  );
+  const hit = scoped[0];
   if (hit) {
     const newQ = (Number(hit.quantity) || 0) + addQ;
     const newT = (Number(hit.total_paid) || 0) + addT;
@@ -513,6 +646,50 @@ export async function mergeV2Batch(
     return String(hit.id);
   }
   return insertV2Batch(db, now, taken, c);
+}
+
+/**
+ * End-of-session transport: one amount, spread across every batch the wizard
+ * run wrote, in proportion to each line's items cost (revient basis). Batches
+ * already carrying a transport slice are skipped so a re-run never double
+ * charges. Returns the batches that were touched.
+ */
+export async function patchSessionTransport(
+  db: any, sessionRef: string, totalTransport: number
+): Promise<{ batchIds: string[] }> {
+  const transport = Math.max(0, Number(totalTransport) || 0);
+  const ref = String(sessionRef || "");
+  if (!ref) return { batchIds: [] };
+  const now = new Date().toISOString();
+  let rows: any[] = [];
+  try {
+    rows = ((await db.getAllAsync(
+      "SELECT id, total_paid, transport_share FROM batches WHERE session_ref = ? AND (is_deleted = 0 OR is_deleted IS NULL)",
+      [ref]
+    )) ?? []) as any[];
+  } catch { rows = []; }
+  const pending = rows.filter(r => !(Number(r.transport_share) > 0));
+  if (!pending.length) return { batchIds: [] };
+
+  const base = pending.reduce((s, r) => s + (Number(r.total_paid) || 0), 0);
+  const touched: string[] = [];
+  for (const r of pending) {
+    const share = transport > 0
+      ? (base > 0 ? transport * ((Number(r.total_paid) || 0) / base) : transport / pending.length)
+      : 0;
+    const newTotal = (Number(r.total_paid) || 0) + share;
+    await db.runAsync(
+      "UPDATE batches SET total_paid = ?, transport_share = ?, updated_at = ?, dirty = 1 WHERE id = ?",
+      [newTotal, share, now, String(r.id)]
+    );
+    try {
+      await insertOutbox("batches", "update", {
+        id: String(r.id), total_paid: newTotal, transport_share: share, updated_at: now, is_deleted: false,
+      });
+    } catch {}
+    touched.push(String(r.id));
+  }
+  return { batchIds: touched };
 }
 
 /**
@@ -528,6 +705,10 @@ export async function receiveV2Batch(
   }
 ): Promise<{ baseQty: number }> {
   const now = new Date().toISOString();
+  // Drafts can never receive: unfinished chains must not become real stock.
+  const pRows = (((await db.getAllAsync("SELECT status FROM products WHERE id = ?", [args.productId]).catch(() => [])) ?? []) as any[]);
+  if (!pRows.length) throw new Error("Pwodwi introuvab.");
+  if (String(pRows[0]?.status ?? "active") === "draft") throw new Error("Pwodwi a poko fini (draft) — pa ka resevwa batch.");
   const items = (((await db.getAllAsync("SELECT * FROM items WHERE product_id = ?", [args.productId]).catch(() => [])) ?? []) as any[])
     .filter((i: any) => !i.is_deleted) as Item[];
   const f = itemFactor(items, args.itemId);
@@ -553,5 +734,8 @@ export async function receiveV2Batch(
     try { await db.execAsync("ROLLBACK"); } catch {}
     throw tx;
   }
+  // A real purchase just landed: republish this product's unit costs so every
+  // container carries the new figure (and it reaches the other devices).
+  try { await recomputeItemCosts(db, args.productId); } catch {}
   return { baseQty };
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { palette, radius, topIconBtn } from "../theme";
-import { View, Text, Pressable, Alert, ScrollView } from "react-native";
+import { View, Text, Pressable, Alert, ScrollView, Modal } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb } from "../db";
 import type { Role } from "../users";
@@ -10,16 +10,18 @@ import {
   type ProductUnit, type ProductPrice, type ProductBundle,
 } from "../pricing";
 import { fmtG } from "../format";
+import { uploadSuccess, uploadError } from "../components/UploadTransition";
 import { useResponsive } from "../responsive";
 import { CatalogPhone } from "./CatalogPhone";
 import { CatalogTablet } from "./CatalogTablet";
 import CategoryFormModal from "../components/CategoryFormModal";
 import MissingPricesSheet from "../components/MissingPricesSheet";
 import CatalogFlowModal, { type StepKey } from "./catalogFlow/CatalogFlowModal";
+import BulkProductFlowModal from "./catalogFlow/BulkProductFlowModal";
 import ProductDetail from "./ProductDetail";
-import { loadCatalogModel, currentBaseCost, unpricedVariantRows, type CatalogModel, type Item, type Batch, type Variant, type VariantPrice } from "../catalogModel";
+import { loadCatalogModel, currentBaseCost, currentVariantPrice, unpricedVariantRows, type CatalogModel, type Item, type Batch, type Variant, type VariantPrice } from "../catalogModel";
 import {
-  DEFAULT_CATEGORIES, getCategoryForProduct, slugify, isGoods, isService, isAvailable, categoryDisplayIcon, statusForProduct, ProductCard,
+  DEFAULT_CATEGORIES, getCategoryForProduct, slugify, isGoods, isService, isAvailable, categoryDisplayIcon, statusForProduct, ProductCard, normName,
   type Category, type Product,
 } from "./CatalogShared";
 
@@ -32,8 +34,11 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
   const [productCategories, setProductCategories] = useState<{ product_id: string; category_id: string }[]>([]);
 
   const [q, setQ] = useState("");
-  const [barcode, setBarcode] = useState("");
   const [cat, setCat] = useState("all");
+  // Status filter (single-select, Transactions style): Aktif by default.
+  const [statusSel, setStatusSel] = useState<"active" | "draft">("active");
+  const [draftStatusSel, setDraftStatusSel] = useState<"active" | "draft">("active");
+  const [showFilter, setShowFilter] = useState(false);
   const [showLowOnly, setShowLowOnly] = useState(false);
   const [view, setView] = useState<"hub" | "products" | "categories" | "categoryDetail" | "productDetail">("hub");
   const [detailCatId, setDetailCatId] = useState<string | null>(null);
@@ -58,6 +63,9 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
 
   const [showAddCategory, setShowAddCategory] = useState(false);
   const [showMissing, setShowMissing] = useState(false);
+  const [showDraftMenu, setShowDraftMenu] = useState(false);
+  const [showFlowChoice, setShowFlowChoice] = useState(false);
+  const [showBulk, setShowBulk] = useState(false);
   const [infoProduct, setInfoProduct] = useState<Product | null>(null);
   const [showNameEdit, setShowNameEdit] = useState(false);
   const [nameInput, setNameInput] = useState("");
@@ -85,14 +93,15 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       setProducts(prev => prev.map(x => x.id === p.id ? { ...x, is_available: next } : x));
       setInfoProduct(prev => (prev && prev.id === p.id ? { ...prev, is_available: next } : prev));
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Chanje disponiblite echwe");
+      uploadError("Erè", e?.message ?? "Chanje disponiblite echwe");
     }
   }
 
   async function load() {
     try {
     const db = await getDb();
-    const rows = (await db.getAllAsync("SELECT * FROM products WHERE (is_deleted=0 OR is_deleted IS NULL) AND (status IS NULL OR status = 'active')")) as Product[];
+      // Drafts load too — visibility is decided by the status filter.
+      const rows = (await db.getAllAsync("SELECT * FROM products WHERE (is_deleted=0 OR is_deleted IS NULL)")) as Product[];
     setProducts(rows.map(r => ({ ...r, item_type: (r.item_type ?? "goods") as "goods" | "service", is_available: r.is_available ?? 1 })));
     try {
       const pm = await ensurePricingForProducts(db, rows);
@@ -223,10 +232,14 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
   }
 
   const detailCat: Category | null = detailCatId ? (categories.find(c => c.id === detailCatId) ?? null) : null;
+  const isLive = (p: Product) => String((p as any).status ?? "active") !== "draft";
+  const matchStatus = (p: Product) => statusSel === "active" ? isLive(p) : !isLive(p);
+  const activeCount = useMemo(() => products.filter(isLive).length, [products]);
+  const draftCount = useMemo(() => products.filter(p => !isLive(p)).length, [products]);
   const detailProducts = useMemo(
-    () => (detailCat ? products.filter(p => getProductCats(p.id).includes(detailCat.id)) : []),
+    () => (detailCat ? products.filter(p => matchStatus(p) && getProductCats(p.id).includes(detailCat.id)) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [products, productCategories, categories, detailCatId]
+    [products, productCategories, categories, detailCatId, statusSel]
   );
 
   // ---- multi-variant pricing ----
@@ -240,20 +253,113 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
   }
 
 
-  const filtered = useMemo(() => products.filter(p => {
-    const matchQ = !q || p.name.toLowerCase().includes(q.toLowerCase()) || (p.sku ?? "").toLowerCase().includes(q.toLowerCase()) || (p.barcode ?? "").toLowerCase().includes(q.toLowerCase());
-    const prodCats = getProductCats(p.id);
-    const matchCat = cat === "all" || prodCats.includes(cat);
-    const matchLow = !showLowOnly || (isGoods(p) && p.stock_quantity <= p.low_stock_threshold);
-    const matchBarcode = !barcode || (p.barcode ?? p.sku ?? "").toLowerCase() === barcode.toLowerCase();
-    return matchQ && matchCat && matchLow && (!barcode || matchBarcode);
-  }), [products, q, cat, showLowOnly, barcode, productCategories, categories]);
+  const filtered = useMemo(() => {
+    const list = products.filter(p => {
+      if (!matchStatus(p)) return false;
+      const nq = normName(q);
+      const matchQ = !nq || normName(p.name).includes(nq) || normName(p.sku ?? "").includes(nq) || normName(p.barcode ?? "").includes(nq);
+      const prodCats = getProductCats(p.id);
+      const matchCat = cat === "all" || prodCats.includes(cat);
+      const matchLow = !showLowOnly || (isGoods(p) && p.stock_quantity <= p.low_stock_threshold);
+      return matchQ && matchCat && matchLow;
+    });
+    // Drafts order by creation date (oldest first).
+    if (statusSel === "draft") {
+      list.sort((a, b) => String((a as any).created_at ?? "").localeCompare(String((b as any).created_at ?? "")));
+    }
+    return list;
+  }, [products, q, cat, showLowOnly, statusSel, productCategories, categories]);
 
   const missingPrices = useMemo(
     () => unpricedVariantRows(modelItems, modelVariants, modelPrices, products),
     [modelItems, modelVariants, modelPrices, products]
   );
-  const lowCount = products.filter(p => isGoods(p) && p.stock_quantity <= p.low_stock_threshold).length;
+  const lowCount = products.filter(p => isLive(p) && isGoods(p) && p.stock_quantity <= p.low_stock_threshold).length;
+
+  /** Normalized similarity 0–1 (Levenshtein). Flags near-duplicate names. */
+  function nameSimilarity(a: string, b: string): number {
+    const x = normName(a.trim()), y = normName(b.trim());
+    if (!x || !y) return 0;
+    if (x === y) return 1;
+    const dp: number[][] = Array.from({ length: x.length + 1 }, (_, i) => {
+      const row = new Array(y.length + 1).fill(0);
+      row[0] = i;
+      return row;
+    });
+    for (let j = 0; j <= y.length; j++) dp[0][j] = j;
+    for (let i = 1; i <= x.length; i++) {
+      for (let j = 1; j <= y.length; j++) {
+        dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
+      }
+    }
+    return 1 - dp[x.length][y.length] / Math.max(x.length, y.length);
+  }
+
+  // Draft → active, gated: exact-name clash blocks, unfilled steps block,
+  // ≥70% similar names warn (user confirms), then the flip writes + syncs.
+  async function activateProduct(pid: string) {
+    if (!canEdit) return Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè ka aktive pwodwi.");
+    const p = products.find(x => x.id === pid);
+    if (!p) return;
+    const now = new Date().toISOString();
+    const norm = normName(p.name);
+    if (products.some(x => x.id !== pid && normName(x.name) === norm)) {
+      return Alert.alert("Non deja egziste", `"${p.name}" deja nan katalòg — chak pwodwi dwe inik`);
+    }
+    const pItems = modelItems.filter(i => String(i.product_id) === pid && !i.is_deleted);
+    const missing: string[] = [];
+    if (!pItems.length) missing.push("• Inite (etap 2)");
+    const svc = !isGoods(p);
+    const pVars = modelVariants.filter(v => !v.is_deleted && pItems.some(i => String(i.id) === String(v.item_id)));
+    for (const it of pItems) {
+      if (!pVars.some(v => String(v.item_id) === String(it.id))) missing.push(`• Variant pou ${it.name} (etap 4)`);
+    }
+    if (!svc) {
+      const hasBatch = modelBatches.some(b => !b.is_deleted && pItems.some(i => String(i.id) === String(b.item_id)));
+      if (!hasBatch) missing.push("• Batch (etap 3)");
+    }
+    for (const v of pVars) {
+      const cur = currentVariantPrice(modelPrices, String(v.id), now);
+      if (!cur || !(Number(cur.price) > 0)) {
+        const it = pItems.find(i => String(i.id) === String(v.item_id));
+        missing.push(`• Pri pou ${it?.name ?? "?"} ${v.name} (etap 5)`);
+      }
+    }
+    if (missing.length) {
+      return Alert.alert("Poko pare pou aktive", `${p.name} manke:\n${missing.join("\n")}`);
+    }
+    const sims = products
+      .filter(x => x.id !== pid)
+      .map(x => ({ name: x.name, s: nameSimilarity(p.name, x.name) }))
+      .filter(x => x.s >= 0.7)
+      .sort((a, b) => b.s - a.s);
+    const doActivate = async () => {
+      try {
+        const db = await getDb();
+        await db.runAsync("UPDATE products SET status = ?, updated_at = ?, dirty = 1 WHERE id = ?", ["active", now, pid]);
+        try {
+          const { insertOutbox } = await import("../db");
+          await insertOutbox("products", "update", { id: pid, status: "active", updated_at: now, is_deleted: 0 });
+        } catch {}
+        uploadSuccess("Pwodwi aktive ✓", `${p.name} parèt nan katalòg kounye a.`);
+        load();
+      } catch (e: any) {
+        uploadError("Erè", e?.message ?? "Aktive echwe");
+      }
+    };
+    if (sims.length) {
+      Alert.alert(
+        "Non sanble",
+        `${p.name} sanble ak:\n${sims.map(s => `• ${s.name} (${Math.round(s.s * 100)}%)`).join("\n")}\n\nKontinye kanmenm?`,
+        [
+          { text: "Anile", style: "cancel" },
+          { text: "Kontinye", onPress: () => { doActivate(); } },
+        ]
+      );
+      return;
+    }
+    doActivate();
+  }
   const totalValue = products.reduce((s, p) => s + p.stock_quantity * displayPriceOf(p), 0);
 
 
@@ -269,7 +375,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
     const db = await getDb();
     const { softDeleteProduct } = await import("../catalogModel");
     await softDeleteProduct(db, target);
-    Alert.alert("Pwodwi efase", `${targetName} efase`);
+    uploadSuccess("Pwodwi efase", `${targetName} efase`);
     setInfoProduct(cur => (cur && cur.id === target ? null : cur));
     if (detailProductId === target) {
       setDetailProductId(null);
@@ -277,7 +383,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
     }
     load();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Efase pwodwi echwe");
+      uploadError("Erè", e?.message ?? "Efase pwodwi echwe");
     }
   }
 
@@ -296,11 +402,11 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
     try {
     const db = await getDb();
     await db.runAsync("UPDATE products SET name = ? WHERE id = ?", [name, infoProduct.id]);
-    Alert.alert("Non chanje ✓", `${infoProduct.name} → ${name}`);
+    uploadSuccess("Non chanje ✓", `${infoProduct.name} → ${name}`);
     setShowNameEdit(false);
     load();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Chanje non echwe");
+      uploadError("Erè", e?.message ?? "Chanje non echwe");
     }
   }
 
@@ -395,17 +501,23 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
           )
         ) : view === "productDetail" && detailProduct ? (
           canEdit ? (
-            <Pressable onPress={() => openManage(detailProduct.id)} style={{ paddingHorizontal: 24, height: topIconBtn.size, borderRadius: topIconBtn.radius, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}>
-              <Text style={{ fontWeight: "800", fontSize: 15, color: "#000" }}>Edit</Text>
-            </Pressable>
+            String((detailProduct as any).status ?? "active") === "draft" ? (
+              <Pressable onPress={() => setShowDraftMenu(v => !v)} accessibilityLabel="Draft menu" style={{ width: topIconBtn.size, height: topIconBtn.size, borderRadius: topIconBtn.radius, backgroundColor: topIconBtn.bg, alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="ellipsis-horizontal" size={topIconBtn.iconSize} color={topIconBtn.icon} />
+              </Pressable>
+            ) : (
+              <Pressable onPress={() => openManage(detailProduct.id)} style={{ paddingHorizontal: 24, height: topIconBtn.size, borderRadius: topIconBtn.radius, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}>
+                <Text style={{ fontWeight: "800", fontSize: 15, color: "#000" }}>Edit</Text>
+              </Pressable>
+            )
           ) : (
             <View style={{ width: topIconBtn.size }} />
           )
         ) : canEdit ? (
           <Pressable
             onPress={() => {
-              if (view === "products") { setFlowProductId(null); setFlowSection(null); setShowFlow(true); }
-              else { setShowAddCategory(true); }
+              if (view === "products") setShowFlowChoice(true);
+              else setShowAddCategory(true);
             }}
             accessibilityLabel={view === "products" ? "Ajoute pwodwi" : "Ajoute kategori"}
             style={{ width: topIconBtn.size, height: topIconBtn.size, borderRadius: topIconBtn.radius, backgroundColor: topIconBtn.bg, alignItems: "center", justifyContent: "center" }}
@@ -417,6 +529,33 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
         )}
       </View>
       <View style={{ height: 1, backgroundColor: "#262626", width: "100%", maxWidth: showTablet ? 880 : undefined }} />
+      {showDraftMenu && view === "productDetail" && detailProduct && String((detailProduct as any).status ?? "active") === "draft" ? (
+        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 50 }}>
+          <Pressable style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }} onPress={() => setShowDraftMenu(false)} />
+          <View style={{ position: "absolute", top: 66, right: 16, width: 250, backgroundColor: "#1C1C1E", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 6 }}>
+            <Pressable onPress={() => { setShowDraftMenu(false); activateProduct(detailProduct.id); }} style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 12, borderBottomWidth: 0.5, borderBottomColor: "#262626" }}>
+              <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: "#2b2b2b", borderWidth: 0.5, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="checkmark-circle" size={19} color="#4cae7f" />
+              </View>
+              <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>Mete nan katalòg</Text>
+            </Pressable>
+            <Pressable onPress={() => { setShowDraftMenu(false); openManage(detailProduct.id); }} style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 12, borderBottomWidth: canDelete ? 0.5 : 0, borderBottomColor: "#262626" }}>
+              <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: "#2b2b2b", borderWidth: 0.5, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="create" size={19} color="#fff" />
+              </View>
+              <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>Modifye</Text>
+            </Pressable>
+            {canDelete ? (
+              <Pressable onPress={() => { setShowDraftMenu(false); handleDeleteProduct(detailProduct.id); }} style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 12 }}>
+                <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: "rgba(224,108,91,0.12)", borderWidth: 0.5, borderColor: "rgba(224,108,91,0.4)", alignItems: "center", justifyContent: "center" }}>
+                  <Ionicons name="trash" size={19} color="#e06c5b" />
+                </View>
+                <Text style={{ fontWeight: "700", fontSize: 14, color: "#e06c5b" }}>Efase</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      ) : null}
       {view === "categories" ? (
         <ScrollView style={{ flex: 1, width: "100%" }} contentContainerStyle={{ padding: 16, paddingBottom: 96, gap: 10, maxWidth: showTablet ? 880 : undefined, alignSelf: showTablet ? "center" : undefined, width: "100%" }} showsVerticalScrollIndicator={false}>
           {catSections.map(sec => (
@@ -581,7 +720,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       ) : showTablet ? (
         <CatalogTablet
           role={role} products={products} categories={categories}
-          q={q} setQ={setQ} barcode={barcode} setBarcode={setBarcode} cat={cat} setCat={setCat}
+          q={q} setQ={setQ} onOpenFilter={() => { setDraftStatusSel(statusSel); setShowFilter(true); }} filterOn={statusSel !== "active"} draftCount={draftCount} cat={cat} setCat={setCat}
           filtered={filtered}
           canEdit={canEdit} canAddMore={canAddMore} canReduce={canReduce} canDelete={canDelete} canViewCost={canViewCost} canToggleAvail={canToggleAvail} onToggleAvail={toggleAvail} displayPriceOf={displayPriceOf} defaultUnitOf={defaultUnitOf}
           getProductCats={getProductCats} getProductCategoriesDisplay={getProductCategoriesDisplay}
@@ -591,11 +730,12 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
           handleChangeName={handleChangeName}
           v2={v2} supplierList={supplierList} getBaseCost={getBaseCost} onManageProduct={openManage}
           onOpenProduct={(id) => openProductDetail(id, "products")}
+          onActivateProduct={activateProduct}
         />
       ) : (
         <CatalogPhone
           role={role} products={products} categories={categories}
-          q={q} setQ={setQ} barcode={barcode} setBarcode={setBarcode} cat={cat} setCat={setCat}
+          q={q} setQ={setQ} onOpenFilter={() => { setDraftStatusSel(statusSel); setShowFilter(true); }} filterOn={statusSel !== "active"} draftCount={draftCount} cat={cat} setCat={setCat}
           filtered={filtered}
           canEdit={canEdit}
           canViewCost={canViewCost} canToggleAvail={canToggleAvail}
@@ -603,6 +743,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
           getProductCats={getProductCats} getProductCategoriesDisplay={getProductCategoriesDisplay}
           v2={v2} getBaseCost={getBaseCost}
           onOpenProduct={(id) => openProductDetail(id, "products")}
+          onActivateProduct={activateProduct}
         />
       )}
 
@@ -611,6 +752,97 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
 
 
 
+
+      {/* Status filter (Transactions style, single-select): Aktif / Brouyon */}
+      <Modal visible={showFilter} transparent animationType="slide" onRequestClose={() => setShowFilter(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <Pressable style={{ flex: 1 }} onPress={() => setShowFilter(false)} />
+          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32, maxHeight: "85%" }}>
+            <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff" }}>Filtre</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <Pressable
+                  onPress={() => setDraftStatusSel("active")}
+                  style={{ paddingHorizontal: 20, paddingVertical: 13, borderRadius: 26, backgroundColor: "#2b2b2b" }}
+                >
+                  <Text style={{ fontWeight: "700", fontSize: 14, color: draftStatusSel !== "active" ? "#fff" : "#6e6e73" }}>Clear All</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => { setStatusSel(draftStatusSel); setShowFilter(false); }}
+                  style={{ paddingHorizontal: 26, paddingVertical: 13, borderRadius: 26, backgroundColor: "#fff" }}
+                >
+                  <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>Apply</Text>
+                </Pressable>
+              </View>
+            </View>
+            {(["active", "draft"] as const).map(key => {
+              const checked = draftStatusSel === key;
+              const label = key === "active" ? "Aktif" : "Brouyon";
+              const sub = key === "active" ? "Pwodwi anrejistre" : "Chenn poko fini";
+              const count = key === "active" ? activeCount : draftCount;
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => setDraftStatusSel(key)}
+                  style={{ flexDirection: "row", alignItems: "center", gap: 14, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, paddingVertical: 15, paddingHorizontal: 16, marginBottom: 10 }}
+                >
+                  <View style={{ width: 24, height: 24, borderRadius: 7, borderWidth: 1.5, borderColor: checked ? "#fff" : "#6e6e73", backgroundColor: checked ? "#fff" : "transparent", alignItems: "center", justifyContent: "center" }}>
+                    {checked ? <Ionicons name="checkmark" size={16} color="#000" /> : null}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 16, fontWeight: "600", color: "#fff" }}>{label}</Text>
+                    <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 1 }}>{sub}</Text>
+                  </View>
+                  <Text style={{ fontSize: 14, fontWeight: "800", color: checked ? "#fff" : "#6e6e73" }}>{count}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Flow choice: one product (chain) vs many (bulk setup) */}
+      <Modal visible={showFlowChoice} transparent animationType="fade" onRequestClose={() => setShowFlowChoice(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <Pressable style={{ flex: 1 }} onPress={() => setShowFlowChoice(false)} />
+          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 }}>
+            <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
+            <Text style={{ fontSize: 20, fontWeight: "800", color: "#fff", marginBottom: 12 }}>Nouvo pwodwi</Text>
+            <Pressable
+              onPress={() => { setShowFlowChoice(false); setFlowProductId(null); setFlowSection(null); setShowFlow(true); }}
+              style={{ flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, padding: 14, marginBottom: 10 }}
+            >
+              <View style={{ width: 42, height: 42, borderRadius: 12, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="cube-outline" size={20} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Ajoute yon pwodwi</Text>
+                <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 1 }}>Pwodwi + batch + pri nan yon sèl fwa</Text>
+              </View>
+            </Pressable>
+            <Pressable
+              onPress={() => { setShowFlowChoice(false); setShowBulk(true); }}
+              style={{ flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, padding: 14 }}
+            >
+              <View style={{ width: 42, height: 42, borderRadius: 12, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="layers-outline" size={20} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Ajoute plizyè pwodwi</Text>
+                <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 1 }}>Plizyè pwodwi yon sèl kou (batch/pri apre)</Text>
+              </View>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <BulkProductFlowModal
+        visible={showBulk}
+        onClose={() => setShowBulk(false)}
+        onDone={() => { load(); }}
+        ctx={{ role, currentUser, categories, reload: () => { load(); } }}
+      />
 
       {/* Catalog five-step flow: create chain + manage existing */}
       <CatalogFlowModal

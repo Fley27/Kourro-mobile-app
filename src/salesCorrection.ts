@@ -1,7 +1,7 @@
 import { fmtG, fmt } from "./format";
 import { getUserById } from "./users";
 import { insertOutbox } from "./db";
-import { buildReceipts } from "./receipts";
+import { buildReceipts, receiptItemsFrom, attachLineLabels } from "./receipts";
 
 export type PaymentMethod = "cash" | "moncash" | "natcash" | "credit";
 
@@ -24,6 +24,7 @@ export async function findSaleDetail(db: any, storeId: string, query: string): P
   });
   if (!sale) return null;
   const items = ((await db.getAllAsync("SELECT * FROM sale_items")) as any[]).filter((it: any) => it.sale_id === sale.id);
+  await attachLineLabels(db, items).catch(() => {});
   const customers = (await db.getAllAsync("SELECT * FROM customers")) as any[];
   const customer = customers.find((c: any) => c.id === sale.customer_id) ?? null;
   const credit = ((await db.getAllAsync("SELECT * FROM credits")) as any[]).find((c: any) => c.sale_id === sale.id || c.id === `cr_${sale.id}`) ?? null;
@@ -142,14 +143,7 @@ export async function changeSalePaymentMethod(
   );
   try { await insertOutbox("sales", "update", updatedSale); } catch {}
 
-  const receiptItems = items.map((it: any) => ({
-    name: it.product_name ?? it.name ?? "—",
-    variant: it.variant && it.variant !== "Regular" ? it.variant : null,
-    unitName: it.unit_id ?? null,
-    qty: Number(it.quantity ?? 0),
-    unitPrice: Number(it.unit_price ?? 0),
-    lineTotal: Number(it.line_total ?? 0),
-  }));
+  const receiptItems = await receiptItemsFrom(db, items);
   const receipts = buildReceipts({
     saleId: sale.id,
     saleNumber: sale.sale_number ?? sale.id,

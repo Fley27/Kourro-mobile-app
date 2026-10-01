@@ -187,6 +187,32 @@ export async function backfillSkus(db: any): Promise<void> {
   } catch (e) { console.log("[backfill] skus skipped:", String(e)); }
 }
 
+// Full catalog slate wipe (owner-triggered): products, items, variants,
+// prices, batches, suppliers + link/legacy pricing + old inventory tables.
+// Categories and category_links are KEPT. Related outbox rows are purged so
+// nothing resurrects on push, and the demo-seed flag is set so the seed
+// never refires. NOTE: rows already pushed to a real backend stay there.
+export async function wipeCatalogData(db: any): Promise<void> {
+  const tables = [
+    "variant_prices", "variants", "batches", "items",
+    "product_suppliers", "product_categories",
+    "product_bundles", "product_prices", "product_units", "product_supplier_costs",
+    "stock_movements", "stock_batches",
+    "suppliers", "products",
+  ];
+  for (const t of tables) {
+    try { await db.runAsync(`DELETE FROM ${t}`); } catch {}
+  }
+  try {
+    const ob = (((await db.getAllAsync("SELECT * FROM outbox").catch(() => [])) ?? []) as any[]);
+    const hit = ob.filter((r: any) => tables.includes(String(r.table_name)));
+    for (const r of hit) {
+      try { await db.runAsync("DELETE FROM outbox WHERE id = ?", [r.id]); } catch {}
+    }
+  } catch {}
+  try { await db.runAsync("INSERT OR REPLACE INTO _meta (key, value) VALUES (?,?)", ["seed_catalog_v1", "1"]); } catch {}
+}
+
 export async function runCatalogCutover(db: any): Promise<{ migrated: boolean }> {
   let flagged: any[] = [];
   try {
@@ -278,17 +304,23 @@ export async function runCatalogCutover(db: any): Promise<{ migrated: boolean }>
       try { await putOutbox(db, "variant_prices", "create", { ...rec, is_deleted: false }); } catch {}
     }
 
-    // 4 — bundles re-keyed unit → variant (via full-row replace: mock-safe).
+    // 4 — bundles re-keyed unit → variant, then written as the v3 pair:
+    // bundles (record) + bundle_prices (first effective-dated price row).
+    // product_bundles stays untouched as the migration source for devices
+    // that already ran this cutover (see migrateBundlesToV3).
     try { await db.execAsync("ALTER TABLE product_bundles ADD COLUMN variant_id TEXT"); } catch {}
     for (const b of bundles) {
       const varId = variantOf.get(`${String(b.unit_id)}|${String(b.variant ?? "Regular").toLowerCase()}`);
       if (!varId) continue;
-      await db.runAsync(
-        "INSERT OR REPLACE INTO product_bundles (id, unit_id, variant_id, variant, min_quantity, bundle_price, created_at) VALUES (?,?,?,?,?,?,?)",
-        [b.id, b.unit_id, varId, b.variant, b.min_quantity, b.bundle_price, b.created_at ?? now]
-      );
+      await writeBundleV3(db, {
+        id: String(b.id), variantId: varId,
+        minQuantity: Number(b.min_quantity) || 0,
+        price: Number(b.bundle_price) || 0,
+        date: String(b.created_at ?? now).slice(0, 10),
+        createdAt: String(b.created_at ?? now),
+        now,
+      });
     }
-    try { await db.execAsync("ALTER TABLE product_bundles DROP COLUMN unit_id"); } catch {}
 
     // 5 — old supplier costs → opening batches (qty 1, received, legacy-import).
     // Never touches stock: legacy stock_quantity carries forward untouched.
@@ -321,4 +353,111 @@ export async function runCatalogCutover(db: any): Promise<{ migrated: boolean }>
     throw e;
   }
   return { migrated: true };
+}
+
+// ---------------------------------------------------------------------------
+// Wizard v3 helpers (inventory batch creation). Every one of these is
+// idempotent and cheap, so they run on every launch instead of behind a flag:
+// a device can sync new rows in at any time and the backfill must catch them.
+// ---------------------------------------------------------------------------
+
+async function putOutboxRow(db: any, table: string, operation: string, rec: any) {
+  await putOutbox(db, table, operation, rec);
+}
+
+/**
+ * Write one bundle + its first effective-dated price. Used by both the
+ * cutover and the one-shot product_bundles migration.
+ */
+async function writeBundleV3(db: any, b: {
+  id: string; variantId: string; minQuantity: number; price: number;
+  date: string; createdAt: string; now: string;
+}): Promise<void> {
+  const rec = {
+    id: b.id, variant_id: b.variantId, min_quantity: b.minQuantity, active: 1,
+    created_at: b.createdAt, updated_at: b.now, is_deleted: 0,
+  };
+  await db.runAsync(
+    "INSERT OR REPLACE INTO bundles (id, variant_id, min_quantity, active, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?)",
+    [rec.id, rec.variant_id, rec.min_quantity, rec.active, rec.created_at, rec.updated_at, 0, 1]
+  );
+  try { await putOutboxRow(db, "bundles", "create", { ...rec, is_deleted: false }); } catch {}
+
+  const price = {
+    id: `bpri-${b.id}`, bundle_id: b.id, price: b.price, date: b.date,
+    created_at: b.createdAt, updated_at: b.now, is_deleted: 0,
+  };
+  await db.runAsync(
+    "INSERT OR REPLACE INTO bundle_prices (id, bundle_id, price, date, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?)",
+    [price.id, price.bundle_id, price.price, price.date, price.created_at, price.updated_at, 0, 1]
+  );
+  try { await putOutboxRow(db, "bundle_prices", "create", { ...price, is_deleted: false }); } catch {}
+}
+
+/**
+ * product_supplier_costs is keyed by legacy pre-cutover unit ids, but batch
+ * lines carry item_id. Backfill item_id from (product, unit_name) → items.
+ * JS-side matching (not a SQL join) so the memory backend runs the same code.
+ */
+export async function backfillSupplierCostItems(db: any): Promise<void> {
+  let costs: any[] = [];
+  try { costs = ((await db.getAllAsync("SELECT * FROM product_supplier_costs")) ?? []) as any[]; }
+  catch { return; }
+  const need = costs.filter((c: any) => c && !c.item_id && !c.is_deleted);
+  if (!need.length) return;
+
+  let units: any[] = [];
+  let items: any[] = [];
+  try { units = ((await db.getAllAsync("SELECT * FROM product_units")) ?? []) as any[]; } catch {}
+  try { items = ((await db.getAllAsync("SELECT * FROM items")) ?? []) as any[]; } catch {}
+  const liveItems = items.filter((i: any) => i && !i.is_deleted);
+
+  // unit id → its v2 item (item.name mirrors product_units.unit_name).
+  const itemByUnit = new Map<string, string>();
+  for (const u of units) {
+    const match = liveItems
+      .filter((i: any) => String(i.product_id) === String(u.product_id) && String(i.name) === String(u.unit_name))
+      .sort((a: any, b: any) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0))[0];
+    if (match) itemByUnit.set(String(u.id), String(match.id));
+  }
+  const knownItems = new Set(liveItems.map((i: any) => String(i.id)));
+
+  for (const c of need) {
+    // Already an item id (rows written by the v2 flow, which has no units).
+    const direct = itemByUnit.get(String(c.unit_id)) ??
+      (knownItems.has(String(c.unit_id)) ? String(c.unit_id) : null);
+    if (!direct) continue;
+    try {
+      await db.runAsync("UPDATE product_supplier_costs SET item_id = ? WHERE id = ?", [direct, String(c.id)]);
+    } catch {}
+  }
+}
+
+/**
+ * product_bundles → bundles + bundle_prices for devices that ran the original
+ * cutover before v3 existed. Per-row existence check, not a flag: a fresh
+ * device gets its rows from the cutover itself and these calls no-op.
+ */
+export async function migrateBundlesToV3(db: any): Promise<void> {
+  let legacy: any[] = [];
+  try { legacy = ((await db.getAllAsync("SELECT * FROM product_bundles")) ?? []) as any[]; }
+  catch { return; }
+  if (!legacy.length) return;
+  let have: any[] = [];
+  try { have = ((await db.getAllAsync("SELECT * FROM bundles")) ?? []) as any[]; } catch {}
+  const taken = new Set(have.map((b: any) => String(b.id)));
+  const now = new Date().toISOString();
+  for (const b of legacy) {
+    if (!b?.id || taken.has(String(b.id))) continue;
+    const variantId = String(b.variant_id ?? "");
+    if (!variantId) continue; // pre-cutover row on a device that never migrated
+    await writeBundleV3(db, {
+      id: String(b.id), variantId,
+      minQuantity: Number(b.min_quantity) || 0,
+      price: Number(b.bundle_price) || 0,
+      date: String(b.created_at ?? now).slice(0, 10),
+      createdAt: String(b.created_at ?? now),
+      now,
+    });
+  }
 }

@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, ScrollView, StyleSheet } from "react-native";
+import { View, ScrollView, StyleSheet } from "react-native";
+import { Text } from "../../components/InterText";
 import { PieChart, BarChart } from "react-native-gifted-charts";
 import { palette, radius, shadow } from "../../theme";
 import { useResponsive } from "../../responsive";

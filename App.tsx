@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { SafeAreaView, Text, View, Pressable, TextInput, Alert, Modal, Animated, Easing, BackHandler, KeyboardAvoidingView, Platform, ScrollView, AppState, Dimensions, Image, StatusBar } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useFonts } from "expo-font";
 import {
@@ -13,9 +14,11 @@ import POSScreen from "./src/screens/POSScreen";
 import HomeScreen from "./src/screens/HomeScreen";
 import InventoryScreen from "./src/screens/InventoryScreen";
 import TransactionsScreen from "./src/screens/TransactionsScreen";
-import ShiftReportScreen from "./src/screens/ShiftReportScreen";
+import ShiftScreen from "./src/screens/ShiftScreen";
 import AccountCenter from "./src/screens/home/AccountCenter";
 import MoreScreen from "./src/screens/MoreScreen";
+import OrdersScreen from "./src/orders/OrdersScreen";
+import CustomersScreen from "./src/screens/CustomersScreen";
 import type { BusinessType } from "./src/users";
 import SecurityCenter from "./src/screens/home/SecurityCenter";
 import StoreScreen from "./src/screens/home/StoreScreen";
@@ -23,23 +26,29 @@ import TeamScreen, { type Employee } from "./src/screens/home/TeamScreen";
 import { BottomNav, Tab } from "./src/components/BottomNav";
 import { TabsFab } from "./src/components/TabsFab";
 import { tabsUI } from "./src/tabsUI";
+import { OrdersFab } from "./src/components/OrdersFab";
+import { ordersUI } from "./src/ordersUI";
 import { ht } from "./src/i18n";
-import { USERS, type Role, type User } from "./src/users";
+import { USERS, getUserById, type Role, type User } from "./src/users";
 import { palette, radius, shadow } from "./src/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuthState } from "./src/auth/authStore";
 import LoginScreen from "./src/screens/LoginScreen";
 import { fmtG } from "./src/format";
+import { GlobalUploadTransition, uploadSuccess, uploadError } from "./src/components/UploadTransition";
+import { DarkBackButton } from "./src/components/BackButton";
 
 export type { Role, User };
 
 export type StoreItem = { id: string; name: string; location: string; code: string; createdAt: string; disabled?: boolean; breachFlagged?: boolean; breachedAt?: string; revokedBy?: string };
 
+
+
 const STORE_ID = "demo-store-id";
+// Yellow apricot — shift-gate banner background (text on it stays white).
+const APRICOT = "#f2a63c";
 // NOTE: device id is NOT a Math.random() const (RAM-only, changes every
 // rebundle). It is loaded once from SecureStore (disk) into state below.
-const PROGRAM_OPENING_VAL = 10000;
-const SUPERVISOR_IDS = ["owner-1", "admin-1", "manager-1"];
 
 // employees <-> SQLite mapping (team roster persistence)
 const empStoreId = (store?: string) => store === "Dèlma" ? "st-delma" : store === "Petyonvil" ? "st-petyonvil" : STORE_ID;
@@ -112,6 +121,19 @@ export default function App() {
       } catch {}
     })();
   }, [isTabletDevice]);  const [showShift, setShowShift] = useState(false);
+  // Bumped by the Shift header's Open Shift button; ShiftScreen reacts by
+  // opening the supervisor's own-shift entry (or jumping to their own view).
+  const [shiftSignal, setShiftSignal] = useState(0);
+  // Bumped by the header's Close Shift button; ShiftScreen opens the Shift
+  // Closing Summary (Review & Submit Report) — same flow for every role.
+  const [shiftCloseSignal, setShiftCloseSignal] = useState(0);
+  // True while this user's shift is open — the header button toggles
+  // Open Shift ⇄ Close Shift accordingly. Pushed up by ShiftScreen.
+  const [shiftOpen, setShiftOpen] = useState(false);
+  // True while the supervisor Open Shift view takes the full device screen —
+  // App chrome (header bar, tabs FAB, bottom nav) hides underneath it.
+  const [shiftFull, setShiftFull] = useState(false);
+  React.useEffect(() => { if (!showShift) setShiftFull(false); }, [showShift]);
   const [selectedCreditCustomer, setSelectedCreditCustomer] = useState<any | null>(null);
   // Add Sale from Customers: customer to preselect in POS on tab switch.
   const [posAttachCustomer, setPosAttachCustomer] = useState<any | null>(null);
@@ -139,6 +161,14 @@ export default function App() {
         const sales = ((await db.getAllAsync("SELECT * FROM sales")) as any[]) ?? [];
         const saleItems = ((await db.getAllAsync("SELECT * FROM sale_items")) as any[]) ?? [];
         console.log(`[db] boot check: backend=${getDbBackend()} sales=${sales.length} sale_items=${saleItems.length}`);
+        // Batch drafts are device-local and expire after 14 days. Sweep them
+        // before anything can show a count, then keep the daily reminder in
+        // step with what's actually left.
+        try {
+          const { purgeExpiredBatchDrafts } = await import("./src/inventory/batchDraft");
+          const { notifyDraftReminder } = await import("./src/notifications");
+          await notifyDraftReminder((await purgeExpiredBatchDrafts(db)) > 0);
+        } catch {}
       } catch (e) {
         console.warn("[db] boot check failed:", String(e));
       }
@@ -150,20 +180,32 @@ export default function App() {
   const currentUserId = currentUser?.id ?? "cashier-1";
   const role = currentUser.role;
   const [activeShift, setActiveShift] = useState<any | null>(null);
+  // A cashier sells once their shift entry exists for today — pending
+  // (awaiting manager confirmation) included: confirmation is informational,
+  // never a hard stop. Only a missing/rejected entry blocks the till.
+  const [shiftTodayActive, setShiftTodayActive] = useState(false);
   const [pendingShift, setPendingShift] = useState<any | null>(null);
+  // True after the cashier closes (submits) their report while the shift still
+  // waits for supervisor review — sales stay blocked until confirm/sign-out.
+  const [awaitingReview, setAwaitingReview] = useState(false);
+  // True once the shift gate finished its first DB read for this user.
+  const [shiftGateLoaded, setShiftGateLoaded] = useState(false);
+  // The user the gate data belongs to. On login the first render with the
+  // resolved user still carries the PREVIOUS user's gate values (effects run
+  // after render) — the redirect must never act on that stale window.
+  const shiftGateFor = useRef<string | null>(null);
+  // Any shift row (opened/closed, pending included) or report for this user
+  // today — when set, the cashier is NOT force-redirected to Shift on login.
+  const [hasShiftHistoryToday, setHasShiftHistoryToday] = useState(false);
   const [shiftVersion, setShiftVersion] = useState(0);
 
-  const [showShiftStart, setShowShiftStart] = useState(false);
-  const [shiftOpeningInput, setShiftOpeningInput] = useState("10000");
-  const [shiftSecretInput, setShiftSecretInput] = useState("");
-  const [shiftConfirmationChoice, setShiftConfirmationChoice] = useState<"yes" | "no" | null>(null);
-  const [pendingDiscrepancy, setPendingDiscrepancy] = useState<any | null>(null);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
 
   const [tabDataVersion, setTabDataVersion] = useState(0);
 
-  // Refresh the FAB's open-tab count straight from the DB so it shows whenever
-  // suspended sales exist (any tab, even after leaving and returning).
+  // Refresh the FAB counts straight from the DB so they show whenever there
+  // is something pending (any tab, even after leaving and returning): open
+  // suspended sales + not-yet-paid orders.
   useEffect(() => {
     let cancelled = false;
     async function refresh() {
@@ -173,11 +215,118 @@ export default function App() {
         const rows = (await db.getAllAsync("SELECT * FROM suspended_sales WHERE status = 'open'")) as any[];
         if (!cancelled) tabsUI.setCount((rows ?? []).length);
       } catch { if (!cancelled) tabsUI.setCount(0); }
+      try {
+        const { listOrders } = await import("./src/orders/store");
+        const rows = await listOrders(STORE_ID);
+        if (!cancelled) ordersUI.setCount(rows.length);
+      } catch { if (!cancelled) ordersUI.setCount(0); }
     }
     refresh();
     const sub = AppState.addEventListener("change", (s) => { if (s === "active") refresh(); });
     return () => { cancelled = true; sub.remove(); };
   }, [tabDataVersion]);
+
+  // Business Guard: only a supervisor's confirmation ends the cashier's
+  // session. Watch THIS user's report for today — when it transitions
+  // submitted → closed by someone else while they are logged in, sign out.
+  // A report already closed on launch is never a transition (no logout loop).
+  const reportStatusRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    const uid = auth.user?.id ?? null;
+    if (!uid) return;
+    reportStatusRef.current = {};
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const { getDb } = await import("./src/db");
+        const { localDayKey } = await import("./src/businessGuard");
+        const db = await getDb();
+        const today = localDayKey();
+        const rows = (await db.getAllAsync(
+          "SELECT id, status, reviewed_by FROM daily_reports WHERE user_id = ? AND report_date = ?",
+          [uid, today]
+        ).catch(() => [])) as any[];
+        if (cancelled || !rows?.length) return;
+        for (const r of rows) {
+          const prev = reportStatusRef.current[String(r.id)];
+          reportStatusRef.current[String(r.id)] = String(r.status ?? "");
+          if (prev === "submitted" && String(r.status) === "closed" && r.reviewed_by && String(r.reviewed_by) !== uid) {
+            try {
+              const { clearCartDraft } = await import("./src/sales/cartDraft");
+              await clearCartDraft(await getDb(), STORE_ID, uid);
+            } catch {}
+            auth.signOut().catch(() => {});
+            return;
+          }
+        }
+      } catch {}
+    };
+    check();
+    const t = setInterval(check, 10000);
+    const sub = AppState.addEventListener("change", s => { if (s === "active") setTimeout(check, 500); });
+    return () => { cancelled = true; clearInterval(t); sub.remove(); };
+  }, [auth.user?.id]);
+
+  // Unified Shift: manager/admin/owner shifts + reports auto-close daily at the
+  // configured low-traffic time (default 06:30 local). Self-accountability — no
+  // approval step, no manual close. Cashiers never auto-close: submitting their
+  // report is their close. Runs on boot, every 60s, and on every foreground.
+  useEffect(() => {
+    const uid = auth.user?.id;
+    if (!uid || role === "cashier") return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const { getDb } = await import("./src/db");
+        const { shiftAutoCloseDue, reconcileShift, inLocalDay, localDayKey } = await import("./src/businessGuard");
+        const db = await getDb();
+        const meta = ((await db.getAllAsync("SELECT * FROM _meta WHERE key = 'shift_autoclose_time'").catch(() => [])) ?? []) as any[];
+        // Per-shift due check, never a blanket "past HH:MM" gate: a rebundle
+        // re-runs this poll, and closing every open shift just because the
+        // clock is past 06:30 would lose shifts still in use (see
+        // shiftAutoCloseDue). A shift only closes after its OWN first
+        // post-clock-in HH:MM occurrence has passed.
+        const nowDate = new Date();
+        const open = ((await db.getAllAsync("SELECT * FROM shifts WHERE cashier_id = ? AND status = 'open'", [uid]).catch(() => [])) ?? []) as any[];
+        for (const s of open) {
+          if (cancelled) return;
+          if (!shiftAutoCloseDue(s.start_time, nowDate, meta[0]?.value)) continue;
+          const day = (String(s.start_time ?? "") ? localDayKey(s.start_time) : localDayKey());
+          const reps = ((await db.getAllAsync("SELECT * FROM daily_reports WHERE user_id = ? AND report_date = ? AND store_id = ?", [uid, day, STORE_ID]).catch(() => [])) ?? []) as any[];
+          if (reps.some((r: any) => r.status === "closed")) continue;
+          const allSales = ((await db.getAllAsync("SELECT * FROM sales").catch(() => [])) ?? []) as any[];
+          // Per-shift only: transactions since THIS shift started (not the
+          // whole day) feed the Final Total, same as the cashier flow.
+          const since = String(s.start_time ?? "");
+          const inShift = (ts: any) => String(ts ?? "") >= since;
+          const daySales = allSales.filter((x: any) => (x.seller_id ?? null) === uid && inShift(x.created_at) && !Number(x.standby ?? 0));
+          const cashSales = daySales.filter((x: any) => x.payment_method === "cash").reduce((a: number, x: any) => x.total ?? 0, 0);
+          const debts = ((await db.getAllAsync("SELECT * FROM credit_payments").catch(() => [])) ?? []).filter((p: any) => (p.payment_method ?? "cash") === "cash" && (p.collected_by ?? null) === uid && inShift(p.created_at));
+          const debt = debts.reduce((a: number, p: any) => a + Number(p.amount ?? 0), 0);
+          const cms = ((await db.getAllAsync("SELECT * FROM cash_movements").catch(() => [])) ?? []).filter((m: any) => (m.shift_id != null && m.shift_id === s.id) || ((m.taken_by ?? null) === uid && inShift(m.created_at)));
+          const cashOut = cms.filter((m: any) => m.type === "withdrawal" || m.type === "inventory").reduce((a: number, m: any) => a + Number(m.amount ?? 0), 0);
+          const expected = reconcileShift({ opening: Number(s.opening_balance ?? 0), cashSales, debtCollected: debt, cashOut, standbyCarry: 0 });
+          const ts = new Date().toISOString();
+          const repId = `rep-${uid}-${day}`;
+          if (reps.length === 0) {
+            await db.runAsync("INSERT INTO daily_reports (id, store_id, report_date, role, user_id, status, standby_carry, opening_balance, expected_cash, actual_cash, deficit, cash_sales, credit_collected_cash, withdrawals_total, inventory_total, submitted_at, closed_at, reviewed_by, reviewed_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              [repId, STORE_ID, day, role, uid, "closed", 0, Number(s.opening_balance ?? 0), expected, expected, 0, cashSales, debt, cashOut, Number(cms.filter((m: any) => m.type === "inventory").reduce((a: number, m: any) => a + Number(m.amount ?? 0), 0)), ts, ts, uid, ts, ts, ts]);
+          } else {
+            await db.runAsync("UPDATE daily_reports SET status = ?, expected_cash = ?, actual_cash = ?, deficit = ?, cash_sales = ?, credit_collected_cash = ?, withdrawals_total = ?, inventory_total = ?, submitted_at = ?, closed_at = ?, reviewed_by = ?, reviewed_at = ? WHERE user_id = ? AND report_date = ? AND store_id = ?",
+              ["closed", expected, expected, 0, cashSales, debt, cashOut, Number(cms.filter((m: any) => m.type === "inventory").reduce((a: number, m: any) => a + Number(m.amount ?? 0), 0)), ts, ts, uid, ts, uid, day, STORE_ID]);
+          }
+          await db.runAsync("UPDATE shifts SET status = 'closed', end_time = ?, actual_cash = ?, auto_closed = 1, updated_at = ? WHERE id = ?", [ts, expected, ts, s.id]);
+          console.log(`[auto-close] shift ${s.id} report ${repId} closed at ${ts} (expected ${expected})`);
+        }
+      } catch (e) {
+        console.warn("[auto-close] failed:", String(e));
+      }
+    };
+    run();
+    const t = setInterval(run, 60000);
+    const sub = AppState.addEventListener("change", s => { if (s === "active") setTimeout(run, 500); });
+    return () => { cancelled = true; clearInterval(t); sub.remove(); };
+  }, [auth.user?.id, role]);
 
   // FAB tap from any screen: jump to POS and open its tabs sheet.
   const onTabFABOpen = useCallback(() => {
@@ -472,48 +621,122 @@ export default function App() {
     }
   }, [showProfileMenu]);
 
-  // Shift sheet spring
-  const sheetTranslate = useRef(new Animated.Value(320)).current;
-  useEffect(() => {
-    Animated.spring(sheetTranslate, {
-      toValue: showShiftStart ? 0 : 320,
-      tension: 280,
-      friction: 24,
-      useNativeDriver: true,
-    }).start();
-  }, [showShiftStart]);
+  // Shift gate for the cashier's till. Polls every 10s so a manager confirming
+  // a pending opening on another device unlocks the till here without a restart.
+  // The redirect decision below may ONLY run on a successful read: a failed
+  // query must never look like "no shift exists". On failure previous states
+  // are kept and loaded stays false so the next poll retries.
+  const refreshShifts = useCallback(async () => {
+    setShiftGateLoaded(false);
+    try {
+      const { getDb } = await import("./src/db");
+      const { inLocalDay, localDayKey } = await import("./src/businessGuard");
+      const db = await getDb();
+      const shifts = (await db.getAllAsync("SELECT * FROM shifts ORDER BY start_time DESC LIMIT 50")) as any[];
+      const active = shifts.find((s: any) => s.status === "open" && s.cashier_id === currentUserId) || shifts.find((s: any) => s.status === "open") || null;
+      setActiveShift(active);
+      setPendingShift(shifts.find((s: any) => s.status === "pending" && s.cashier_id === currentUserId) || null);
+      const day = localDayKey();
+      // Overnight-proof: an open/pending shift counts whatever day it started
+      // on — midnight must not kill it (bars/restaurants work past it).
+      const liveShift = (s: any) => (s.cashier_id ?? null) === (currentUserId ?? null)
+        && (s.status === "pending" || s.status === "open");
+      setShiftTodayActive(shifts.some(liveShift));
+      // Awaiting review = this user submitted today's report and it hasn't
+      // been closed by a supervisor yet. Sales stay blocked in this window.
+      // Any report row today also means the shift was already opened before
+      // (or is done) — no force-redirect to Shift on login.
+      // Pure existence check: any shift row (open/pending/closed — rejected
+      // excluded) or any report row. Confirmation flags are never consulted.
+      // A failed read anywhere here keeps the gate unloaded (never looks like
+      // an empty day) and the next poll retries.
+      const reps = (await db.getAllAsync(
+        "SELECT status FROM daily_reports WHERE user_id = ? AND report_date = ?",
+        [currentUserId, day]
+      )) as any[];
+      setAwaitingReview((reps ?? []).some((r: any) => String(r.status ?? "") === "submitted"));
+      const hadShift = shifts.some((s: any) => (s.cashier_id ?? null) === (currentUserId ?? null)
+        && ((s.status === "open" || s.status === "pending")
+          || (String(s.status ?? "") === "closed"
+            && (inLocalDay(s.start_time, day) || (s.end_time ? inLocalDay(s.end_time, day) : false)))));
+      setHasShiftHistoryToday(hadShift || (reps ?? []).length > 0);
+      shiftGateFor.current = currentUserId;
+      setShiftGateLoaded(true);
+    } catch { /* keep previous states; next poll retries */ }
+  }, [currentUserId]);
 
   React.useEffect(() => {
-    (async () => {
-      try {
-        const { getDb } = await import("./src/db");
-        const db = await getDb();
-        const shifts = (await db.getAllAsync("SELECT * FROM shifts ORDER BY start_time DESC LIMIT 5")) as any[];
-        const active = shifts.find((s: any) => s.status === "open" && s.cashier_id === currentUserId) || shifts.find((s: any) => s.status === "open") || null;
-        setActiveShift(active);
-        setPendingShift(shifts.find((s: any) => s.status === "pending" && s.cashier_id === currentUserId) || null);
-      } catch {}
-    })();
-  }, [tab, showShift, shiftVersion, currentUserId]);
+    refreshShifts();
+    const t = setInterval(refreshShifts, 10000);
+    return () => clearInterval(t);
+  }, [refreshShifts, tab, showShift, shiftVersion]);
+
+  // Fresh mount only (cold start or Fast Refresh remount): never inherit a
+  // stuck-open Shift overlay over checkout. Deliberate opens happen via taps;
+  // the login auto-land below re-opens it when truly needed (no shift yet).
+  React.useEffect(() => { setShowShift(false); }, []);
+
+  // Cashiers land in Shift only when they have nothing for today yet — no
+  // open/pending shift and no opened-or-closed shift/report. An open shift,
+  // a pending approval, or a submitted/closed report means no redirect.
+  // Checkout stays gated behind an opened shift (canSell). One decision per
+  // login so a manual ← Retounen still lets them leave without being forced.
+  // Decides only for the resolved login — the pre-login fallback user must
+  // never trigger the redirect (its empty history would wrongly open Shift
+  // and the overlay would stay stuck open after login resolves).
+  const shiftAutoLandedFor = useRef<string | null>(null);
+  const loginUserId = auth.user?.id ?? null;
+  // Deliberate opens (taps) are sacred: only a stale, non-deliberate overlay
+  // may ever be closed automatically (login decision below).
+  const userOpenedShift = useRef(false);
+  const openShiftDeliberate = useCallback(() => { userOpenedShift.current = true; setShowShift(true); }, []);
+  React.useEffect(() => {
+    if (!loginUserId) { shiftAutoLandedFor.current = null; userOpenedShift.current = false; return; }
+    if (role !== "cashier") { shiftAutoLandedFor.current = null; return; }
+    if (!currentUserId || !shiftGateLoaded || shiftGateFor.current !== currentUserId || shiftAutoLandedFor.current === currentUserId) return;
+    shiftAutoLandedFor.current = currentUserId;
+    if (!hasShiftHistoryToday) setShowShift(true);
+    // Stale overlay (e.g. state preserved across a Fast Refresh) with a shift
+    // on record: take it off checkout — but never a deliberate open.
+    else if (showShift && !userOpenedShift.current) setShowShift(false);
+  }, [role, currentUserId, loginUserId, shiftGateLoaded, hasShiftHistoryToday, showShift]);
+
+  // Landing tab after login, per role — one auto-land per login so manual
+  // navigation still sticks afterwards. Owner/admin/manager start on Kay,
+  // cashiers on checkout/Vant (the Shift overlay still takes over on top when
+  // they have no shift yet), associates on Kòmand (no shift needed).
+  const roleLandedFor = useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!loginUserId) { roleLandedFor.current = null; return; }
+    if (!currentUserId || roleLandedFor.current === currentUserId) return;
+    roleLandedFor.current = currentUserId;
+    if (role === "associate") {
+      setShowShift(false);
+      setTab("orders");
+    } else if (role === "cashier") {
+      setTab("pos");
+    } else if (role === "owner" || role === "admin" || role === "manager") {
+      setTab("home");
+    }
+  }, [role, currentUserId, loginUserId]);
 
   const isCashierRole = role === "cashier";
+  // Nav per role — owner/admin/manager/cashier get Kay, Vant, Tranzaksyon,
+  // Plis. Kliyan + Kòmand live in Plis (and associates keep them as tabs).
+  // Kitchen devices never see the board.
+  // Associates work the floor: Kliyan + Kòmand + Plis (Katalòg / Logout live
+  // in Plis) — no checkout, no reports.
+  const visibleTabs: Tab[] = role === "associate"
+    ? ["customers", "orders", "more"]
+    : (["owner", "admin", "manager", "cashier"] as string[]).includes(role)
+      ? ["home", "pos", "transactions", "more"]
+      : ["home", "pos", "customers", "transactions", "more"];
   const canManageStore = role === "admin" || role === "owner";
 
-  React.useEffect(() => {
-    (async () => {
-      try {
-        const { getDb } = await import("./src/db");
-        const db = await getDb();
-        const cds = (await db.getAllAsync("SELECT * FROM cash_discrepancies")) as any[];
-        const pending = cds.find((c: any) => c.status === "pending" || c.status === "reassigned");
-        setPendingDiscrepancy(pending || null);
-      } catch {}
-    })();
-  }, [activeShift, tab]);
-
-  const hasPendingDiscrepancy = !!pendingDiscrepancy && (pendingDiscrepancy.status === "pending" || pendingDiscrepancy.status === "reassigned");
-  const isCashierConfirmed = !!activeShift && !!activeShift.cashier_confirmed;
-  const canSell = !isCashierRole || (!!activeShift && isCashierConfirmed && !hasPendingDiscrepancy);
+  // Selling is hard-gated behind an open shift for every role. A pending
+  // (unconfirmed) opening still unlocks selling — only a missing shift blocks.
+  // After close (report submitted, awaiting review) sales stay blocked.
+  const canSell = shiftTodayActive && !awaitingReview;
 
   const screenTitle = showInventory
     ? "Nouvo Livrezon"
@@ -531,6 +754,8 @@ export default function App() {
         ? ht.home
         : tab === "pos"
           ? ht.sale
+          : tab === "orders"
+            ? "Kòmand"
           : tab === "transactions"
             ? ht.transactions
             : tab === "more"
@@ -564,197 +789,42 @@ export default function App() {
     );
   }
 
-  async function handleBeginShiftToggle() {
-    if (activeShift) {
-      setShowShift(true);
-      return;
-    }
-    if (pendingShift) {
-      // A ticket is awaiting a supervisor — do not let the cashier redo the cash confirmation.
-      Alert.alert("Chanjman ap tann", "Ou te fè yon tikit (Pa dakò). Chanjman w la make 'ap tann' — ou pa ka rebay konfimasyon an. Yon sipèvizè dwe rezoud li anvan ou ka kòmanse.");
-      return;
-    }
-    setShowShiftStart(true);
-  }
-
-  function closeShiftStartSheet() {
-    setShowShiftStart(false);
-    setShiftConfirmationChoice(null);
-    setShiftSecretInput("");
-  }
-
-  async function beginShiftAgree() {
-    try {
-      const { getDb } = await import("./src/db");
-      const db = await getDb();
-      const allShifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
-      const existing = allShifts.find((s: any) => s.status === "open" && s.cashier_id === currentUser.id);
-      console.log("[beginShiftAgree] existing shifts count=", allShifts.length, "existing_open=", existing ? existing.id : "none");
-      if (existing) {
-        setActiveShift(existing);
-        closeShiftStartSheet();
-        setShiftVersion(v => v + 1);
-        Alert.alert("Chanjman kòmanse ✓", `Kes la dakò a ${fmtG(existing.opening_balance)}. Vant debloke — ou ka kòmanse vann kounye a.`);
-        return;
-      }
-      const ts = new Date().toISOString();
-      const id = `shift-${Date.now()}`;
-      await db.runAsync("INSERT INTO shifts (id, store_id, cashier_id, manager_id, opening_balance, status, start_time, end_time, cashier_confirmed, manager_confirmed, supervisor_confirmed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        [id, STORE_ID, currentUser.id, "manager-1", PROGRAM_OPENING_VAL, "open", ts, null, 1, 1, 1]);
-      console.log("[beginShiftAgree] INSERTED shift id=", id, "store_id=", STORE_ID, "cashier_id=", currentUser.id, "opening=", PROGRAM_OPENING_VAL);
-      for (const sup of SUPERVISOR_IDS) {
-        await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [`notif-${Date.now()}-${sup}`, sup, "shift_opening", id, `${currentUser.name} konfime ${fmtG(PROGRAM_OPENING_VAL)} nan kach la. Chanjman kòmanse epi vant debloke.`, "pending", ts]);
-      }
-      setActiveShift({ id, store_id: STORE_ID, cashier_id: currentUser.id, manager_id: "manager-1", opening_balance: PROGRAM_OPENING_VAL, status: "open", start_time: ts, cashier_confirmed: 1, manager_confirmed: 1, supervisor_confirmed: 1 });
-      closeShiftStartSheet();
-      setShiftVersion(v => v + 1);
-      Alert.alert("Chanjman kòmanse ✓", `Kes la dakò a ${fmtG(PROGRAM_OPENING_VAL)}. Notification ale bay Owner/Admin/Manager. Vant debloke — ou ka kòmanse vann kounye a.`);
-    } catch (e) { Alert.alert("Erè", String(e)); }
-  }
-
-  async function fileShiftComplaint() {
-    const stated = parseFloat(shiftOpeningInput);
-    if (isNaN(stated) || stated <= 0) return Alert.alert("Antre montan", "Ki kach ou reyèlman konte nan kes la?");
-    const amt = stated;
-    try {
-      const { getDb } = await import("./src/db");
-      const db = await getDb();
-      const ts = new Date().toISOString();
-      const pendingShiftId = `shift-${Date.now()}`;
-      await db.runAsync("INSERT INTO shifts (id, store_id, cashier_id, manager_id, opening_balance, status, start_time, end_time, cashier_confirmed, manager_confirmed, supervisor_confirmed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        [pendingShiftId, STORE_ID, currentUser.id, "manager-1", amt, "pending", ts, null, 0, 0, 0]);
-      await db.runAsync("INSERT INTO cash_discrepancies (id, shift_id, manager_amount, cashier_amount, difference, status, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        [`cd-${Date.now()}`, pendingShiftId, PROGRAM_OPENING_VAL, amt, PROGRAM_OPENING_VAL - amt, "pending", currentUser.id, ts]);
-      for (const sup of SUPERVISOR_IDS) {
-        await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [`notif-${Date.now()}-${sup}-plent`, sup, "shift_review", pendingShiftId, `${currentUser.name} pa dakò: konte ${fmtG(amt)} olye de ${fmtG(PROGRAM_OPENING_VAL)}. Vant ret bloke jiskaske sipèvizè revize.`, "pending", ts]);
-      }
-      setPendingShift({ id: pendingShiftId, opening_balance: amt, status: "pending", cashier_confirmed: 0 });
-      setActiveShift(null);
-      closeShiftStartSheet();
-      setShiftVersion(v => v + 1);
-      Alert.alert("Plent voye", `Ou konte ${fmtG(amt)} olye de ${fmtG(PROGRAM_OPENING_VAL)} (diferans ${fmtG(Math.abs(PROGRAM_OPENING_VAL - amt))}). Vant rete bloke — yon sipèvizè dwe rezoud tikit la anvan ou ka kòmanse.`);
-    } catch (e) { Alert.alert("Erè", String(e)); }
-  }
-
   return (
+    // Root insets are captured here (works everywhere, incl. inside native
+    // Modals where view-level SafeAreaView padding can come back zero).
+    <SafeAreaProvider>
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
     <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
-      {/* Cashier shift gate — luxury amber/red with hairline */}
-      {isCashierRole && !activeShift && tab === "pos" && !pendingShift && (
-        <View style={{ backgroundColor: palette.warningBg, borderBottomWidth: 0.5, borderColor: palette.warningBd, padding: 12, flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: "#fff", borderWidth: 0.5, borderColor: palette.warningBd, alignItems: "center", justifyContent: "center" }}>
-            <Ionicons name="lock-closed-outline" size={16} color={palette.warning} />
+      {/* Cashier shift gate — the Shift screen owns the whole lifecycle now */}
+      {isCashierRole && !shiftTodayActive && tab === "pos" && (
+        // Shift gate banner — flat yellow apricot block, white text, no
+        // accent color and no tinted background.
+        <View style={{ backgroundColor: APRICOT, borderBottomWidth: 0.5, borderColor: "rgba(0,0,0,0.25)", padding: 12, flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}>
+            <Ionicons name="lock-closed-outline" size={16} color={APRICOT} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Inter_700Bold", color: palette.warning, fontSize: 12, letterSpacing: -0.1 }}>Chanjman fèmen — Vant bloke</Text>
-            <Text style={{ fontFamily: "Inter_400Regular", color: palette.warningDot, fontSize: 11, marginTop: 1 }}>Ou dwe kòmanse chanjman (Lajan Disponib) anvan ou ka vann.</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", color: "#fff", fontSize: 12, letterSpacing: -0.1 }}>Chanjman fèmen — Vant bloke</Text>
+            <Text style={{ fontFamily: "Inter_400Regular", color: "#fff", fontSize: 11, marginTop: 1 }}>Ou dwe kòmanse chanjman anvan ou ka vann.</Text>
           </View>
+          <Pressable onPress={() => { openShiftDeliberate(); setShiftSignal(v => v + 1); }} hitSlop={8}>
+            <Text style={{ fontSize: 11, fontWeight: "800", color: "#fff" }}>Shift →</Text>
+          </Pressable>
         </View>
       )}
-      {isCashierRole && pendingShift && tab === "pos" && (
-        <View style={{ backgroundColor: palette.warningBg, borderBottomWidth: 0.5, borderColor: palette.warningBd, padding: 12, flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: "#fff", borderWidth: 0.5, borderColor: palette.warningBd, alignItems: "center", justifyContent: "center" }}>
-            <Ionicons name="time-outline" size={16} color={palette.warning} />
+      {isCashierRole && pendingShift && !activeShift && tab === "pos" && (
+        <View style={{ backgroundColor: "rgba(34,211,238,0.07)", borderBottomWidth: 0.5, borderColor: "rgba(34,211,238,0.25)", padding: 10, flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <View style={{ width: 26, height: 26, borderRadius: 8, backgroundColor: "rgba(34,211,238,0.15)", alignItems: "center", justifyContent: "center" }}>
+            <Ionicons name="information-circle-outline" size={15} color="#22d3ee" />
           </View>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Inter_700Bold", color: palette.warning, fontSize: 12, letterSpacing: -0.1 }}>Chanjman ap tann — Vant bloke</Text>
-            <Text style={{ fontFamily: "Inter_400Regular", color: palette.warningDot, fontSize: 11, marginTop: 1 }}>Ou fè yon tikit (Pa dakò). Yon sipèvizè dwe rezoud li anvan ou ka kòmanse.</Text>
-          </View>
+          <Text style={{ flex: 1, fontFamily: "Inter_400Regular", color: "#a5f3fc", fontSize: 11, lineHeight: 16 }}>
+            Shift ou an kours — {fmtG(Number(pendingShift.opening_stated ?? 0))} an atant konfimasyon {getUserById(pendingShift.manager_id)?.name ?? "manadjè a"}. Sa pa bloke vant ou.
+          </Text>
+          <Pressable onPress={() => { openShiftDeliberate(); setShiftSignal(v => v + 1); }} hitSlop={8}>
+            <Text style={{ fontSize: 11, fontWeight: "800", color: "#22d3ee" }}>Shift →</Text>
+          </Pressable>
         </View>
-      )}
-      {isCashierRole && hasPendingDiscrepancy && tab === "pos" && (
-        <View style={{ backgroundColor: palette.dangerBg, borderBottomWidth: 0.5, borderColor: palette.dangerBd, padding: 12, flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: "#fff", borderWidth: 0.5, borderColor: palette.dangerBd, alignItems: "center", justifyContent: "center" }}>
-            <Ionicons name="warning-outline" size={16} color={palette.danger} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontFamily: "Inter_700Bold", color: palette.danger, fontSize: 12 }}>Vant bloke — Tann konfimasyon sipèvizè</Text>
-            <Text style={{ fontFamily: "Inter_400Regular", color: palette.dangerDot, fontSize: 11, marginTop: 1 }}>Ou rapòte {fmtG(pendingDiscrepancy?.cashier_amount)} olye de {fmtG(pendingDiscrepancy?.manager_amount)} (manke {fmtG(pendingDiscrepancy?.difference)}).</Text>
-          </View>
-        </View>
-      )}
-
-      {/* Lajan Disponib modal — opens via Kòmanse Chanjman */}
-      {showShiftStart && (
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 50 }}>
-          <View style={{ flex: 1, backgroundColor: "rgba(10,10,11,0.34)", justifyContent: "flex-end" }}>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
-              <Animated.View style={{
-                backgroundColor: palette.surface,
-                borderTopLeftRadius: radius.xl,
-                borderTopRightRadius: radius.xl,
-                padding: 18,
-                borderTopWidth: 0.5, borderColor: palette.hairline,
-                transform: [{ translateY: sheetTranslate }],
-                ...shadow.elevated,
-              }}>
-            <View style={{ width: 36, height: 4, backgroundColor: palette.separator, borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
-
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-              <View style={{ width: 42, height: 42, borderRadius: radius.md, backgroundColor: palette.accentGoldSoft, borderWidth: 0.5, borderColor: palette.accentGold, alignItems: "center", justifyContent: "center" }}>
-                <Ionicons name="briefcase-outline" size={20} color={palette.accentGold} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 17, color: palette.ink, letterSpacing: -0.3 }}>Lajan Disponib</Text>
-                <Text style={{ fontFamily: "Inter_400Regular", color: palette.muted2, fontSize: 11, marginTop: 1 }}>Lajan ki disponib pou chak kesye — {currentUser.name}</Text>
-              </View>
-            </View>
-
-            <View style={{ marginTop: 16, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, padding: 12, borderWidth: 0.5, borderColor: palette.hairline }}>
-              <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "700", letterSpacing: 0.8, textTransform: "uppercase" }}>Montan pwogram nan atann</Text>
-              <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: palette.accentGold, marginTop: 2 }}>{fmtG(PROGRAM_OPENING_VAL)}</Text>
-              <Text style={{ fontFamily: "Inter_400Regular", fontSize: 10, color: palette.muted2, marginTop: 2 }}>Sa pwogram nan deklare kes la genyen kòm kach ouvèti</Text>
-            </View>
-
-            <Text style={{ fontFamily: "Inter_700Bold", fontSize: 15, color: palette.ink, marginTop: 16 }}>Eske ou dakò ak montan kes la?</Text>
-
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
-              <Pressable onPress={() => setShiftConfirmationChoice("no")} style={{ flex: 1, backgroundColor: shiftConfirmationChoice === "no" ? palette.dangerBg : palette.surface, borderWidth: 1, borderColor: shiftConfirmationChoice === "no" ? palette.dangerBd : palette.hairlineStrong, borderRadius: radius.md, padding: 13, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8 }}>
-                <Ionicons name="close-circle" size={18} color={palette.danger} />
-                <Text style={{ color: palette.danger, fontFamily: "Inter_700Bold", fontSize: 13 }}>Pa dakò</Text>
-              </Pressable>
-              <Pressable onPress={() => setShiftConfirmationChoice("yes")} style={{ flex: 1, backgroundColor: shiftConfirmationChoice === "yes" ? palette.accentGold : palette.surface, borderWidth: 1, borderColor: shiftConfirmationChoice === "yes" ? "rgba(255,255,255,0.3)" : palette.hairlineStrong, borderRadius: radius.md, padding: 13, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, ...(shiftConfirmationChoice === "yes" ? shadow.soft : {}) }}>
-                <Ionicons name="checkmark-circle" size={18} color={shiftConfirmationChoice === "yes" ? "#fff" : palette.success} />
-                <Text style={{ color: shiftConfirmationChoice === "yes" ? "#fff" : palette.ink, fontFamily: "Inter_700Bold", fontSize: 13 }}>Dakò</Text>
-              </Pressable>
-            </View>
-
-            {!shiftConfirmationChoice ? (
-              <Text style={{ marginTop: 12, color: palette.muted2, fontSize: 11, textAlign: "center", fontFamily: "Inter_400Regular" }}>Chwazi Dakò oswa Pa dakò pou kòmanse.</Text>
-            ) : (
-              <>
-                {shiftConfirmationChoice === "no" && (
-                  <View style={{ backgroundColor: palette.bg, borderRadius: radius.md, padding: 12, marginTop: 14, borderWidth: 0.5, borderColor: palette.separator }}>
-                    <Text style={{ fontSize: 10, color: palette.muted, fontFamily: "Inter_700Bold", letterSpacing: 0.6, textTransform: "uppercase" }}>Ki KACH OU REYÈLMAN KONTE? (G)</Text>
-                    <TextInput value={shiftOpeningInput} placeholder={String(PROGRAM_OPENING_VAL)} placeholderTextColor={palette.muted3} onChangeText={setShiftOpeningInput} keyboardType="numeric" style={{ borderWidth: 0.5, borderColor: palette.ink2, borderRadius: radius.sm, padding: 11, marginTop: 8, fontFamily: "Inter_700Bold", backgroundColor: palette.surface, color: palette.ink }} />
-                    <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted, marginTop: 6 }}>Antre vrè montan. Yon plent ap ale bay Owner/Admin/Manadjè — vant rete bloke jiskaske yo rezoud.</Text>
-                  </View>
-                )}
-                {shiftConfirmationChoice === "yes" && (
-                  <View style={{ marginTop: 14, backgroundColor: palette.successBg, borderWidth: 0.5, borderColor: palette.successBd, borderRadius: radius.md, padding: 12 }}>
-                    <Text style={{ fontFamily: "Inter_700Bold", fontSize: 12, color: palette.success }}>✓ Dakò — chanjman kòmanse imedyatman</Text>
-                    <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.success, marginTop: 4 }}>Pa bezwen kòd. Notifikasyon ale bay Owner/Admin/Manager. Ou ka kòmanse vann.</Text>
-                  </View>
-                )}
-              </>
-            )}
-
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 18 }}>
-              <Pressable onPress={() => { setShowShiftStart(false); setShiftConfirmationChoice(null); setShiftSecretInput(""); }} style={{ flex: 1, padding: 13, backgroundColor: palette.surfaceGrouped, borderRadius: radius.md, alignItems: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink }}>Anile</Text></Pressable>
-              <Pressable
-                onPress={shiftConfirmationChoice === "no" ? fileShiftComplaint : beginShiftAgree}
-                disabled={!shiftConfirmationChoice}
-                style={{ flex: 1, padding: 13, backgroundColor: shiftConfirmationChoice ? palette.ink2 : palette.separator, borderRadius: radius.md, alignItems: "center", ...shadow.soft }}
-              >
-                <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>{shiftConfirmationChoice === "yes" ? "Dakò — Kòmanse" : shiftConfirmationChoice === "no" ? "Voye Plent" : "Konfime"}</Text>
-              </Pressable>
-            </View>
-              </Animated.View>
-            </ScrollView>
-          </View>
-        </KeyboardAvoidingView>
       )}
 
       <Modal transparent visible={showProfileMenu} animationType="fade" onRequestClose={() => setShowProfileMenu(false)}>
@@ -788,9 +858,9 @@ export default function App() {
 
             {/* Action rows — Apple settings list */}
             <View style={{ marginTop: 14, backgroundColor: palette.surface2, borderRadius: radius.md, overflow: "hidden", borderWidth: 0.5, borderColor: palette.hairline }}>
-              {isCashierRole && activeShift && (
+              {isCashierRole && activeShift && !awaitingReview && (
                 <Pressable
-                  onPress={() => { setShowProfileMenu(false); setShowShift(true); }}
+                  onPress={() => { setShowProfileMenu(false); openShiftDeliberate(); setShiftCloseSignal(v => v + 1); }}
                   style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 13, paddingVertical: 13, borderBottomWidth: 0.5, borderBottomColor: palette.separator }}
                 >
                   <Ionicons name={activeShift ? "checkmark-circle" : "time-outline"} size={20} color={activeShift ? palette.success : palette.muted2} />
@@ -838,7 +908,7 @@ export default function App() {
         {showAccountCenter ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowAccountCenter(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <DarkBackButton onPress={() => setShowAccountCenter(false)} />
               <View style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: 4, backgroundColor: palette.successDot }} />
             </View>
             <AccountCenter
@@ -857,7 +927,7 @@ export default function App() {
         ) : showSecurity ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowSecurity(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <DarkBackButton onPress={() => setShowSecurity(false)} />
               <Text style={{ fontFamily: "Inter_700Bold", fontSize: 15, color: palette.ink, letterSpacing: -0.2 }}>Konsole Sipò</Text>
               <View style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: 4, backgroundColor: palette.warningDot }} />
             </View>
@@ -872,7 +942,7 @@ export default function App() {
         ) : showStore ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowStore(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <DarkBackButton onPress={() => setShowStore(false)} />
             </View>
             <StoreScreen
               role={role}
@@ -883,11 +953,9 @@ export default function App() {
               setAppDisabled={setAppDisabled}
               canManageStore={canManageStore}
               onOpenAccountCenter={() => setShowAccountCenter(true)}
-              onOpenShiftReport={() => { setShowStore(false); setShowShift(true); }}
+              onOpenShiftReport={() => { setShowStore(false); openShiftDeliberate(); }}
               onGoSales={() => { setShowStore(false); setTab("pos"); }}
-              onShiftResolved={() => setShiftVersion(v=>v+1)}
               currentUser={currentUser}
-              cashiers={cashiers}
             />
           </View>
         ) : showTeam ? (
@@ -940,22 +1008,39 @@ export default function App() {
             />
           </View>
         ) : showShift ? (
-          <View style={{ flex: 1 }}>
-            <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowShift(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
-            </View>
-            <ShiftReportScreen storeId={STORE_ID} role={role} currentUser={currentUser} />
+          <View style={{ flex: 1, backgroundColor: "#000" }}>
+            {!shiftFull && (
+              <View style={{ padding: 12, backgroundColor: "#000", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, borderBottomWidth: 0.5, borderColor: "rgba(255,255,255,0.12)" }}>
+                <DarkBackButton onPress={() => setShowShift(false)} />
+                {(role === "cashier" || role === "manager" || role === "admin" || role === "owner") && (
+                  awaitingReview ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, backgroundColor: "rgba(34,211,238,0.08)", borderWidth: 1, borderColor: "rgba(34,211,238,0.35)" }}>
+                      <Ionicons name="time-outline" size={15} color="#22d3ee" />
+                      <Text style={{ fontFamily: "Inter_700Bold", color: "#22d3ee", fontSize: 14 }}>Awaiting review</Text>
+                    </View>
+                  ) : (
+                    <Pressable
+                      onPress={() => (shiftOpen ? setShiftCloseSignal(v => v + 1) : setShiftSignal(v => v + 1))}
+                      style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, backgroundColor: shiftOpen ? "rgba(224,108,91,0.10)" : "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: shiftOpen ? "rgba(224,108,91,0.45)" : "rgba(255,255,255,0.12)" }}>
+                      <Ionicons name={shiftOpen ? "lock-closed-outline" : "key-outline"} size={15} color={shiftOpen ? "#e06c5b" : "#fff"} />
+                      <Text style={{ fontFamily: "Inter_700Bold", color: shiftOpen ? "#e06c5b" : "#fff", fontSize: 14 }}>{shiftOpen ? "Close Shift" : "Open Shift"}</Text>
+                    </Pressable>
+                  )
+                )}
+              </View>
+            )}
+            <ShiftScreen storeId={STORE_ID} role={role} currentUser={currentUser} openSignal={shiftSignal} closeSignal={shiftCloseSignal} onOpenState={setShiftOpen} onFullView={setShiftFull} />
           </View>
         ) : showInventory ? (
           <View style={{ flex: 1 }}>
             <View style={{ padding: 12, backgroundColor: palette.surface, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: palette.hairline }}>
-              <Pressable onPress={() => setShowInventory(false)} style={{ paddingVertical: 8, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontFamily: "Inter_700Bold", color: palette.ink, fontSize: 12 }}>← Retounen</Text></Pressable>
+              <DarkBackButton onPress={() => setShowInventory(false)} />
             </View>
             <InventoryScreen
               role={role}
               currentUser={currentUser}
               onClose={() => setShowInventory(false)}
-              onSaved={() => { setShowInventory(false); setInventoryVersion(v => v + 1); }}
+              onSaved={() => setInventoryVersion(v => v + 1)}
             />
           </View>
         ) : storeBlocked ? (
@@ -973,52 +1058,27 @@ export default function App() {
           </View>
         ) : (
           <>
-            {tab === "home" && <HomeScreen onGoPos={() => setTab("pos")} onGoShift={() => setShowShift(true)} onOpenStore={() => setShowStore(true)} onOpenTeam={() => setShowTeam(true)} role={role} currentUser={currentUser} employees={employees} stores={stores} setStores={setStores} activeStoreId={activeStoreId} setActiveStoreId={setActiveStoreId} appDisabled={appDisabled} setAppDisabled={setAppDisabled} onOpenAccountCenter={() => setShowAccountCenter(true)} onShiftResolved={() => setShiftVersion(v=>v+1)} />}
+            {tab === "home" && <HomeScreen onGoPos={() => setTab("pos")} onGoShift={() => openShiftDeliberate()} onOpenStore={() => setShowStore(true)} onOpenTeam={() => setShowTeam(true)} role={role} currentUser={currentUser} employees={employees} stores={stores} setStores={setStores} activeStoreId={activeStoreId} setActiveStoreId={setActiveStoreId} appDisabled={appDisabled} setAppDisabled={setAppDisabled} onOpenAccountCenter={() => setShowAccountCenter(true)} onShiftResolved={() => setShiftVersion(v=>v+1)} storeId={STORE_ID} storeName={activeStore?.name ?? "Pétion-Ville"} userStoreIds={userStoreIds} deviceId={deviceId} />}
             {tab === "pos" && (
               !canSell ? (
-                <View style={{ flex: 1, backgroundColor: palette.bg, alignItems: "center", justifyContent: "center", padding: 24 }}>
-                  <View style={{ width: 72, height: 72, borderRadius: 22, backgroundColor: hasPendingDiscrepancy ? palette.dangerBg : pendingShift ? palette.warningBg : palette.accentGoldSoft, borderWidth: 0.5, borderColor: hasPendingDiscrepancy ? palette.dangerBd : pendingShift ? palette.warningBd : palette.accentGold, alignItems: "center", justifyContent: "center", ...shadow.card }}>
-                    <Ionicons name={hasPendingDiscrepancy ? "warning-outline" : pendingShift ? "time-outline" : "lock-closed-outline"} size={32} color={hasPendingDiscrepancy ? palette.danger : pendingShift ? palette.warning : palette.accentGold} />
+                // Shift-flow gate — same dark language as the Shift screen:
+                // pure black, cyan (SHIFT live) accents, CTA in the Kòmanse
+                // style (cyan fill, deep-teal label). Never gold (Business
+                // Guard) and never the paper palette.
+                <View style={{ flex: 1, backgroundColor: "#000", alignItems: "center", justifyContent: "center", padding: 24 }}>
+                  <View style={{ width: 72, height: 72, borderRadius: 22, backgroundColor: "rgba(34,211,238,0.10)", borderWidth: 0.5, borderColor: "rgba(34,211,238,0.30)", alignItems: "center", justifyContent: "center" }}>
+                    <Ionicons name="lock-closed-outline" size={32} color="#22d3ee" />
                   </View>
-                  <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, marginTop: 16, textAlign: "center", color: palette.ink, letterSpacing: -0.4 }}>{hasPendingDiscrepancy ? (pendingDiscrepancy?.status === "reassigned" ? "Sipèvizè reasigne — konfime" : "Tann konfimasyon sipèvizè") : (pendingShift ? "Chanjman ap tann — Vant bloke" : "Vant bloke — Chanjman pa kòmanse")}</Text>
-                  <Text style={{ fontFamily: "Inter_400Regular", color: palette.muted, textAlign: "center", marginTop: 8, fontSize: 13, lineHeight: 18 }}>
-                    {hasPendingDiscrepancy
-                      ? pendingDiscrepancy?.status === "reassigned"
-                        ? `Sipèvizè reasigne kach la a ${fmtG(pendingDiscrepancy?.reassigned_amount)} (ou te di ${fmtG(pendingDiscrepancy?.cashier_amount)}). Si ou dakò ak ${fmtG(pendingDiscrepancy?.reassigned_amount)}, konfime ak kòd ou (${currentUser.secret}) pou kòmanse vann.`
-                        : `Ou rapòte ${fmtG(pendingDiscrepancy?.cashier_amount)} olye de ${fmtG(pendingDiscrepancy?.manager_amount)}. Tout sipèvizè resevwa notifikasyon. Ou pa ka vann jiskaske yo konfime.`
-                      : pendingShift
-                        ? `Ou te fè yon tikit (Pa dakò). Chanjman w la make "ap tann" — ou pa ka rebay konfimasyon an. Yon sipèvizè dwe rezoud li anvan ou ka kòmanse.`
-                        : `Ou dwe kòmanse chanjman anvan ou ka vann. Peze katon anba a pou louvri Lajan Disponib epi atestine montan kes la.`}
+                  <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, marginTop: 16, textAlign: "center", color: "#fff", letterSpacing: -0.4 }}>{awaitingReview ? "Awaiting review — Vant bloke" : "Vant Bloke"}</Text>
+                  <Text style={{ fontFamily: "Inter_400Regular", color: "#9a9a9e", textAlign: "center", marginTop: 8, fontSize: 13, lineHeight: 18 }}>
+                    {awaitingReview
+                      ? "Rapò ou soumèt — ap tann konfimasyon sipèvizè. Vant bloke pandan revizyon an."
+                      : "Ou dwe kòmanse chanjman anvan ou ka vann. Peze bouton anba a pou louvri shift la."}
                   </Text>
-                  {!hasPendingDiscrepancy && !pendingShift && (
-                    <Pressable onPress={() => setShowStore(true)} android_ripple={{ color: "rgba(200,162,74,0.25)" }} style={({ pressed }) => [{ marginTop: 20, backgroundColor: palette.accentGold, paddingHorizontal: 22, paddingVertical: 13, borderRadius: radius.md, flexDirection: "row", alignItems: "center", gap: 8, ...shadow.soft }, pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] }]}>
-                      <Ionicons name="briefcase-outline" size={16} color="#fff" />
-                      <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>Tyeke Konbyen Ou Gen Nan Kès Ou</Text>
-                    </Pressable>
-                  )}
-                  {hasPendingDiscrepancy && pendingDiscrepancy?.status === "reassigned" && (
-                    <View style={{ marginTop: 16, width: "100%", backgroundColor: palette.blueBg, borderWidth: 0.5, borderColor: palette.blueBd, borderRadius: radius.md, padding: 14 }}>
-                      <Text style={{ fontFamily: "Inter_700Bold", color: palette.blue, textAlign: "center", fontSize: 13 }}>Sipèvizè panse ou te konte mal</Text>
-                      <Text style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: palette.blue, textAlign: "center", marginTop: 4 }}>Li reasigne a {fmtG(pendingDiscrepancy?.reassigned_amount)}. Si ou dakò, peze pou konfime ak kòd ou.</Text>
-                      <Pressable onPress={async () => {
-                        if (!pendingDiscrepancy) return;
-                        const { getDb } = await import("./src/db");
-                        const db = await getDb();
-                        const amt = Number(pendingDiscrepancy.reassigned_amount);
-                        await db.runAsync("UPDATE cash_discrepancies SET status = ? WHERE id = ?", ["approved", pendingDiscrepancy.id]);
-                        const shifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
-                        const s = shifts.find((x: any) => x.id === pendingDiscrepancy.shift_id);
-                        if (s) { s.opening_balance = amt; s.cashier_confirmed = 1; s.supervisor_confirmed = 1; }
-                        setPendingDiscrepancy(null);
-                        const allShifts = (await db.getAllAsync("SELECT * FROM shifts")) as any[];
-                        const active = allShifts.find((x: any) => x.status === "open");
-                        setActiveShift(active || null);
-                        Alert.alert("Konfime ✓", `Konfime ${fmtG(amt)} — ou ka kòmanse vann`);
-                      }} style={{ marginTop: 10, backgroundColor: palette.ink2, padding: 11, borderRadius: radius.sm, alignItems: "center" }}>
-                        <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>✓ Mwen dakò ({fmtG(pendingDiscrepancy?.reassigned_amount)}) — Kòd {currentUser.secret}</Text>
-                      </Pressable>
-                    </View>
-                  )}
+                  <Pressable onPress={() => openShiftDeliberate()} android_ripple={{ color: "rgba(34,211,238,0.25)" }} style={({ pressed }) => [{ marginTop: 20, backgroundColor: "#22d3ee", paddingHorizontal: 22, paddingVertical: 13, borderRadius: radius.md, flexDirection: "row", alignItems: "center", gap: 8 }, pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] }]}>
+                    <Ionicons name={awaitingReview ? "time-outline" : "key-outline"} size={16} color="#06222b" />
+                    <Text style={{ color: "#06222b", fontFamily: "Inter_700Bold" }}>{awaitingReview ? "Wè Shift" : "Kòmane Jounen Ou"}</Text>
+                  </Pressable>
                 </View>
               ) : (
                 <POSScreen
@@ -1032,8 +1092,28 @@ export default function App() {
                   onTabsChanged={() => setTabDataVersion(v => v + 1)}
                   attachCustomer={posAttachCustomer}
                   onAttachCustomerConsumed={() => setPosAttachCustomer(null)}
+                  canSell={canSell}
                 />
               )
+            )}
+            {tab === "orders" && (
+              <OrdersScreen
+                storeId={STORE_ID}
+                deviceId={deviceId}
+                storeName={activeStore?.name ?? "Pétion-Ville"}
+                role={role}
+                currentUser={currentUser}
+                businessType={businessType}
+                canSell={canSell}
+                reloadKey={tabDataVersion}
+              />
+            )}
+            {tab === "customers" && (
+              <CustomersScreen
+                role={role}
+                currentUser={currentUser}
+                onAddSale={(c) => { setPosAttachCustomer(c); setTab("pos"); }}
+              />
             )}
             {tab === "transactions" && <TransactionsScreen role={role} storeId={STORE_ID} storeName={activeStore?.name ?? "Pétion-Ville"} currentUser={currentUser} userStoreIds={userStoreIds} />}
             {tab === "more" && (
@@ -1048,7 +1128,7 @@ export default function App() {
                 onInventorySaved={() => setInventoryVersion(v => v + 1)}
                 onOpenStore={() => setShowStore(true)}
                 onOpenTeam={() => setShowTeam(true)}
-                onAddSale={(c) => { setPosAttachCustomer(c); setTab("pos"); }}
+                onOpenShift={() => openShiftDeliberate()}
                 onLogout={async () => {
                   try {
                     const { getDb } = await import("./src/db");
@@ -1066,9 +1146,20 @@ export default function App() {
         )}
       </View>
 
-      {!showAccountCenter && !showSecurity && !showStore && !showShift && !showInventory && <BottomNav active={tab} onChange={(t) => { setShowTeam(false); if (t === "more" && tab === "more") setMoreKey(k => k + 1); setTab(t); }} />}
       {/* Round draggable tabs FAB — root level, floats above header, nav and screens */}
-      <TabsFab onOpen={onTabFABOpen} />
+      {!shiftFull && <TabsFab onOpen={onTabFABOpen} />}
+      {/* Orders shortcut FAB — only cashier/manager/admin/owner with an open
+          shift; shows the not-yet-paid count and jumps to Kòmand. */}
+      {!shiftFull && canSell && (["cashier", "manager", "admin", "owner"] as string[]).includes(role) && (
+        <OrdersFab onOpen={() => setTab("orders")} />
+      )}
     </SafeAreaView>
+      {/* Bottom nav sits outside the safe area so the bar lands flush on the screen edge.
+          Shift keeps it visible (dark background + visible menu) — switching tabs exits Shift. */}
+      {!showAccountCenter && !showSecurity && !showStore && !showInventory && !shiftFull && <BottomNav active={tab} visibleTabs={visibleTabs} onChange={(t) => { setShowShift(false); setShowTeam(false); if (t === "more" && tab === "more") setMoreKey(k => k + 1); setTab(t); }} />}
+      {/* Shared post-save/edit overlay — replaces result Alerts app-wide */}
+      <GlobalUploadTransition />
+    </View>
+    </SafeAreaProvider>
   );
 }

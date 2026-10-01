@@ -1,6 +1,8 @@
 // STAGING-PICKUP: DB helpers. Additive only; never called when flag OFF,
 // so the current checkout path is untouched. Decimal-safe (parseFloat).
 import { getDb } from "../db";
+import { attachLineLabels } from "../receipts";
+import { saleLineLabel } from "../labels";
 
 export function toNum(v: any): number {
   const n = Number(String(v ?? "").replace(",", "."));
@@ -30,6 +32,7 @@ export async function findSaleForPickup(storeId: string, query: string) {
   });
   if (!sale) return null;
   const allItems = ((await db.getAllAsync("SELECT * FROM sale_items WHERE sale_id = ?", [sale.id])) as any[]) ?? [];
+  await attachLineLabels(db, allItems).catch(() => {});
   const items = allItems.map((it: any) => ({ ...it, __remaining: remainingOf(it) }));
   let history: any[] = [];
   try { history = ((await db.getAllAsync("SELECT * FROM sale_pickups WHERE sale_id = ?", [sale.id])) as any[]) ?? []; } catch { history = []; }
@@ -50,6 +53,7 @@ export async function recordPickup(opts: {
 }) {
   const db = await getDb();
   const items = ((await db.getAllAsync("SELECT * FROM sale_items WHERE sale_id = ?", [opts.saleId])) as any[]) ?? [];
+  await attachLineLabels(db, items).catch(() => {});
   const now = new Date().toISOString();
   const touched: any[] = [];
   for (const it of items) {
@@ -58,7 +62,7 @@ export async function recordPickup(opts: {
     const paid = toNum(it.quantity);
     const rem = remainingOf(it);
     if (want - rem > 0.000001) {
-      throw new Error(`"${it.product_name}": achte ${paid}, rete ${rem} — ou mande ${want}.`);
+      throw new Error(`"${saleLineLabel(it)}": achte ${paid}, rete ${rem} — ou mande ${want}.`);
     }
     const next = Math.round((toNum(it.quantity_delivered ?? it.quantity) + want) * 100) / 100;
     await db.runAsync("UPDATE sale_items SET quantity_delivered = ? WHERE id = ?", [next, it.id]);
@@ -84,6 +88,7 @@ export async function setTakenTotal(opts: {
 }) {
   const db = await getDb();
   const items = ((await db.getAllAsync("SELECT * FROM sale_items WHERE sale_id = ?", [opts.saleId])) as any[]) ?? [];
+  await attachLineLabels(db, items).catch(() => {});
   const now = new Date().toISOString();
   const touched: any[] = [];
   for (const it of items) {
@@ -91,7 +96,7 @@ export async function setTakenTotal(opts: {
     const want = toNum(opts.taken[it.id]);
     const paid = toNum(it.quantity);
     if (!(want >= 0) || want - paid > 0.000001) {
-      throw new Error(`"${it.product_name}": pa ka depase ${paid} achte (ou mete ${opts.taken[it.id]}).`);
+      throw new Error(`"${saleLineLabel(it)}": pa ka depase ${paid} achte (ou mete ${opts.taken[it.id]}).`);
     }
     const prev = toNum(it.quantity_delivered ?? paid);
     const next = Math.round(want * 100) / 100;
@@ -112,6 +117,7 @@ export async function listOpenPickups(storeId: string, filter?: { q?: string; fr
   const db = await getDb();
   const sales = ((await db.getAllAsync("SELECT * FROM sales")) as any[]) ?? [];
   const items = ((await db.getAllAsync("SELECT * FROM sale_items")) as any[]) ?? [];
+  await attachLineLabels(db, items).catch(() => {});
   const customers = ((await db.getAllAsync("SELECT * FROM customers")) as any[]) ?? [];
   const q = String(filter?.q ?? "").trim().toLowerCase();
   const bySale = new Map<string, any[]>();
@@ -136,7 +142,7 @@ export async function listOpenPickups(storeId: string, filter?: { q?: string; fr
       String(r.sale.id ?? "").toLowerCase().includes(q) ||
       String(r.customer?.name ?? "").toLowerCase().includes(q) ||
       String(r.customer?.phone ?? "").toLowerCase().includes(q) ||
-      r.openItems.some((it: any) => String(it.product_name ?? "").toLowerCase().includes(q))
+      r.openItems.some((it: any) => saleLineLabel(it).toLowerCase().includes(q))
     );
   }
   void storeId;

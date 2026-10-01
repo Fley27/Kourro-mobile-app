@@ -4,11 +4,13 @@ import { Ionicons } from "@expo/vector-icons";
 import { ht } from "../i18n";
 import { shadow, motion } from "../theme";
 
-export type Tab = "home" | "pos" | "transactions" | "more";
+export type Tab = "home" | "pos" | "customers" | "orders" | "transactions" | "more";
 
 const tabs: { id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { id: "home", label: ht.home, icon: "bookmark-outline" },
   { id: "pos", label: ht.sale, icon: "cart-outline" },
+  { id: "customers", label: "Kliyan", icon: "people-outline" },
+  { id: "orders", label: "Kòmand", icon: "reader-outline" },
   { id: "transactions", label: ht.transactions, icon: "card-outline" },
   { id: "more", label: "Plis", icon: "ellipsis-horizontal" },
 ];
@@ -27,14 +29,17 @@ const DOT = "#4B9BFF";
 const LABEL_SIZE = 13;
 const ACTIVE_LABEL_SIZE = 15;
 
-export function BottomNav({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
+// `visibleTabs` gates the bar by role — the Orders tab, for instance, never
+// shows up on a kitchen device. Anything omitted falls back to all tabs.
+export function BottomNav({ active, onChange, visibleTabs }: { active: Tab; onChange: (t: Tab) => void; visibleTabs?: Tab[] }) {
   const scheme = useColorScheme();
   const isDark = scheme === "dark";
   // Near-black bar in both schemes (inherently dark-mode ready).
   const BAR_BG = isDark ? "#191920" : "#0B0B0D";
 
-  const index = Math.max(0, tabs.findIndex(t => t.id === active));
-  const activeTab = tabs[index];
+  const shown = visibleTabs ? tabs.filter(t => visibleTabs.includes(t.id)) : tabs;
+  const index = Math.max(0, shown.findIndex(t => t.id === active));
+  const activeTab = shown[index];
 
   // Sliding selector: one Animated value driven by selected index with an
   // iOS-style spring — the white circle glides between items.
@@ -43,7 +48,7 @@ export function BottomNav({ active, onChange }: { active: Tab; onChange: (t: Tab
   const punch = useRef(new Animated.Value(1)).current;
   // Press feedback per item.
   const pressRefs = useRef<Record<string, Animated.Value>>(
-    Object.fromEntries(tabs.map(t => [t.id, new Animated.Value(1)])) as Record<string, Animated.Value>,
+    Object.fromEntries(shown.map(t => [t.id, new Animated.Value(1)])) as Record<string, Animated.Value>,
   ).current;
 
   const [barWidth, setBarWidth] = useState(0);
@@ -54,10 +59,10 @@ export function BottomNav({ active, onChange }: { active: Tab; onChange: (t: Tab
     Animated.spring(punch, { toValue: 1, tension: 380, friction: 12, useNativeDriver: true }).start();
   }, [index, progress, punch]);
 
-  const tabWidth = barWidth > 0 ? barWidth / tabs.length : 0;
+  const tabWidth = barWidth > 0 ? barWidth / shown.length : 0;
   const leftFirst = tabWidth ? (tabWidth - CIRCLE) / 2 : 0;
   const leftLast = tabWidth ? barWidth - (tabWidth + CIRCLE) / 2 : 0;
-  const translateX = progress.interpolate({ inputRange: [0, tabs.length - 1], outputRange: [leftFirst, leftLast] });
+  const translateX = progress.interpolate({ inputRange: [0, Math.max(1, shown.length - 1)], outputRange: [leftFirst, leftLast] });
 
   const handlePress = (id: Tab) => {
     const v = pressRefs[id];
@@ -122,7 +127,7 @@ export function BottomNav({ active, onChange }: { active: Tab; onChange: (t: Tab
           </>
         )}
 
-        {tabs.map(t => {
+        {shown.map(t => {
           const isActive = t.id === active;
           return (
             <Pressable

@@ -11,6 +11,8 @@ import { getDb, insertOutbox } from "../../db";
 import type { Item, Variant } from "../../catalogModel";
 import type { FlowCtx } from "./types";
 import { canManageCatalog, slugifyName, uniqueId } from "./types";
+import { VariantFormFields } from "./StepForms";
+import { uploadError } from "../../components/UploadTransition";
 
 type Staged = { key: string; itemId: string; name: string };
 
@@ -78,7 +80,7 @@ export default function VariantsStep({
       const vl = (((vs ?? []) as any[]).filter((v: any) => !v.is_deleted && ids.has(String(v.item_id))) as Variant[]);
       setVariants(vl);
       // On-demand form: rows exist → form stays hidden until "+ ajoute".
-      if (stageMode && vl.length > 0) setFormOpen(false);
+      if (vl.length > 0) setFormOpen(false);
       if (!itemId && list.length) setItemId(list[0].id);
     } catch {}
   }
@@ -152,8 +154,6 @@ export default function VariantsStep({
     if (formOpen && openDirty) {
       pending.push({ key: "__open__", itemId, name: name.trim() });
     }
-    // No variant requirement here: items without variants get an
-    // automatic Standard at the Prices step (single generic collapses).
     if (busy) return;
     if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
     setBusy(true);
@@ -172,6 +172,17 @@ export default function VariantsStep({
         const order = (baseOrder.get(s.itemId) ?? 0) + 1;
         baseOrder.set(s.itemId, order);
         await insertVariant(db, now, taken, s.itemId, s.name, order);
+        counts.set(s.itemId, (counts.get(s.itemId) ?? 0) + 1);
+      }
+      // Guarantee: every item leaves with ≥1 variant — bare items get a
+      // silent Standard (lone generic collapses in display).
+      const seen = new Set<string>();
+      for (const it of items) {
+        if (seen.has(it.id)) continue;
+        seen.add(it.id);
+        if ((counts.get(it.id) ?? 0) === 0) {
+          await insertVariant(db, now, taken, it.id, "Standard", 0);
+        }
       }
       setStaged([]);
       setFormOpen(true);
@@ -181,7 +192,7 @@ export default function VariantsStep({
       ctx.reload();
       onNext?.();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Anrejistre variant echwe");
+      uploadError("Erè", e?.message ?? "Anrejistre variant echwe");
     } finally {
       setBusy(false);
     }
@@ -202,7 +213,7 @@ export default function VariantsStep({
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Kreye variant echwe");
+      uploadError("Erè", e?.message ?? "Kreye variant echwe");
     } finally {
       setBusy(false);
     }
@@ -222,7 +233,7 @@ export default function VariantsStep({
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Chanje non echwe");
+      uploadError("Erè", e?.message ?? "Chanje non echwe");
     }
   }
 
@@ -295,45 +306,27 @@ export default function VariantsStep({
           </View>
         );
       })}
-      {/* Open form — stageMode hides it until "+ ajoute yon lòt variant" */}
-      {(!stageMode || formOpen) && (
+      {/* Open form — formOpen alone gates it in every mode */}
+      {formOpen && (
         <View style={{ borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 10 }}>
           <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Nouvo variant</Text>
-          <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>INITE</Text>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-            {items.map(it => {
-              const active = itemId === it.id;
-              return (
-                <Pressable key={it.id} onPress={() => { setTouched(true); setItemId(it.id); }}
-                  style={{ paddingHorizontal: 13, paddingVertical: 9, borderRadius: 999, backgroundColor: active ? "#fff" : "transparent", borderWidth: 1, borderColor: active ? "#fff" : "#2b2b2b" }}>
-                  <Text style={{ fontWeight: "600", fontSize: 12, color: active ? "#000" : "#fff" }}>{it.name}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
+          <VariantFormFields items={items} valueId={itemId} onPick={v => setItemId(v)} name={name} onName={v => setName(v)} markTouched={() => setTouched(true)} />
           {items.length === 0 && (
             <Text style={{ fontSize: 12, color: "#e06c5b" }}>Pa gen inite — tounen nan etap Inite a.</Text>
           )}
-          <TextInput value={name} onChangeText={v => { setTouched(true); setName(v); }} placeholder="Cold, Regular, Boxed" placeholderTextColor="#636366"
-            style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
           {touched && openError ? <Text style={{ fontSize: 12, color: "#e06c5b" }}>{openError}</Text> : null}
           <Pressable onPress={stageMode ? stageAdd : addImmediate} disabled={!openValid || busy} style={{ paddingVertical: 14, borderRadius: 12, backgroundColor: openValid && !busy ? "#fff" : "#2b2b2b", alignItems: "center" }}>
             <Text style={{ fontWeight: "800", fontSize: 14, color: openValid && !busy ? "#000" : "#636366" }}>Ajoute variant</Text>
           </Pressable>
         </View>
       )}
-      {stageMode && !formOpen && (
+      {!formOpen && (
         <Pressable onPress={() => setFormOpen(true)} style={{ paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", borderStyle: "dashed", alignItems: "center" }}>
-          <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>+ ajoute yon lòt variant</Text>
+          <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>+ ajoute variant</Text>
         </Pressable>
       )}
       {!registerNext && (
       <View style={{ flexDirection: "row", gap: 10 }}>
-        {onBack ? (
-          <Pressable onPress={onBack} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
-            <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>Retounen</Text>
-          </Pressable>
-        ) : null}
         {onNext ? (
           stageMode ? (
             <Pressable onPress={saveStagedAndContinue} disabled={busy} style={{ flex: 2, paddingVertical: 14, borderRadius: 12, backgroundColor: "#fff", alignItems: "center" }}>

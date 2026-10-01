@@ -12,6 +12,7 @@ import { NewCustomerFormBody, EditCustomerFormBody } from "../components/Custome
 import { CustomerProfileBody, fullVisitDate, NoteCard } from "../components/CustomerProfile";
 export { CustomerProfileBody };
 import { PAYMENT_LABELS, fmtDateTime } from "../receipts";
+import { saleLineLabel } from "../labels";
 
 export function CartMenuView({ onLouvriFakti, onClearCart, onDismiss }: {
   onLouvriFakti: () => void;
@@ -228,20 +229,19 @@ export function CustomerDetailBody({ customer, stats, notes, onViewProfile, onRe
                 <Text style={{ color: "#fff", fontWeight: "800", fontSize: 20 }}>{initialsOf(it.product_name)}</Text>
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={{ fontWeight: "700", fontSize: 17, color: "#fff" }} numberOfLines={1}>{it.product_name ?? "Atik"}</Text>
-                <Text style={{ fontSize: 15, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{it.variant ?? "Regular"}</Text>
+                <Text style={{ fontWeight: "700", fontSize: 17, color: "#fff" }} numberOfLines={1}>{saleLineLabel(it)}</Text>
               </View>
               {added ? (
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 18, height: 44, borderRadius: 22, backgroundColor: palette.successBg, borderWidth: 1, borderColor: palette.successBd }}>
                   <Ionicons name="checkmark" size={18} color={palette.successDot} />
                   <Text style={{ color: palette.successDot, fontWeight: "800", fontSize: 14 }}>Added</Text>
                 </View>
-              ) : (
-                <Pressable onPress={() => onAddItem?.(it)} style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 18, height: 44, borderRadius: 22, backgroundColor: "#3a3a3c" }}>
+              ) : onAddItem ? (
+                <Pressable onPress={() => onAddItem(it)} style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 18, height: 44, borderRadius: 22, backgroundColor: "#3a3a3c" }}>
                   <Ionicons name="add" size={18} color="#fff" />
                   <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>Add</Text>
                 </Pressable>
-              )}
+              ) : null}
             </View>
             );
           })
@@ -420,7 +420,7 @@ export function TxnDetailBody({ sale, items, customer, onNewReceipt, dueBalance,
               <Text style={{ color: "#fff", fontWeight: "800", fontSize: 14 }}>{initialsOf(it.product_name)}</Text>
             </View>
             <Text style={{ flex: 1, fontWeight: "700", fontSize: 16, color: "#fff" }} numberOfLines={1}>
-              {it.product_name ?? "Atik"} <Text style={{ fontWeight: "400", color: "#8e8e93" }}>×{Number(it.quantity ?? 0)}</Text>
+              {saleLineLabel(it)} <Text style={{ fontWeight: "400", color: "#8e8e93" }}>×{Number(it.quantity ?? 0)}</Text>
             </Text>
             <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff", ...monoStyle }}>{fmtG(Number(it.line_total ?? 0))}</Text>
           </View>

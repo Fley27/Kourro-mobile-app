@@ -10,10 +10,11 @@ import { fmtG, fmt, monoStyle } from "../format";
 import { useResponsive } from "../responsive";
 import { getDb } from "../db";
 import { getUserById } from "../users";
-import { PAYMENT_LABELS, buildReceipts, type ReceiptData } from "../receipts";
+import { PAYMENT_LABELS, buildReceipts, receiptItemsFrom, attachLineLabels, type ReceiptData } from "../receipts";
 import ReceiptModal from "../components/ReceiptModal";
 import { TxnDetailBody } from "./cartViews";
 import { CreditPayFlow } from "../components/CreditPayFlow";
+import { uploadError } from "../components/UploadTransition";
 
 type TxnViewState = { name: "hub" } | { name: "sale"; saleId: string };
 
@@ -140,7 +141,10 @@ export default function TransactionsScreen({
       if (role !== "owner") {
         list = list.filter((s: any) => scopedStores.includes(String(s.store_id ?? storeId)));
       }
-      if (role === "cashier" || role === "associate" || role === "cook") {
+      // Cashiers see every store transaction (even ones they didn't create) —
+      // collecting another seller's credit payment requires finding it here.
+      // Collection itself is still attributed to the collector (collected_by).
+      if (role === "associate" || role === "cook") {
         list = list.filter((s: any) => (s.seller_id ?? null) === myId);
       }
       list.sort((a: any, b: any) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
@@ -198,6 +202,7 @@ export default function TransactionsScreen({
     try {
       const db = await getDb();
       const items = ((await db.getAllAsync("SELECT * FROM sale_items WHERE sale_id = ?", [sale.id]).catch(() => [])) as any[]) ?? [];
+      await attachLineLabels(db, items).catch(() => {});
       const credits = ((await db.getAllAsync("SELECT * FROM credits WHERE sale_id = ?", [sale.id]).catch(() => [])) as any[]) ?? [];
       const credit = credits[0] ?? null;
       let payments: any[] = [];
@@ -229,13 +234,7 @@ export default function TransactionsScreen({
         cashier: { id: sale.seller_id ?? null, name: seller?.name ?? myId ?? "", role: sale.seller_role ?? "" },
         customer: cust ? { name: cust.name ?? "", idCard: cust.id_card_number ?? null, phone: cust.phone ?? null, email: cust.email ?? null } : null,
         customerId: cust?.id ?? sale.customer_id ?? null,
-        items: detail.items.map((it: any) => ({
-          name: it.product_name ?? "Atik",
-          variant: it.variant ?? null,
-          qty: Number(it.quantity ?? 0),
-          unitPrice: Number(it.unit_price ?? 0),
-          lineTotal: Number(it.line_total ?? 0),
-        })),
+        items: await receiptItemsFrom(db, detail.items),
         subtotal: Number(sale.subtotal ?? total),
         discount: Number(sale.discount ?? 0),
         total,
@@ -302,7 +301,7 @@ export default function TransactionsScreen({
       // has fully unmounted (never stacked mid-dismissal).
       setPendingReceipt(pair);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Resi echwe");
+      uploadError("Erè", e?.message ?? "Resi echwe");
     }
   }
 

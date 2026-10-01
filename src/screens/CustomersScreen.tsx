@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, ScrollView, Modal, Alert, KeyboardAvoidingView, Platform, Share } from "react-native";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
-import { buildReceipts, buildReceiptHtml, receiptToText } from "../receipts";
+import { buildReceipts, buildReceiptHtml, receiptToText, receiptItemsFrom, attachLineLabels } from "../receipts";
 import { getDb } from "../db";
 import { fmtG, fmt } from "../format";
 import { useResponsive, sheetBox } from "../responsive";
@@ -19,6 +19,7 @@ import {
   CreditLimitViewCard,
 } from "./CustomersShared";
 import { CustomerProfileBody, CustomerProfileHeader, CustomerTxnsList, ProfileMenu, tenderLabel } from "../components/CustomerProfile";
+import { uploadSuccess, uploadError } from "../components/UploadTransition";
 
 export default function CustomersScreen({ role = "cashier", currentUser, onAddSale }: { role?: string; currentUser?: any; onAddSale?: (c: any) => void }) {
   const [customers, setCustomers] = useState<any[]>([]);
@@ -54,9 +55,10 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
   }, [selectedCustomerId, txnDetail, showAllTxns, showEditSheet, showPay]);
 
   const isManagerPlus = ["owner", "admin", "manager"].includes(role || "cashier");
-  // Phase 4 matrix: cashiers get everything except editing; associate/cook/
-  // server never reach this screen (hidden in More hub).
-  const canAddCustomer = ["owner", "admin", "manager", "cashier"].includes(role || "cashier");
+  // Phase 4 matrix: cashiers get everything except editing. Associates reach
+  // this screen through the Kliyan tab but stay read-only (no add/edit).
+  // Cooks never see the tab at all.
+  const canAddCustomer = ["owner", "admin", "manager", "cashier", "associate"].includes(role || "cashier");
   const canEditCustomer = ["owner", "admin", "manager"].includes(role || "cashier");
   const { width, height, isTablet, isLandscape, padH, fabRight } = useResponsive();
   const sheetH = Math.round(height * 5 / 6);
@@ -160,6 +162,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     if (!txnDetail) return;
     const s = txnDetail.sale;
     try {
+      const db = await getDb();
       const pair = buildReceipts({
         saleId: s.sale_id ?? s.id,
         saleNumber: s.sale_number ?? String(s.sale_id ?? s.id),
@@ -167,13 +170,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
         createdAt: s.created_at ?? new Date().toISOString(),
         cashier: { id: s.seller_id ?? null, name: "", role: "" },
         customer: selectedCustomer ? { name: selectedCustomer.name ?? "Kliyan", phone: selectedCustomer.phone ?? null, email: selectedCustomer.email ?? null } : null,
-        items: (txnDetail.items ?? []).map((it: any) => ({
-          name: it.product_name ?? "Atik",
-          variant: it.variant ?? null,
-          qty: Number(it.quantity ?? 0),
-          unitPrice: Number(it.unit_price ?? 0),
-          lineTotal: Number(it.line_total ?? 0),
-        })),
+        items: await receiptItemsFrom(db, txnDetail.items ?? []),
         subtotal: Number(s.subtotal ?? s.total ?? 0),
         total: Number(s.total ?? 0),
         paymentMethod: s.payment_method ?? "cash",
@@ -206,6 +203,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
         const db = await getDb();
         const saleId = t.sale_id ?? t.id;
         const rows = ((await db.getAllAsync("SELECT * FROM sale_items WHERE sale_id = ?", [saleId]).catch(() => [])) as any[]) ?? [];
+        await attachLineLabels(db, rows).catch(() => {});
         setTxnDetail({ sale: t, items: rows });
         const credits = ((await db.getAllAsync("SELECT * FROM credits WHERE sale_id = ?", [saleId]).catch(() => [])) as any[]) ?? [];
         const credit = credits[0] ?? null;
@@ -278,7 +276,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
       setSelectedCustomerId(null);
       setPendingPayReceipt(pair as any);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Resi echwe");
+      uploadError("Erè", e?.message ?? "Resi echwe");
     }
   }
 
@@ -368,9 +366,9 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     });
     setShowAddCustomer(false);
     setSelectedCustomerId(record.id);
-    Alert.alert("Kliyan ajoute", `${record.name} anrejistre. ${record.phone ? `Telefòn: ${record.phone}` : "Pa gen nimewo telefòn"}${record.address ? ` · Adrès: ${record.address}` : ""}`);
+    uploadSuccess("Kliyan ajoute", `${record.name} anrejistre. ${record.phone ? `Telefòn: ${record.phone}` : "Pa gen nimewo telefòn"}${record.address ? ` · Adrès: ${record.address}` : ""}`);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute kliyan echwe");
+      uploadError("Erè", e?.message ?? "Ajoute kliyan echwe");
     } finally {
       setSavingCustomer(false);
     }
@@ -406,9 +404,9 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     }
     setCustomers(prev => prev.map(c => c.id === selectedCustomer.id ? { ...c, ...patch, name: nextName, credit_limit: nextLimit } : c));
     setShowEditSheet(false);
-    Alert.alert("Kliyan mete ajou", "Chanjman yo anrejistre nan istwa kliyan an.");
+    uploadSuccess("Kliyan mete ajou", "Chanjman yo anrejistre nan istwa kliyan an.");
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete kliyan ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete kliyan ajou echwe");
     } finally {
       setSavingCustomer(false);
     }

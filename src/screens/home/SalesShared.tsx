@@ -1,5 +1,6 @@
 import React from "react";
-import { View, Text, Pressable, ScrollView, StyleSheet, useWindowDimensions } from "react-native";
+import { View, Pressable, ScrollView, StyleSheet, useWindowDimensions } from "react-native";
+import { Text } from "../../components/InterText";
 import { PieChart, BarChart } from "react-native-gifted-charts";
 import { palette, radius, shadow } from "../../theme";
 import { TABLET_MIN } from "../../responsive";

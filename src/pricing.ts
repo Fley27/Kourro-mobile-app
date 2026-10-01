@@ -6,7 +6,9 @@
  *   Stock (stock_quantity) is ALWAYS stored in base units (factor 1).
  * - variants: sellable presentations of an item (Cold, Regular...).
  * - variant_prices: effective-dated rows; current = latest date ≤ now.
- * - product_bundles: re-keyed to variant_id (see cutoverCatalog.ts).
+ * - bundle_prices: effective-dated rows; current = latest date ≤ now
+ *   (see currentBundlePrice). Bundles are loaded from `bundles` and are
+ *   skipped when inactive or not yet priced.
  *
  * PricingMaps below is an in-memory VIEW over the v2 tables so every
  * existing reader (POS selectors, display price, bundle math) keeps its
@@ -54,7 +56,7 @@ export const DEFAULT_VARIANT = "Regular";
  *  with cumulative base factors, current variant prices, variant bundles).
  *  Old tables (product_units/prices) are no longer read after the cutover.
  */
-import { loadCatalogModel, currentVariantPrice, itemFactor } from "./catalogModel";
+import { loadCatalogModel, currentVariantPrice, currentBundlePrice, itemFactor } from "./catalogModel";
 export async function loadPricing(db: any): Promise<PricingMaps> {
   const now = new Date().toISOString();
   try {
@@ -85,18 +87,25 @@ export async function loadPricing(db: any): Promise<PricingMaps> {
     const variantById = new Map(m.variants.map((v: any) => [v.id, v]));
     const bundles: ProductBundle[] = [];
     let rawBundles: any[] = [];
+    let rawBundlePrices: any[] = [];
     try {
-      rawBundles = ((await db.getAllAsync("SELECT * FROM product_bundles").catch(() => [])) ?? []) as any[];
+      rawBundles = ((await db.getAllAsync("SELECT * FROM bundles").catch(() => [])) ?? []) as any[];
     } catch { rawBundles = []; }
+    try {
+      rawBundlePrices = ((await db.getAllAsync("SELECT * FROM bundle_prices").catch(() => [])) ?? []) as any[];
+    } catch { rawBundlePrices = []; }
     for (const b of rawBundles) {
+      if (b?.is_deleted || b?.active === 0 || b?.active === false) continue;
       const v = variantById.get(String(b.variant_id ?? ""));
       if (!v || (v as any).is_deleted) continue;
+      const price = currentBundlePrice(rawBundlePrices, String(b.id), now);
+      if (!price) continue; // a bundle with no effective price yet prices nothing
       bundles.push({
         id: String(b.id),
         unit_id: (v as any).item_id,
         variant: (v as any).name,
         min_quantity: Number(b.min_quantity) || 0,
-        bundle_price: Number(b.bundle_price) || 0,
+        bundle_price: Number(price.price) || 0,
         created_at: b.created_at,
       });
     }

@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS items (
   ref_item_id TEXT,
   ratio REAL,
   sort_order INTEGER DEFAULT 0,
+  -- Unit purchase cost of this container, persisted (batch / supplier quote /
+  -- ratio chain / owner entry) — never NULL, 0 = not priced yet.
+  cost REAL NOT NULL DEFAULT 0,
   created_at TEXT,
   updated_at TEXT,
   is_deleted INTEGER DEFAULT 0,
@@ -106,6 +109,9 @@ CREATE TABLE IF NOT EXISTS batches (
   reason TEXT,
   delivery_ref TEXT,
   transport_share REAL DEFAULT 0,
+  -- One wizard run (session) can write several batches: transport is asked
+  -- once at the end and patched across every row sharing this ref.
+  session_ref TEXT,
   source TEXT DEFAULT 'user',
   created_at TEXT,
   updated_at TEXT,
@@ -114,6 +120,7 @@ CREATE TABLE IF NOT EXISTS batches (
 );
 CREATE INDEX IF NOT EXISTS idx_batches_item ON batches(item_id);
 CREATE INDEX IF NOT EXISTS idx_batches_supplier ON batches(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_batches_session_ref ON batches(session_ref);
 
 CREATE TABLE IF NOT EXISTS variants (
   id TEXT PRIMARY KEY,
@@ -198,6 +205,38 @@ CREATE TABLE IF NOT EXISTS product_bundles (
   created_at TEXT
 );
 
+-- BUNDLES v3: the bundle rule split off product_bundles into its own record
+-- plus an effective-dated price history (mirrors variants/variant_prices).
+-- The active flag switches a bundle off without destroying its history.
+-- product_bundles above is kept as migration source only — readers use these.
+CREATE TABLE IF NOT EXISTS bundles (
+  id TEXT PRIMARY KEY,
+  variant_id TEXT NOT NULL,
+  min_quantity REAL NOT NULL DEFAULT 1,
+  active INTEGER DEFAULT 1,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bundles_variant ON bundles(variant_id);
+
+CREATE TABLE IF NOT EXISTS bundle_prices (
+  id TEXT PRIMARY KEY,
+  bundle_id TEXT NOT NULL,
+  price REAL NOT NULL,
+  date TEXT NOT NULL,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bundle_prices_bundle ON bundle_prices(bundle_id);
+
 -- Catalog x Supplier (global join): one row per (product, supplier, unit).
 -- Cost only — resell is one-per-unit in product_prices. No store_id:
 -- same business, all locations. Editing one row never touches siblings.
@@ -206,6 +245,9 @@ CREATE TABLE IF NOT EXISTS product_supplier_costs (
   product_id TEXT NOT NULL,
   supplier_id TEXT NOT NULL,
   unit_id TEXT NOT NULL,
+  -- Backfilled from legacy unit ids; new writes always set it. Comparison
+  -- engines key on item_id (batch lines carry item_id, not unit_id).
+  item_id TEXT,
   cost REAL NOT NULL DEFAULT 0,
   last_updated TEXT,
   device_id TEXT,
@@ -218,6 +260,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_unique
   ON product_supplier_costs(product_id, supplier_id, unit_id);
 CREATE INDEX IF NOT EXISTS idx_psc_product ON product_supplier_costs(product_id);
 CREATE INDEX IF NOT EXISTS idx_psc_supplier ON product_supplier_costs(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_psc_item ON product_supplier_costs(item_id);
 
 CREATE TABLE IF NOT EXISTS stock_batches (
   id TEXT PRIMARY KEY,
@@ -316,6 +359,10 @@ CREATE TABLE IF NOT EXISTS sales (
   is_complimentary INTEGER DEFAULT 0,
   complimentary_reason TEXT,
   approved_by TEXT,
+  -- Standby sale: rung after the cashier's report was locked, before their
+  -- next shift. Dated/counted on the actual day, cash handed to the manager
+  -- (standby_hands) and carried into the next shift's report.
+  standby INTEGER DEFAULT 0,
   created_at TEXT,
   lamport_clock INTEGER DEFAULT 0, updated_at TEXT, is_deleted INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
 );
@@ -386,6 +433,7 @@ CREATE TABLE IF NOT EXISTS credit_payments (
   payment_method TEXT DEFAULT 'cash',
   receipt_number TEXT,
   collected_by TEXT,
+  shift_id TEXT,
   created_at TEXT
 );
 
@@ -476,16 +524,41 @@ CREATE TABLE IF NOT EXISTS employee_stores (
   PRIMARY KEY (employee_id, store_id)
 );
 
--- Suppliers (Founisè). bank_info is sensitive: owner-only view/edit.
+-- Suppliers (Founisè). bank_info is the legacy free-text blob: owner-only,
+-- never overwritten by the structured bank_accounts below. Structured address:
+-- country (ISO, HT default), department (Haitian dept code or free text when
+-- "Other"), city — address stays a single line (no line 2 / postal code).
+-- payment_methods is a JSON array of ids (cash/bank/remittance, extendable).
 CREATE TABLE IF NOT EXISTS suppliers (
   id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL,
   name TEXT NOT NULL,
   phone TEXT,
+  country TEXT,
+  department TEXT,
+  city TEXT,
   address TEXT,
+  payment_methods TEXT,
   payment_terms TEXT,
   bank_info TEXT,
   notes TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+
+-- Supplier bank accounts: repeatable sub-records, shown only when the bank
+-- payment method is checked. currency = 'HTG' (gourde) | 'USD' (dollar).
+-- Global like suppliers (store_id legacy/nullable).
+CREATE TABLE IF NOT EXISTS supplier_bank_accounts (
+  id TEXT PRIMARY KEY,
+  store_id TEXT,
+  supplier_id TEXT NOT NULL,
+  bank_name TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  account_number TEXT,
+  sort_order INTEGER DEFAULT 0,
   created_at TEXT,
   updated_at TEXT,
   is_deleted INTEGER DEFAULT 0,
@@ -512,13 +585,19 @@ CREATE TABLE IF NOT EXISTS orders (
   dirty INTEGER DEFAULT 0
 );
 
+-- Daily end-of-shift report. Business Guard status flow:
+--   pending    — opened for today, cashier still working
+--   submitted  — cashier submitted it; awaiting manager confirmation
+--   closed     — confirmed by a supervisor (legacy rows were closed directly)
 CREATE TABLE IF NOT EXISTS daily_reports (
   id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL,
   report_date TEXT NOT NULL,
   role TEXT NOT NULL,
   user_id TEXT NOT NULL,
+  shift_id TEXT DEFAULT NULL,
   status TEXT DEFAULT 'pending',
+  standby_carry REAL DEFAULT 0,
   opening_balance REAL DEFAULT 0,
   expected_cash REAL DEFAULT 0,
   actual_cash REAL DEFAULT NULL,
@@ -540,6 +619,11 @@ CREATE TABLE IF NOT EXISTS daily_reports (
   updated_at TEXT
 );
 
+-- Register shortfall logged against an employee + date when the till comes up
+-- short. Business Guard resolution vocabulary:
+--   status: open | resolved        (legacy 'paid' normalized by migration)
+--   resolution: paid | salary | forgiven   (legacy 'waived_negligible' -> forgiven)
+--   resolution_reason: REQUIRED typed reason when resolution = 'forgiven'
 CREATE TABLE IF NOT EXISTS cashier_deficits (
   id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL,
@@ -548,12 +632,16 @@ CREATE TABLE IF NOT EXISTS cashier_deficits (
   deficit REAL DEFAULT 0,
   status TEXT DEFAULT 'open',
   resolution TEXT,
+  resolution_reason TEXT,
+  report_id TEXT,
   resolved_by TEXT,
   resolved_at TEXT,
   notes TEXT,
   created_at TEXT,
   updated_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_deficits_store_date ON cashier_deficits(store_id, date);
+CREATE INDEX IF NOT EXISTS idx_deficits_cashier_date ON cashier_deficits(cashier_id, date);
 
 CREATE TABLE IF NOT EXISTS monthly_losses (
   id TEXT PRIMARY KEY,
@@ -643,6 +731,8 @@ CREATE TABLE IF NOT EXISTS shifts (
   cashier_id TEXT NOT NULL,
   manager_id TEXT,
   opening_balance REAL DEFAULT 0,
+  opening_stated REAL,
+  opening_confirmed_by TEXT,
   status TEXT,
   start_time TEXT,
   end_time TEXT,
@@ -650,6 +740,7 @@ CREATE TABLE IF NOT EXISTS shifts (
   cashier_confirmed INTEGER DEFAULT 0,
   manager_confirmed INTEGER DEFAULT 0,
   supervisor_confirmed INTEGER DEFAULT 0,
+  auto_closed INTEGER DEFAULT 0,
   created_at TEXT,
   updated_at TEXT,
   is_deleted INTEGER DEFAULT 0,
@@ -717,4 +808,159 @@ CREATE TABLE IF NOT EXISTS cash_requests (
   status TEXT DEFAULT 'pending',
   created_at TEXT
 );
+
+-- Standby sale handover: after a report is locked the cashier keeps selling
+-- until their next shift; the cash from those sales is handed to the manager
+-- immediately and the cashier confirms it explicitly. Reconciliation rolls the
+-- total into the next shift's report (daily_reports.standby_carry) as a
+-- carried-over line.
+CREATE TABLE IF NOT EXISTS standby_hands (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  cashier_id TEXT NOT NULL,
+  manager_id TEXT,
+  report_id TEXT,
+  carried_into_report_id TEXT,
+  sale_count INTEGER DEFAULT 0,
+  amount REAL DEFAULT 0,
+  handed_at TEXT,
+  cashier_confirmed INTEGER DEFAULT 0,
+  confirmed_at TEXT,
+  carried_at TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_standby_hands_store ON standby_hands(store_id, created_at);
+
+-- ── Assisted ordering ────────────────────────────────────────────────────
+-- One open-order object shared by restaurant table service and retail
+-- floor-assisted shopping. An order attaches an identifier (table number or
+-- customer name + optional phone) and stays open, receiving multiple rounds
+-- of items over time.
+--
+-- Lines are PER ROUND: adding the same product again is always a new row,
+-- rounds never merge. Collapsing identical lines happens only at billing
+-- (orders/store.ts collapseForBilling) so the receipt stays honest about the
+-- real sequence of events.
+--
+-- Line status: waiting -> progress -> delivered. waiting is freely editable
+-- by its creator, progress is locked behind an accepted change request,
+-- delivered is a final lock that counts toward the running subtotal.
+-- 'cancelled' exists for creator cancels and the manager override (never
+-- billed).
+CREATE TABLE IF NOT EXISTS open_orders (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'retail',
+  code_kind TEXT NOT NULL DEFAULT 'name',
+  table_no TEXT,
+  customer_name TEXT,
+  customer_phone TEXT,
+  customer_id TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_by TEXT,
+  created_by_name TEXT,
+  device_id TEXT,
+  delivered_total REAL DEFAULT 0,
+  line_count INTEGER DEFAULT 0,
+  note TEXT,
+  locked_at TEXT,
+  closed_sale_id TEXT,
+  ready_for_payment INTEGER DEFAULT 0,
+  ready_at TEXT,
+  ready_by TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_open_orders_store_status ON open_orders(store_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS open_order_lines (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  store_id TEXT NOT NULL,
+  round_no INTEGER DEFAULT 1,
+  product_id TEXT,
+  name TEXT,
+  unit_id TEXT,
+  unit_name TEXT,
+  factor REAL DEFAULT 1,
+  variant TEXT,
+  qty REAL DEFAULT 0,
+  unit_price REAL DEFAULT 0,
+  line_total REAL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'waiting',
+  attention INTEGER DEFAULT 0,
+  attention_reason TEXT,
+  cancel_reason TEXT,
+  cancelled_by TEXT,
+  cancelled_at TEXT,
+  override INTEGER DEFAULT 0,
+  created_by TEXT,
+  created_by_name TEXT,
+  started_by TEXT,
+  started_at TEXT,
+  delivered_by TEXT,
+  delivered_at TEXT,
+  revision INTEGER DEFAULT 0,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_open_order_lines_order ON open_order_lines(order_id, status);
+
+-- Formal change request raised against a LOCKED (in progress) line. The item
+-- it targets only updates after the other side actively accepts, since work
+-- may already be underway. Declining never touches the line itself - it
+-- flags it so it returns to the creator as needs-attention.
+CREATE TABLE IF NOT EXISTS order_change_requests (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  line_id TEXT NOT NULL,
+  store_id TEXT,
+  kind TEXT NOT NULL,
+  payload TEXT,
+  reason TEXT,
+  requested_by TEXT,
+  requested_by_name TEXT,
+  requested_by_role TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  decided_by TEXT,
+  decided_by_name TEXT,
+  decided_at TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_order_change_requests_status ON order_change_requests(status, order_id);
+
+-- Append-only audit trail. Every line action lands here with the actor's id,
+-- role and rank plus the reason when one is required (manager override),
+-- so there is always a permanent record of who did what and why.
+CREATE TABLE IF NOT EXISTS open_order_events (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  store_id TEXT,
+  line_id TEXT,
+  action TEXT NOT NULL,
+  actor_id TEXT,
+  actor_name TEXT,
+  actor_role TEXT,
+  actor_rank INTEGER,
+  reason TEXT,
+  snapshot TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 1,
+  created_at TEXT,
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_open_order_events_order ON open_order_events(order_id, created_at);
 `;

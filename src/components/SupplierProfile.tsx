@@ -8,6 +8,7 @@ import { View, Text, Pressable } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { fmtG, fmt, monoStyle } from "../format";
 import { ProfileRow, ProfileValue, NoteCard, shortVisitDate, fullVisitDate } from "./CustomerProfile";
+import { composeSupplierAddress, paymentMethodLabel, bankCurrencyLabel, paymentMethodsFromColumn } from "./SupplierSheets";
 
 const INK = "#fff";
 const MUTED = "#8e8e93";
@@ -38,10 +39,11 @@ export type SupplierStats = {
   firstBatch: string | null;
 };
 
-export function SupplierProfileBody({ supplier, stats, batches, onOpenBatch, onViewAll, isOwner }: {
+export function SupplierProfileBody({ supplier, stats, batches, bankAccounts, onOpenBatch, onViewAll, isOwner }: {
   supplier: any;
   stats: SupplierStats;
   batches: any[];
+  bankAccounts?: any[];
   onOpenBatch?: (b: any) => void;
   onViewAll?: () => void;
   isOwner?: boolean;
@@ -49,6 +51,9 @@ export function SupplierProfileBody({ supplier, stats, batches, onOpenBatch, onV
   const [showAll, setShowAll] = useState(false);
   const visible = showAll ? (batches ?? []) : (batches ?? []).slice(0, 3);
   const totalPaid = (batches ?? []).reduce((s: number, b: any) => s + Number(b?.total_paid ?? 0), 0);
+  const address = composeSupplierAddress(supplier);
+  const paymentMethods = paymentMethodsFromColumn(supplier?.payment_methods).map(paymentMethodLabel);
+  const accounts = (bankAccounts ?? []).filter(a => !a?.is_deleted);
   return (
     <View style={{ backgroundColor: "#000" }}>
 
@@ -81,9 +86,15 @@ export function SupplierProfileBody({ supplier, stats, batches, onOpenBatch, onV
           <Hairline />
         </>
       ) : null}
-      {supplier?.address ? (
+      {address ? (
         <>
-          <ProfileRow label="Adrès"><ProfileValue>{supplier.address}</ProfileValue></ProfileRow>
+          <ProfileRow label="Adrès"><ProfileValue>{address}</ProfileValue></ProfileRow>
+          <Hairline />
+        </>
+      ) : null}
+      {paymentMethods.length ? (
+        <>
+          <ProfileRow label="Mwayen peman"><ProfileValue>{paymentMethods.join(" • ")}</ProfileValue></ProfileRow>
           <Hairline />
         </>
       ) : null}
@@ -93,17 +104,29 @@ export function SupplierProfileBody({ supplier, stats, batches, onOpenBatch, onV
           <Hairline />
         </>
       ) : null}
-      {isOwner ? (
-        <>
-          <ProfileRow label="Enfòmasyon labank (sansib)"><ProfileValue>{supplier?.bank_info || "—"}</ProfileValue></ProfileRow>
-          <Hairline />
-        </>
-      ) : (
-        <>
-          <ProfileRow label="Enfòmasyon labank (sansib)"><ProfileValue>•••••• — Kache · Owner sèlman 🔒</ProfileValue></ProfileRow>
-          <Hairline />
-        </>
-      )}
+      {accounts.length ? (
+        accounts.map((a: any, i: number) => {
+          const value = [bankCurrencyLabel(a?.currency), a?.account_number].map(x => String(x ?? "").trim()).filter(Boolean).join(" • ");
+          return (
+            <React.Fragment key={String(a?.id ?? i)}>
+              <ProfileRow label={a?.bank_name || "Kont labank"}><ProfileValue>{value || "—"}</ProfileValue></ProfileRow>
+              <Hairline />
+            </React.Fragment>
+          );
+        })
+      ) : supplier?.bank_info ? (
+        isOwner ? (
+          <>
+            <ProfileRow label="Enfòmasyon labank (sansib)"><ProfileValue>{supplier.bank_info}</ProfileValue></ProfileRow>
+            <Hairline />
+          </>
+        ) : (
+          <>
+            <ProfileRow label="Enfòmasyon labank (sansib)"><ProfileValue>•••••• — Kache · Owner sèlman 🔒</ProfileValue></ProfileRow>
+            <Hairline />
+          </>
+        )
+      ) : null}
 
       <View style={{ paddingVertical: 14 }}>
         <Text style={{ fontWeight: "800", fontSize: 20, color: INK, letterSpacing: -0.3 }}>Nòt</Text>

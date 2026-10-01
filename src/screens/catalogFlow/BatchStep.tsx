@@ -15,6 +15,8 @@ import { itemFactor, previewBatchUnitCost, mergeV2Batch, receiveV2Batch } from "
 import type { FlowCtx } from "./types";
 import { canHandleBatches } from "./types";
 import PickerGrid from "../../components/PickerGrid";
+import { uploadError } from "../../components/UploadTransition";
+import { MoneyInput } from "../../components/maskedInput";
 
 function todayStr(): string {
   const d = new Date();
@@ -194,13 +196,17 @@ export default function BatchStep({
   useEffect(() => { if (stepActive) registerNext?.(saveStagedAndContinue); });
 
   async function saveStagedAndContinue() {
-    if (formOpen && openDirty && !openValid) {
+    // A form opened by mistake and left blank is skipped: blank = qty +
+    // total empty with date untouched (auto-selected item/supplier never
+    // count as input). Anything entered must validate.
+    const openBlank = qty.trim() === "" && total.trim() === "" && date === todayStr();
+    if (formOpen && !openBlank && !openValid) {
       setTouched(true);
       Alert.alert("Enkonplè", openError);
       return;
     }
     const pending: Staged[] = foldStaged([...staged,
-      ...(formOpen && openDirty
+      ...(formOpen && !openBlank
         ? [{ key: "__open__", itemId, supplierId, qty: qty.trim(), total: total.trim(), date }]
         : []),
     ]);
@@ -224,7 +230,7 @@ export default function BatchStep({
       ctx.reload();
       onNext?.();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Anrejistre batch echwe");
+      uploadError("Erè", e?.message ?? "Anrejistre batch echwe");
     } finally {
       setBusy(false);
     }
@@ -244,7 +250,7 @@ export default function BatchStep({
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Kreye batch echwe");
+      uploadError("Erè", e?.message ?? "Kreye batch echwe");
     } finally {
       setBusy(false);
     }
@@ -263,7 +269,7 @@ export default function BatchStep({
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Resevwa echwe");
+      uploadError("Erè", e?.message ?? "Resevwa echwe");
     } finally {
       setBusy(false);
     }
@@ -283,7 +289,7 @@ export default function BatchStep({
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Refi echwe");
+      uploadError("Erè", e?.message ?? "Refi echwe");
     } finally {
       setBusy(false);
     }
@@ -338,7 +344,7 @@ export default function BatchStep({
           </View>
           <View style={{ flex: 1 }}>
             <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>TOTAL PEYE (G)</Text>
-            <TextInput value={vTotal} onChangeText={v => { markTouched(); setVTotal(v.replace(/[^0-9.]/g, "")); }} placeholder="0" placeholderTextColor="#636366" keyboardType="numeric"
+            <MoneyInput value={vTotal} onChangeText={v => { markTouched(); setVTotal(v); }} placeholder="0" placeholderTextColor="#636366" keyboardType="numeric"
               style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, marginTop: 6, fontSize: 14, color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
           </View>
           <View style={{ flex: 1 }}>
@@ -441,7 +447,9 @@ export default function BatchStep({
         );
       })}
       {/* Open form — stageMode hides it until "+ ajoute yon lòt batch" */}
-      {canHandleBatches(ctx.role) && (!stageMode || formOpen) && (
+      {/* Batches are born in the create chain or Inventory deliveries only:
+          once the product exists, this screen receives/denies — never adds. */}
+      {canHandleBatches(ctx.role) && stageMode && formOpen && (
         <View style={{ borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 10 }}>
           <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Nouvo batch (pending)</Text>
           {batchFormFields(itemId, v => { setTouched(true); setItemId(v); }, supplierId, v => { setTouched(true); setSupplierId(v); }, qty, v => { setTouched(true); setQty(v); }, total, v => { setTouched(true); setTotal(v); }, date, v => { setTouched(true); setDate(v); }, () => setTouched(true))}

@@ -2,20 +2,24 @@
 // the category details). Sections: identity, stock (+inline seuil edit),
 // prices, items, categories, batches, danger zone. All management jumps
 // into the catalog flow; threshold + availability + delete act inline.
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../db";
 import { fmtG } from "../format";
+import { formatCheckoutRow } from "../labels";
 import { palette, radius } from "../theme";
 import {
   type Category, type Product, statusForProduct, isService, isAvailable,
   categoryDisplayIcon,
 } from "./CatalogShared";
 import {
-  type CatalogModel, breakdownStock, currentVariantPrice,
+  type CatalogModel, breakdownStock, currentVariantPrice, currentBundlePrice, unpricedVariantRows,
 } from "../catalogModel";
+import MissingPricesSheet from "../components/MissingPricesSheet";
+import { ProfileMenu } from "../components/CustomerProfile";
 import type { StepKey } from "./catalogFlow/CatalogFlowModal";
+import { uploadSuccess, uploadError } from "../components/UploadTransition";
 
 export default function ProductDetail({
   product, categories, catIds, v2, supplierList,
@@ -42,9 +46,11 @@ export default function ProductDetail({
   onChanged: () => void;
   onScrollY: (y: number) => void;
 }) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [lowInput, setLowInput] = useState<string | null>(null);
   const [savingLow, setSavingLow] = useState(false);
+  const [showPrices, setShowPrices] = useState(false);
+  const [bundles, setBundles] = useState<any[]>([]);
+  const [bundlePrices, setBundlePrices] = useState<any[]>([]);
 
   const status = statusForProduct(product);
   const items = useMemo(
@@ -57,6 +63,11 @@ export default function ProductDetail({
     () => v2.variants.filter(v => itemIds.has(String(v.item_id)) && !v.is_deleted),
     [v2.variants, itemIds]
   );
+  // Bulk price edit: every variant prefilled with its live price.
+  const priceRows = useMemo(
+    () => unpricedVariantRows(v2.items, v2.variants, v2.variantPrices, [product], undefined, true),
+    [v2.items, v2.variants, v2.variantPrices, product]
+  );
   const batches = useMemo(
     () => v2.batches.filter(b => itemIds.has(String(b.item_id)) && !b.is_deleted)
       .sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? ""))),
@@ -66,6 +77,20 @@ export default function ProductDetail({
     const ids = new Set(catIds);
     return categories.filter(c => ids.has(c.id));
   }, [categories, catIds]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const db = await getDb();
+        const [bs, bps] = await Promise.all([
+          db.getAllAsync("SELECT * FROM bundles").catch(() => []),
+          db.getAllAsync("SELECT * FROM bundle_prices").catch(() => []),
+        ]);
+        const vids = new Set(prodVariants.map(v => String(v.id)));
+        setBundles((((bs ?? []) as any[]).filter((b: any) => !b.is_deleted && vids.has(String(b.variant_id)))));
+        setBundlePrices((((bps ?? []) as any[]).filter((p: any) => !p.is_deleted)) as any[]);
+      } catch { setBundles([]); setBundlePrices([]); }
+    })();
+  }, [product.id, v2.variants]);
   const supName = (id: string) => supplierList.find(s => s.id === id)?.name ?? "—";
   const itemName = (id: string) => v2.items.find(i => i.id === id)?.name ?? "?";
   const baseCost = getBaseCost(product.id);
@@ -83,21 +108,28 @@ export default function ProductDetail({
       try { await insertOutbox("products", "update", { id: product.id, low_stock_threshold: v, updated_at: now, is_deleted: 0 }); } catch {}
       setLowInput(null);
       onChanged();
-      Alert.alert("Seuil mete ajou ✓", `${v}`);
+      uploadSuccess("Seuil mete ajou ✓", `${v}`);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Sove seuil echwe");
+      uploadError("Erè", e?.message ?? "Sove seuil echwe");
     } finally {
       setSavingLow(false);
     }
   }
 
-  async function doDelete(onDelete: (pid: string) => Promise<void>) {
+  // Fastest toggle: one tap on the pill flips AKTIF/ETEIN (no edit panel).
+  async function toggleBundle(b: any) {
+    if (!canEdit) return;
     try {
-      await onDelete(product.id);
-      setConfirmDelete(false);
-      onDeleted();
+      const db = await getDb();
+      const now = new Date().toISOString();
+      const next = !(b.active === 0 || b.active === false) ? 0 : 1;
+      await db.runAsync("UPDATE bundles SET active = ?, updated_at = ?, dirty = 1 WHERE id = ?",
+        [next, now, String(b.id)]);
+      try { await insertOutbox("bundles", "update", { id: String(b.id), active: next, updated_at: now, is_deleted: false }); } catch {}
+      setBundles(prev => prev.map(x => String(x.id) === String(b.id) ? { ...x, active: next } : x));
+      onChanged();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Efase pwodwi echwe");
+      uploadError("Erè", e?.message ?? "Chanje bundle echwe");
     }
   }
 
@@ -183,8 +215,7 @@ export default function ProductDetail({
                 const it = v2.items.find(i => i.id === v.item_id);
                 return (
                   <View key={v.id} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 9, borderBottomWidth: 0.5, borderColor: "#262626" }}>
-                    <Text style={{ fontSize: 11, fontWeight: "700", color: "#8e8e93" }}>{it?.name ?? "?"}</Text>
-                    <Text style={{ fontSize: 12, fontWeight: "600", color: "#fff", flex: 1 }}>{v.name}</Text>
+                    <Text style={{ fontSize: 12, fontWeight: "600", color: "#fff", flex: 1 }} numberOfLines={1}>{formatCheckoutRow(it?.name, product.name, v.name)}</Text>
                     <Text style={{ fontSize: 12, fontWeight: "800", color: "#fff" }}>{cur ? fmtG(Number(cur.price)) : "—"}</Text>
                   </View>
                 );
@@ -192,8 +223,50 @@ export default function ProductDetail({
             </View>
           )}
           {canEdit ? (
-            <Pressable onPress={() => onManage(product.id, "prices")} style={{ marginTop: 10, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
+            <Pressable onPress={() => setShowPrices(true)} style={{ marginTop: 10, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
               <Text style={{ fontWeight: "700", fontSize: 12, color: "#fff" }}>Jere pri →</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        {/* Bundles */}
+        <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: 16, padding: 14 }}>
+          <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Bundle (of espesyal)</Text>
+          {bundles.length ? (
+            <View style={{ marginTop: 4, borderTopWidth: 0.5, borderColor: "#262626" }}>
+              {bundles.map(b => {
+                const v = prodVariants.find(x => String(x.id) === String(b.variant_id));
+                const live = currentBundlePrice(bundlePrices, String(b.id));
+                const isActive = !(b.active === 0 || b.active === false);
+                return (
+                  <View key={String(b.id)} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 9, borderBottomWidth: 0.5, borderColor: "#262626", opacity: isActive ? 1 : 0.55 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 12, fontWeight: "700", color: "#fff" }} numberOfLines={1}>
+                        {formatCheckoutRow(itemName(String(v?.item_id ?? "")), product.name, v?.name ?? null)}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }}>
+                        min {fmtG(Number(b.min_quantity) || 0)} → {live ? fmtG(Number(live.price)) : "—"}
+                      </Text>
+                    </View>
+                    {canEdit ? (
+                      <Pressable onPress={() => toggleBundle(b)} style={{ backgroundColor: isActive ? "rgba(76,174,127,0.12)" : "transparent", borderWidth: 1, borderColor: isActive ? "rgba(76,174,127,0.35)" : "#3a3a3c", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 }}>
+                        <Text style={{ fontSize: 10, fontWeight: "800", color: isActive ? "#4cae7f" : "#8e8e93" }}>{isActive ? "AKTIF" : "ETEIN"}</Text>
+                      </Pressable>
+                    ) : (
+                      <View style={{ backgroundColor: isActive ? "rgba(76,174,127,0.12)" : "transparent", borderWidth: 1, borderColor: isActive ? "rgba(76,174,127,0.35)" : "#3a3a3c", borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 }}>
+                        <Text style={{ fontSize: 10, fontWeight: "800", color: isActive ? "#4cae7f" : "#8e8e93" }}>{isActive ? "AKTIF" : "ETEIN"}</Text>
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 8 }}>Poko gen bundle.</Text>
+          )}
+          {canEdit ? (
+            <Pressable onPress={() => onManage(product.id, "bundles")} style={{ marginTop: 10, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
+              <Text style={{ fontWeight: "700", fontSize: 12, color: "#fff" }}>Jere bundle →</Text>
             </Pressable>
           ) : null}
         </View>
@@ -248,7 +321,7 @@ export default function ProductDetail({
                 <View key={b.id} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 9, borderBottomWidth: 0.5, borderColor: "#262626" }}>
                   <View style={{ flex: 1 }}>
                     <Text style={{ fontSize: 12, fontWeight: "700", color: "#fff" }} numberOfLines={1}>{itemName(String(b.item_id))} · {fmtG(Number(b.quantity))}</Text>
-                    <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{supName(String(b.supplier_id))} · {b.date} · {b.status}</Text>
+                    <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{supName(String(b.supplier_id))} · {b.date} · {String(b.status) === "received" ? "RISEVWA" : String(b.status) === "denied" ? "REFIZE" : "AP TANN"}</Text>
                   </View>
                   <Text style={{ fontSize: 12, fontWeight: "800", color: "#fff" }}>{fmtG(Number(b.total_paid))}</Text>
                 </View>
@@ -264,27 +337,13 @@ export default function ProductDetail({
           ) : null}
         </View>
 
-        {/* Danger */}
-        {canDelete ? (
-          <Pressable
-            onPress={async () => {
-              if (!confirmDelete) {
-                setConfirmDelete(true);
-                return;
-              }
-              try {
-                await onDeleteProduct(product.id);
-                setConfirmDelete(false);
-                onDeleted();
-              } catch (e: any) {
-                Alert.alert("Erè", e?.message ?? "Efase pwodwi echwe");
-              }
-            }}
-            style={{ backgroundColor: confirmDelete ? "#c0392b" : "transparent", borderWidth: 1, borderColor: confirmDelete ? "#c0392b" : "rgba(192,57,43,0.5)", paddingVertical: 13, borderRadius: 12, alignItems: "center" }}
-          >
-            <Text style={{ color: confirmDelete ? "#fff" : "#e06c5b", fontWeight: "600", fontSize: 13 }}>{confirmDelete ? "✓ Konfime efase kounye a" : "Efase pwodwi"}</Text>
-          </Pressable>
-        ) : null}
+        <MissingPricesSheet
+          visible={showPrices}
+          onClose={() => setShowPrices(false)}
+          rows={priceRows}
+          onSaved={() => { setShowPrices(false); onChanged(); }}
+        />
+
       </ScrollView>
     </View>
   );

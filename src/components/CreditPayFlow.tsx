@@ -40,7 +40,7 @@ export function CreditPayFlow({ visible, due, onClose, onPay, onSuccess, inline 
       const res = await minDelay(onPay(amount), 2000);
       setPhase("success");
       setStatusMsg(`${fmtG(Math.round(amount))} • Resi ${res.receipt}`);
-      await new Promise(r => setTimeout(r, 3500));
+      await new Promise(r => setTimeout(r, 1500));
       setBusy(false);
       onSuccess({ amount, receipt: res.receipt, finalBalance: res.finalBalance });
     } catch (e: any) {

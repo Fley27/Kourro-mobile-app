@@ -13,6 +13,8 @@ import * as Contacts from "expo-contacts";
 import COUNTRIES from "../data/countries.json";
 import DEPARTMENTS from "../data/haitiDepartments.json";
 import DIALS from "../data/countryDial.json";
+import { MaskedTextInput, countDigits, indexAfterDigits } from "./maskedInput";
+import { normalizePhoneInput, formatPhoneDigits } from "../phoneFormat";
 
 export type CustomerFormData = {
   firstName: string;
@@ -161,7 +163,7 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 type Opt = { code: string; name: string };
 
-function DarkDropdown(props: {
+export function DarkDropdown(props: {
   label: string;
   value: string;
   options: Opt[];
@@ -213,7 +215,7 @@ function DarkDropdown(props: {
 }
 
 // Country picker with flag + dial code, Haiti first, searchable.
-function CountryDialPicker({ visible, onClose, onPick, title }: {
+export function CountryDialPicker({ visible, onClose, onPick, title }: {
   visible: boolean;
   onClose: () => void;
   onPick: (iso: string) => void;
@@ -255,6 +257,39 @@ function CountryDialPicker({ visible, onClose, onPick, title }: {
         </View>
       </View>
     </Modal>
+  );
+}
+
+// Shared phone row: tappable flag (opens CountryDialPicker) + number input
+// that MASKS to the selected country's plan while you type (see phoneFormat).
+// Used by CustomerForm and the supplier sheet so both forms collect the phone
+// the same way — state keeps digits only, the ISO country drives the mask.
+export function PhoneField({ value, onChange, country, onPressFlag, placeholder = "Phone number" }: {
+  value: string;
+  onChange: (v: string) => void;
+  country: string;
+  onPressFlag: () => void;
+  placeholder?: string;
+}) {
+  return (
+    <View style={{ marginBottom: 12, flexDirection: "row", alignItems: "center", backgroundColor: BOX, borderWidth: 1, borderColor: HAIR, borderRadius: 12, height: 60, paddingHorizontal: 8 }}>
+      <Pressable onPress={onPressFlag} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 8, height: 60, justifyContent: "center" }}>
+        <Text style={{ fontSize: 24 }}>{flagOf(country || "HT")}</Text>
+        <Ionicons name="chevron-down" size={18} color={MUTED} style={{ marginLeft: 6 }} />
+      </Pressable>
+      <MaskedTextInput
+        value={value}
+        onChangeText={onChange}
+        normalize={normalizePhoneInput}
+        format={raw => formatPhoneDigits(raw, country || "HT")}
+        countSig={countDigits}
+        indexAfterSig={indexAfterDigits}
+        keyboardType="phone-pad"
+        placeholder={placeholder}
+        placeholderTextColor={MUTED}
+        style={{ flex: 1, fontSize: 16, color: INK, height: 58, paddingHorizontal: 6 }}
+      />
+    </View>
   );
 }
 
@@ -355,20 +390,12 @@ export default function CustomerForm({ initial, onState }: {
         <TextInput value={d.lastName} onChangeText={set("lastName")} placeholder="Last name" placeholderTextColor={MUTED} style={darkInput()} />
       </View>
 
-      <View style={{ marginBottom: 12, flexDirection: "row", alignItems: "center", backgroundColor: BOX, borderWidth: 1, borderColor: HAIR, borderRadius: 12, height: 60, paddingHorizontal: 8 }}>
-        <Pressable onPress={() => setDialOpen("phone")} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 8, height: 60, justifyContent: "center" }}>
-          <Text style={{ fontSize: 24 }}>{flagOf(phoneIso)}</Text>
-          <Ionicons name="chevron-down" size={18} color={MUTED} style={{ marginLeft: 6 }} />
-        </Pressable>
-        <TextInput
-          value={d.phone}
-          onChangeText={v => set("phone")(v.replace(/[^0-9+ ]/g, ""))}
-          keyboardType="phone-pad"
-          placeholder="Phone number"
-          placeholderTextColor={MUTED}
-          style={{ flex: 1, fontSize: 16, color: INK, height: 58, paddingHorizontal: 6 }}
-        />
-      </View>
+      <PhoneField
+        value={d.phone}
+        onChange={v => set("phone")(v)}
+        country={phoneIso}
+        onPressFlag={() => setDialOpen("phone")}
+      />
 
       <View style={{ marginBottom: 12 }}>
         <TextInput value={d.email} onChangeText={set("email")} keyboardType="email-address" autoCapitalize="none" autoCorrect={false} placeholder="Email address" placeholderTextColor={MUTED} style={darkInput()} />

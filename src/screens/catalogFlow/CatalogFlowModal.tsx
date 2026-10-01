@@ -13,8 +13,9 @@ import ItemsStep from "./ItemsStep";
 import BatchStep from "./BatchStep";
 import VariantsStep from "./VariantsStep";
 import PricesStep from "./PricesStep";
+import BundlesStep from "./BundlesStep";
 
-export type StepKey = "product" | "items" | "batch" | "variants" | "prices";
+export type StepKey = "product" | "items" | "batch" | "variants" | "prices" | "bundles";
 
 const CREATE_STEPS: { key: StepKey; label: string }[] = [
   { key: "product", label: "Pwodwi" },
@@ -30,6 +31,7 @@ const MANAGE_SECTIONS: { key: StepKey; label: string; sub: string; icon: string 
   { key: "variants", label: "Variant", sub: "Fason yo vann", icon: "layers-outline" },
   { key: "batch", label: "Batch", sub: "Pri acha, resevwa, refize", icon: "archive-outline" },
   { key: "prices", label: "Pri", sub: "Pri pa dat efektif", icon: "cash-outline" },
+  { key: "bundles", label: "Bundle", sub: "Of espesyal (3 pou 500)", icon: "gift-outline" },
 ];
 
 export default function CatalogFlowModal({
@@ -124,7 +126,7 @@ export default function CatalogFlowModal({
       })(), 1500);
       setUpPhase("success");
       setUpMsg(productName ? `${productName} • anrejistre` : "Pwodwi anrejistre");
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1500));
       setUpBusy(false);
       finishedRef.current = true;
       onDone();
@@ -190,9 +192,9 @@ export default function CatalogFlowModal({
               else close();
             }}
             accessibilityLabel="Back"
-            style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "#F2F2F7", alignItems: "center", justifyContent: "center" }}
+            style={{ width: 50, height: 50, alignItems: "center", justifyContent: "center" }}
           >
-            <Ionicons name={manage && manageSection ? "chevron-back" : !manage && stepIdx > 0 ? "chevron-back" : "close"} size={22} color="#000" />
+            <Ionicons name={manage && manageSection ? "chevron-back" : !manage && stepIdx > 0 ? "chevron-back" : "close"} size={manage && manageSection ? 22 : !manage && stepIdx > 0 ? 22 : 30} color="#fff" />
           </Pressable>
           <View style={{ flex: 1, alignItems: "center" }}>
             <Text style={{ fontWeight: "800", fontSize: 20, color: "#fff" }} numberOfLines={1}>
@@ -245,6 +247,8 @@ export default function CatalogFlowModal({
             <BatchStep {...stepProps} />
           ) : manageSection === "variants" ? (
             <VariantsStep {...stepProps} serviceMode={flowType === "service"} />
+          ) : manageSection === "bundles" ? (
+            <BundlesStep {...stepProps} />
           ) : (
             <PricesStep {...stepProps} />
           )
@@ -253,6 +257,7 @@ export default function CatalogFlowModal({
             <View style={{ flex: 1, display: step.key === "product" ? "flex" : "none" }}>
               <ProductStep
                 ctx={ctx}
+                productId={productId}
                 onDirtyChange={setStepDirty}
                 registerNext={registerNext}
                 active={step.key === "product"}

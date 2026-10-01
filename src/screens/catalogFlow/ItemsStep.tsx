@@ -14,18 +14,18 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { getDb, insertOutbox } from "../../db";
+import { getDb, insertOutbox, recomputeItemCosts } from "../../db";
 import type { Item } from "../../catalogModel";
 import { baseItem, isItemLocked, itemDescendants as descendantsOf } from "../../catalogModel";
+import { itemCostsFor } from "../../analytics/metrics";
 import type { FlowCtx } from "./types";
 import { canManageCatalog, slugifyName, uniqueId } from "./types";
 
-type Relation = "bigger" | "smaller";
+import { ratioForUnit as ratioFor, stagedDescendantsOfPool, UnitRefPicker, UnitRelationRow, type UnitRelation } from "./StepForms";
+import { fmtG } from "../../format";
+import { uploadError } from "../../components/UploadTransition";
 
-const RELATIONS: { key: Relation; label: string }[] = [
-  { key: "bigger", label: "Pi gwo" },
-  { key: "smaller", label: "Pi piti" },
-];
+type Relation = UnitRelation;
 
 function fmtNum(n: number): string {
   const r = Math.round(n * 1000) / 1000;
@@ -52,11 +52,6 @@ type Staged = {
   qty: string;
 };
 
-function ratioFor(rel: Relation, q: number): number {
-  if (rel === "bigger") return q;
-  return 1 / q;
-}
-
 export default function ItemsStep({
   ctx, productId, productName, stageMode, registerNext, onNext, onBack,
   active: stepActive = true,
@@ -74,7 +69,14 @@ export default function ItemsStep({
 }) {
   const [items, setItems] = useState<Item[]>([]);
   const [batches, setBatches] = useState<any[]>([]);
+  const [costRows, setCostRows] = useState<any[]>([]);
   const [variants, setVariants] = useState<any[]>([]);
+  // Purchase cost — required: a product whose containers have no cost at all
+  // cannot save anything until the owner types one (it anchors the chain).
+  const [costInput, setCostInput] = useState("");
+  const [costTouched, setCostTouched] = useState(false);
+  // Cost entered before the product has its first item yet (create flow).
+  const [pendingCost, setPendingCost] = useState<number | null>(null);
   // Open form fields.
   const [name, setName] = useState("");
   const [refId, setRefId] = useState<string | null>(null);
@@ -100,18 +102,21 @@ export default function ItemsStep({
     try {
       if (!productId) return;
       const db = await getDb();
-      const [its, bs, vs] = await Promise.all([
+      const [its, bs, vs, cs] = await Promise.all([
         db.getAllAsync("SELECT * FROM items WHERE product_id = ?", [productId]).catch(() => []),
-        db.getAllAsync("SELECT id, item_id FROM batches").catch(() => []),
+        // Full rows: itemCostsFor needs quantity/total_paid/status, not just ids.
+        db.getAllAsync("SELECT * FROM batches").catch(() => []),
         db.getAllAsync("SELECT id, item_id FROM variants").catch(() => []),
+        db.getAllAsync("SELECT * FROM product_supplier_costs WHERE product_id = ?", [productId]).catch(() => []),
       ]);
       const list = (((its ?? []) as any[]).filter((i: any) => !i.is_deleted) as Item[])
         .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
       setItems(list);
       setBatches((bs ?? []) as any[]);
+      setCostRows((cs ?? []) as any[]);
       setVariants((vs ?? []) as any[]);
       // On-demand form: rows exist → form stays hidden until "+ ajoute".
-      if (stageMode && list.length > 0) setFormOpen(false);
+      if (list.length > 0) setFormOpen(false);
       const base = baseItem(list);
       if (!refId && base) setRefId(base.id);
     } catch {}
@@ -130,18 +135,57 @@ export default function ItemsStep({
 
   const isPrivileged = ctx.role === "owner" || ctx.role === "admin";
 
-  function stagedDescendantsOf(key: string): Set<string> {
-    const out = new Set<string>();
-    const walk = (k: string) => {
-      for (const s of staged) {
-        if (s.refKey === k && !out.has(s.key)) {
-          out.add(s.key);
-          walk(s.key);
-        }
+  // The product's cost map — the exact maths the analytics screen reads
+  // (own batch, else supplier quote, else stored cost, then the ratio chain).
+  const costs = useMemo(() => itemCostsFor(items, batches, costRows), [items, batches, costRows]);
+  // Not one container of this product is priced yet → the owner has to type a
+  // purchase cost; it anchors the chain and every sibling inherits from it.
+  const needsCost = pendingCost == null && !items.some(i => Number(costs.get(String(i.id)) ?? 0) > 0);
+  const costValue = parseFloat(String(costInput).replace(/[^\d.]/g, "")) || 0;
+  const costError = needsCost && costTouched && !(costValue > 0)
+    ? "Bay kout acha a (G) — obligatwa."
+    : "";
+
+  /** Hard gate: while the product has no cost at all, nothing may save. */
+  function costBlock(): boolean {
+    if (!needsCost) return false;
+    setCostTouched(true);
+    Alert.alert("Pa gen pri acha", "Chak inite dwe gen yon kout acha. Bay kout la anvan kontinye.");
+    return true;
+  }
+
+  /** Store the typed cost: onto the first item when one exists, otherwise
+   *  held for the first item this step writes (create flow). */
+  async function saveManualCost() {
+    if (!(costValue > 0)) { setCostTouched(true); return; }
+    if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
+    setBusy(true);
+    try {
+      const db = await getDb();
+      const now = new Date().toISOString();
+      const target = items[0];
+      if (target) {
+        await db.runAsync("UPDATE items SET cost = ?, updated_at = ?, dirty = 1 WHERE id = ?", [costValue, now, target.id]);
+        try {
+          await insertOutbox("items", "update", {
+            id: target.id, product_id: String(target.product_id), name: String(target.name ?? ""),
+            ref_item_id: target.ref_item_id ?? null, ratio: target.ratio ?? null,
+            sort_order: Number(target.sort_order ?? 0), cost: costValue,
+            created_at: target.created_at ?? now, updated_at: now, is_deleted: false,
+          });
+        } catch {}
+        await recomputeItemCosts(db, productId);
+      } else {
+        setPendingCost(costValue);
       }
-    };
-    walk(key);
-    return out;
+      setCostInput(""); setCostTouched(false);
+      await load();
+      ctx.reload();
+    } catch (e: any) {
+      uploadError("Erè", e?.message ?? "Kout acha a pa sove");
+    } finally {
+      setBusy(false);
+    }
   }
 
   function refName(refIdVal: string | null, refKeyVal: string | null): string {
@@ -168,7 +212,7 @@ export default function ItemsStep({
       if (!(parseFloat(c.qty) > 0)) return "Bay kantite a — konbyen (ex. 9).";
       if (c.refKey) {
         // No cycles through staged rows.
-        const downs = stagedDescendantsOf(c.key ?? "");
+        const downs = stagedDescendantsOfPool(staged, c.key ?? "");
         if (downs.has(c.refKey)) return "Referans sikilè pa pèmèt.";
       }
     }
@@ -194,7 +238,8 @@ export default function ItemsStep({
   async function insertStagedRow(
     db: any, now: string, taken: Set<string>, order: number,
     s: { name: string; refId: string | null; refKey: string | null; relation: Relation; qty: string },
-    keyToId: Map<string, string>
+    keyToId: Map<string, string>,
+    cost?: number | null
   ): Promise<string> {
     const id = uniqueId("item", taken, `${productId}-${slugifyName(s.name.trim()) || "u"}`);
     const refItemId = s.refKey ? keyToId.get(s.refKey) ?? null : s.refId;
@@ -204,11 +249,11 @@ export default function ItemsStep({
       id, product_id: productId, name: s.name.trim(),
       ref_item_id: order === 0 && !s.refId && !s.refKey ? null : refItemId,
       ratio: order === 0 && !s.refId && !s.refKey ? null : ratioFor(s.relation, q),
-      sort_order: order, created_at: now, updated_at: now, is_deleted: 0,
+      sort_order: order, cost: Number(cost) || 0, created_at: now, updated_at: now, is_deleted: 0,
     };
     await db.runAsync(
-      "INSERT OR REPLACE INTO items (id, product_id, name, ref_item_id, ratio, sort_order, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      [rec.id, rec.product_id, rec.name, rec.ref_item_id, rec.ratio, rec.sort_order, rec.created_at, rec.updated_at, 0, 1]
+      "INSERT OR REPLACE INTO items (id, product_id, name, ref_item_id, ratio, sort_order, cost, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      [rec.id, rec.product_id, rec.name, rec.ref_item_id, rec.ratio, rec.sort_order, rec.cost, rec.created_at, rec.updated_at, 0, 1]
     );
     try { await insertOutbox("items", "create", { ...rec, is_deleted: false }); } catch {}
     return id;
@@ -294,6 +339,7 @@ export default function ItemsStep({
     }
     if (busy) return;
     if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
+    if (costBlock()) return;
     setBusy(true);
     try {
       const db = await getDb();
@@ -302,14 +348,21 @@ export default function ItemsStep({
       const ordered = orderStaged(pending);
       const keyToId = new Map<string, string>();
       let order = items.length;
+      let first = true;
       for (const s of ordered) {
         // First-ever item (no saved, first staged, no ref) becomes base.
         const isFirstEver = items.length === 0 && order === 0 && !s.refId && !s.refKey;
         const id = await insertStagedRow(db, now, taken, isFirstEver ? 0 : order,
-          isFirstEver ? { ...s, refId: null, refKey: null } : s, keyToId);
+          isFirstEver ? { ...s, refId: null, refKey: null } : s, keyToId,
+          // A cost typed before the first item existed anchors this chain.
+          first ? pendingCost : null);
         keyToId.set(s.key, id);
         order++;
+        first = false;
       }
+      if (pendingCost != null) setPendingCost(null);
+      // Chain the product's known cost into whatever was just written.
+      try { await recomputeItemCosts(db, productId); } catch {}
       setStaged([]);
       setFormOpen(true);
       resetForm();
@@ -317,7 +370,7 @@ export default function ItemsStep({
       ctx.reload();
       onNext?.();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Anrejistre inite echwe");
+      uploadError("Erè", e?.message ?? "Anrejistre inite echwe");
     } finally {
       setBusy(false);
     }
@@ -329,6 +382,7 @@ export default function ItemsStep({
     void err;
     if (!openValid || busy) { setTouched(true); if (openError) Alert.alert("Enkonplè", openError); return; }
     if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
+    if (costBlock()) return;
     setBusy(true);
     try {
       const db = await getDb();
@@ -341,18 +395,21 @@ export default function ItemsStep({
         id, product_id: productId, name: name.trim(),
         ref_item_id: first ? null : refId,
         ratio: first ? null : ratioFor(relation, q),
-        sort_order: items.length, created_at: now, updated_at: now, is_deleted: 0,
+        sort_order: items.length, cost: Number(pendingCost) || 0,
+        created_at: now, updated_at: now, is_deleted: 0,
       };
       await db.runAsync(
-        "INSERT OR REPLACE INTO items (id, product_id, name, ref_item_id, ratio, sort_order, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        [rec.id, rec.product_id, rec.name, rec.ref_item_id, rec.ratio, rec.sort_order, rec.created_at, rec.updated_at, 0, 1]
+        "INSERT OR REPLACE INTO items (id, product_id, name, ref_item_id, ratio, sort_order, cost, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [rec.id, rec.product_id, rec.name, rec.ref_item_id, rec.ratio, rec.sort_order, rec.cost, rec.created_at, rec.updated_at, 0, 1]
       );
       try { await insertOutbox("items", "create", { ...rec, is_deleted: false }); } catch {}
+      if (pendingCost != null) setPendingCost(null);
+      try { await recomputeItemCosts(db, productId); } catch {}
       setName(""); setQty(""); setTouched(false);
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Kreye inite echwe");
+      uploadError("Erè", e?.message ?? "Kreye inite echwe");
     } finally {
       setBusy(false);
     }
@@ -433,6 +490,7 @@ export default function ItemsStep({
     if (!editingItem) return;
     if (!editValid) { setEditTouched(true); if (editError) Alert.alert("Enkonplè", editError); return; }
     if (editLocked && !editOverride) { setEditTouched(true); return; }
+    if (costBlock()) return;
     setBusy(true);
     try {
       const db = await getDb();
@@ -443,12 +501,20 @@ export default function ItemsStep({
       const newRatio = keepRef ? null : ratioFor(editRelation, q);
       await db.runAsync("UPDATE items SET name = ?, ref_item_id = ?, ratio = ?, updated_at = ?, dirty = 1 WHERE id = ?",
         [editName.trim(), newRef, newRatio, now, editingItem.id]);
-      try { await insertOutbox("items", "update", { id: editingItem.id, product_id: productId, name: editName.trim(), ref_item_id: newRef, ratio: newRatio, updated_at: now, is_deleted: 0 }); } catch {}
+      try {
+        await insertOutbox("items", "update", {
+          id: editingItem.id, product_id: productId, name: editName.trim(),
+          ref_item_id: newRef, ratio: newRatio, sort_order: Number(editingItem.sort_order ?? 0),
+          cost: Number(editingItem.cost ?? 0), updated_at: now, is_deleted: false,
+        });
+      } catch {}
+      // A new relation re-prices the chain (ratio changed) — republish.
+      try { await recomputeItemCosts(db, productId); } catch {}
       setEditingId(null);
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete inite ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete inite ajou echwe");
     } finally {
       setBusy(false);
     }
@@ -468,63 +534,7 @@ export default function ItemsStep({
   const hasAnyTarget = items.length > 0 || staged.length > 0;
   useEffect(() => { if (stepActive) registerNext?.(saveStagedAndContinue); });
 
-  function refPicker(
-    valueId: string | null, valueKey: string | null,
-    onPickId: (id: string | null) => void, onPickKey: (key: string | null) => void,
-    excludeStagedKey: string | null, enabled: boolean,
-    stagedPool: Staged[]
-  ) {
-    const downs = excludeStagedKey ? stagedDescendantsOf(excludeStagedKey) : new Set<string>();
-    return (
-      <View style={{ gap: 8, opacity: enabled ? 1 : 0.5 }}>
-        <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>REFERANS</Text>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          {items.map(it => {
-            const active = valueId === it.id && !valueKey;
-            return (
-              <Pressable key={it.id} disabled={!enabled} onPress={() => { setTouched(true); setEditTouched(true); onPickId(active ? null : it.id); onPickKey(null); }}
-                style={{ paddingHorizontal: 13, paddingVertical: 9, borderRadius: 999, backgroundColor: active ? "#fff" : "transparent", borderWidth: 1, borderColor: active ? "#fff" : "#2b2b2b" }}>
-                <Text style={{ fontWeight: "600", fontSize: 12, color: active ? "#000" : "#fff" }}>{it.name}</Text>
-              </Pressable>
-            );
-          })}
-          {stagedPool.filter(s => s.key !== excludeStagedKey && !downs.has(s.key)).map(s => {
-            const active = valueKey === s.key;
-            return (
-              <Pressable key={s.key} disabled={!enabled} onPress={() => { setTouched(true); setEditTouched(true); onPickKey(active ? null : s.key); onPickId(null); }}
-                style={{ paddingHorizontal: 13, paddingVertical: 9, borderRadius: 999, backgroundColor: active ? "#fff" : "transparent", borderWidth: 1, borderColor: active ? "#fff" : "#2b2b2b", borderStyle: "dashed" }}>
-                <Text style={{ fontWeight: "600", fontSize: 12, color: active ? "#000" : "#fff" }}>{s.name} (nouvo)</Text>
-              </Pressable>
-            );
-          })}
-        </View>
-      </View>
-    );
-  }
-
-  function relationRow(
-    rel: Relation, setRel: (r: Relation) => void,
-    qv: string, setQv: (v: string) => void,
-    enabled: boolean
-  ) {
-    return (
-      <View style={{ gap: 8, opacity: enabled ? 1 : 0.5 }}>
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          {RELATIONS.map(r => {
-            const active = rel === r.key;
-            return (
-              <Pressable key={r.key} disabled={!enabled} onPress={() => { setTouched(true); setEditTouched(true); setRel(r.key); }}
-                style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: active ? "#fff" : "#2b2b2b", backgroundColor: active ? "#fff" : "transparent", alignItems: "center" }}>
-                <Text style={{ fontWeight: "700", fontSize: 12, color: active ? "#000" : "#fff" }}>{r.label}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
-        <TextInput value={qv} onChangeText={v => { setTouched(true); setEditTouched(true); setQv(v.replace(/[^0-9.]/g, "")); }} placeholder="Konbyen (ex. 9)" placeholderTextColor="#636366" keyboardType="numeric" editable={enabled}
-          style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 14, color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
-      </View>
-    );
-  }
+  const touchBoth = () => { setTouched(true); setEditTouched(true); };
 
   const formPreview = (() => {
     const q = parseFloat(qty) || 0;
@@ -539,6 +549,31 @@ export default function ItemsStep({
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {productName ? <Text style={{ fontSize: 12, color: "#8e8e93" }}>{productName} · {items.length + staged.length} inite</Text> : null}
 
+      {/* Hard gate: a product with no purchase cost anywhere must get one
+          before anything here can be saved or uploaded. */}
+      {needsCost ? (
+        <View style={{ borderWidth: 1, borderColor: "#f0a63c", borderRadius: 16, padding: 14, gap: 10, backgroundColor: "rgba(240,166,60,0.08)" }}>
+          <Text style={{ fontWeight: "800", fontSize: 13, color: "#f0a63c" }}>Kout acha obligatwa</Text>
+          <Text style={{ fontSize: 12, color: "#9a9a9e", lineHeight: 17 }}>
+            Okenn inite nan pwodui sa a pa gen pri acha ankò. Bay kout 1 inite a (G) — tout lòt inite yo ap pran pri l nan rapò a.
+          </Text>
+          <TextInput
+            value={costInput}
+            onChangeText={v => { setCostTouched(true); setCostInput(v); }}
+            placeholder="ex. 4350" placeholderTextColor="#636366" keyboardType="decimal-pad"
+            style={{ height: 56, borderWidth: 1, borderColor: costError ? "#e06c5b" : "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 15, color: "#fff", backgroundColor: "transparent" }}
+          />
+          {costError ? <Text style={{ fontSize: 12, color: "#e06c5b" }}>{costError}</Text> : null}
+          <Pressable
+            onPress={saveManualCost}
+            disabled={busy}
+            style={{ paddingVertical: 13, borderRadius: 12, backgroundColor: costValue > 0 && !busy ? "#f0a63c" : "#2b2b2b", alignItems: "center" }}
+          >
+            <Text style={{ fontWeight: "800", fontSize: 13, color: costValue > 0 && !busy ? "#000" : "#636366" }}>Sove kout la</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       {/* Saved rows — tap pencil for the FULL unit form */}
       {items.map(it => {
         const isEditing = editingId === it.id;
@@ -549,7 +584,10 @@ export default function ItemsStep({
               <Pressable onPress={() => openEdit(it)} style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }} numberOfLines={1}>{it.name}</Text>
-                  <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{itemRelationLine(items, it)}{isLocked ? " • 🔒" : ""}</Text>
+                  <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>
+                    {itemRelationLine(items, it)}{isLocked ? " • 🔒" : ""}
+                    {" · Kout "}{Number(costs.get(String(it.id)) ?? 0) > 0 ? fmtG(Number(costs.get(String(it.id)) ?? 0)) : "—"}
+                  </Text>
                 </View>
                 <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
                   <Ionicons name="pencil" size={17} color="#fff" />
@@ -562,8 +600,8 @@ export default function ItemsStep({
                   style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
                 {(editingItem?.ref_item_id || items.length > 1) && (
                   <>
-                    {refPicker(editRefId, null, v => setEditRefId(v), () => {}, null, ratioEditable, [])}
-                    {relationRow(editRelation, setEditRelation, editQty, setEditQty, ratioEditable)}
+                    <UnitRefPicker saved={items} staged={[]} valueId={editRefId} valueKey={null} onPickId={v => setEditRefId(v)} onPickKey={() => {}} excludeStagedKey={null} enabled={ratioEditable} markTouched={touchBoth} />
+                    <UnitRelationRow relation={editRelation} setRelation={setEditRelation} qty={editQty} setQty={setEditQty} enabled={ratioEditable} markTouched={touchBoth} />
                   </>
                 )}
                 {isLocked && !editOverride && isPrivileged ? (
@@ -612,8 +650,8 @@ export default function ItemsStep({
                 <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Modifye inite (poko sove)</Text>
                 <TextInput value={seName} onChangeText={v => { setSeTouched(true); setSeName(v); }} placeholderTextColor="#636366"
                   style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
-                {refPicker(seRefId, seRefKey, v => setSeRefId(v), k => setSeRefKey(k), s.key, true, staged)}
-                {relationRow(seRelation, setSeRelation, seQty, setSeQty, true)}
+                <UnitRefPicker saved={items} staged={staged} valueId={seRefId} valueKey={seRefKey} onPickId={v => setSeRefId(v)} onPickKey={k => setSeRefKey(k)} excludeStagedKey={s.key} enabled markTouched={touchBoth} />
+                <UnitRelationRow relation={seRelation} setRelation={setSeRelation} qty={seQty} setQty={setSeQty} enabled markTouched={touchBoth} />
                 {seTouched && seError ? <Text style={{ fontSize: 12, color: "#e06c5b" }}>{seError}</Text> : null}
                 <View style={{ flexDirection: "row", gap: 8 }}>
                   <Pressable onPress={() => removeStaged(s.key)} style={{ flex: 1, paddingVertical: 12, borderRadius: 12, borderWidth: 1, borderColor: "rgba(192,57,43,0.5)", alignItems: "center" }}>
@@ -629,16 +667,16 @@ export default function ItemsStep({
         );
       })}
 
-      {/* Open form — stageMode hides it until "+ ajoute yon lòt inite" */}
-      {(!stageMode || formOpen) && (
+      {/* Open form — formOpen alone gates it in every mode */}
+      {formOpen && (
         <View style={{ borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 10 }}>
           <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Nouvo inite</Text>
           <TextInput value={name} onChangeText={v => { setTouched(true); setName(v); }} placeholder="Sack, Mamit, Vè" placeholderTextColor="#636366"
             style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
           {hasAnyTarget && (
             <>
-              {refPicker(refId, refKey, v => setRefId(v), k => setRefKey(k), null, true, staged)}
-              {relationRow(relation, setRelation, qty, setQty, true)}
+              <UnitRefPicker saved={items} staged={staged} valueId={refId} valueKey={refKey} onPickId={v => setRefId(v)} onPickKey={k => setRefKey(k)} excludeStagedKey={null} enabled markTouched={touchBoth} />
+              <UnitRelationRow relation={relation} setRelation={setRelation} qty={qty} setQty={setQty} enabled markTouched={touchBoth} />
               {preview ? <Text style={{ fontSize: 12, color: "#8e8e93", fontWeight: "600", textAlign: "center" }}>{preview}</Text> : null}
             </>
           )}
@@ -648,9 +686,9 @@ export default function ItemsStep({
           </Pressable>
         </View>
       )}
-      {stageMode && !formOpen && (
+      {!formOpen && (
         <Pressable onPress={() => setFormOpen(true)} style={{ paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", borderStyle: "dashed", alignItems: "center" }}>
-          <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>+ ajoute yon lòt inite</Text>
+          <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>+ ajoute inite</Text>
         </Pressable>
       )}
 
@@ -659,11 +697,6 @@ export default function ItemsStep({
       )}
       {!registerNext && (
       <View style={{ flexDirection: "row", gap: 10 }}>
-        {onBack ? (
-          <Pressable onPress={onBack} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
-            <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>Retounen</Text>
-          </Pressable>
-        ) : null}
         {onNext ? (
           stageMode ? (
             <Pressable onPress={saveStagedAndContinue} disabled={busy} style={{ flex: 2, paddingVertical: 14, borderRadius: 12, backgroundColor: "#fff", alignItems: "center" }}>

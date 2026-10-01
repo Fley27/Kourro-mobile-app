@@ -3,13 +3,15 @@
 // Prices are never overwritten: a change is a new row (history preserved).
 import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../../db";
 import { fmtG } from "../../format";
 import type { Item, Variant, VariantPrice } from "../../catalogModel";
-import { currentVariantPrice } from "../../catalogModel";
+import { currentVariantPrice, itemFactor, minItemFactor, toCanonicalQty } from "../../catalogModel";
+import { formatCheckoutRow } from "../../labels";
 import type { FlowCtx } from "./types";
 import { canManageCatalog, uniqueId } from "./types";
+import { uploadError } from "../../components/UploadTransition";
+import { MoneyInput } from "../../components/maskedInput";
 
 function todayStr(): string {
   const d = new Date();
@@ -29,24 +31,60 @@ export default function PricesStep({
   /** Create flow: steps stay mounted; only the visible one owns Kontinye. */
   active?: boolean;
 }) {
-  useEffect(() => { if (stepActive) registerNext?.(() => onDone?.()); });
+  useEffect(() => { if (stepActive) registerNext?.(finish); });
+
+  // Transport is cost basis: spread across this product's pending batches
+  // (by weight) before finishing. Blank/0 = skip.
+  async function finish() {
+    const t = parseFloat(transport) || 0;
+    if (t < 0) { Alert.alert("Enkonplè", "Transpò pa ka negatif."); return; }
+    if (t > 0) {
+      if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
+      try {
+        const db = await getDb();
+        const ids = new Set(items.filter(i => !i.is_deleted).map(i => i.id));
+        const pend = (((await db.getAllAsync("SELECT * FROM batches").catch(() => [])) ?? []) as any[])
+          .filter((b: any) => !b.is_deleted && String(b.status) === "pending" && ids.has(String(b.item_id)));
+        if (!pend.length) {
+          Alert.alert("Pa gen batch", "Transpò a pa gen okenn batch pending pou resevwa l — mete l 0 oswa tounen etap Batch.");
+          return;
+        }
+        const now = new Date().toISOString();
+        const total = pend.reduce((s: number, b: any) => s + (Number(b.total_paid) || 0), 0);
+        for (const b of pend) {
+          const shr = Math.round((total > 0 ? t * ((Number(b.total_paid) || 0) / total) : t / pend.length) * 100) / 100;
+          await db.runAsync("UPDATE batches SET total_paid = total_paid + ?, transport_share = transport_share + ?, updated_at = ?, dirty = 1 WHERE id = ?",
+            [shr, shr, now, String(b.id)]);
+          try { await insertOutbox("batches", "update", { id: String(b.id), transport_share_added: shr, updated_at: now, is_deleted: false }); } catch {}
+        }
+        await load();
+        ctx.reload();
+      } catch (e: any) {
+        uploadError("Erè", e?.message ?? "Aplike transpò echwe");
+        return;
+      }
+    }
+    onDone?.();
+  }
   const [items, setItems] = useState<Item[]>([]);
   const [variants, setVariants] = useState<Variant[]>([]);
   const [prices, setPrices] = useState<VariantPrice[]>([]);
-  const [variantId, setVariantId] = useState("");
-  const [price, setPrice] = useState("");
-  const [date, setDate] = useState(todayStr());
+  const [transport, setTransport] = useState("");
   const [busy, setBusy] = useState(false);
-  const [touched, setTouched] = useState(false);
+  const [prodBatches, setProdBatches] = useState<any[]>([]);
+  // Bulk edit: typed values per variant. Untouched rows display the live
+  // price as a required placeholder — focus blanks it, blur restores it.
+  const [edits, setEdits] = useState<Record<string, string>>({});
 
   async function load() {
     try {
       if (!productId) return;
       const db = await getDb();
-      const [its, vs, ps] = await Promise.all([
+      const [its, vs, ps, bs] = await Promise.all([
         db.getAllAsync("SELECT * FROM items WHERE product_id = ?", [productId]).catch(() => []),
         db.getAllAsync("SELECT * FROM variants").catch(() => []),
         db.getAllAsync("SELECT * FROM variant_prices").catch(() => []),
+        db.getAllAsync("SELECT * FROM batches").catch(() => []),
       ]);
       const list = (((its ?? []) as any[]).filter((i: any) => !i.is_deleted) as Item[])
         .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
@@ -74,51 +112,98 @@ export default function PricesStep({
       const vids = new Set(vl.map(v => v.id));
       setPrices((((ps ?? []) as any[]).filter((p: any) => !p.is_deleted && vids.has(String(p.variant_id))) as VariantPrice[])
         .sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? ""))));
-      if (!variantId && vl.length) setVariantId(vl[0].id);
+      setProdBatches((((bs ?? []) as any[]).filter((b: any) => !b.is_deleted && ids.has(String(b.item_id)))) as any[]);
+
     } catch {}
   }
   // Steps stay mounted: refresh on every visit so rows saved by earlier
   // steps (same productId) are always visible.
   useEffect(() => { if (stepActive) load(); }, [productId, stepActive]);
 
-  const selVariant = variants.find(v => v.id === variantId);
-  const live = selVariant ? currentVariantPrice(prices, selVariant.id) : null;
-  // A variant already priced for the entered date is done — no duplicates.
-  // Different dates stay pickable (scheduled updates / corrections).
-  const pricedForDate = new Set(
-    prices.filter(p => p.date === date).map(p => String(p.variant_id))
-  );
+  const curPriceOf = (vid: string): number => {
+    const cur = currentVariantPrice(prices, vid);
+    return cur ? Number(cur.price) || 0 : 0;
+  };
+  const shownOf = (vid: string): string => {
+    if (vid in edits) return edits[vid];
+    const c = curPriceOf(vid);
+    return c > 0 ? String(c) : "";
+  };
+  // Changed rows only: valid new price, different from live.
+  const changed = variants.filter(v => {
+    if (!(v.id in edits)) return false;
+    const t = parseFloat(edits[v.id]);
+    return t > 0 && t !== curPriceOf(v.id);
+  });
 
-  const error = (() => {
-    if (!variants.length) return "Kreye omwen yon variant anvan (etap 4).";
-    if (!selVariant) return "Chwazi variant lan.";
-    if (pricedForDate.has(selVariant.id)) return "Variant sa gen pri pou dat sa a deja — chwazi yon lòt dat.";
-    if (!(parseFloat(price) > 0)) return "Bay pri a (> 0).";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "Dat la dwe AAAA-MM-JJ.";
-    return "";
-  })();
-  const valid = !error;
+  // Reference unit cost per variant (ember, display only): one known batch
+  // prices the whole chain — canonical smallest-unit cost × each item's
+  // ratio (10 boxes → G 1000 ⇒ G 100/box, bottle = 100/24). Pending pool
+  // first (transport folded by weight), else latest received. No data → 0.
+  const transportVal = parseFloat(transport) || 0;
+  function unitRefOf(v: Variant): number {
+    const live = items.filter(i => !i.is_deleted);
+    const per = (id: string) => {
+      const f = itemFactor(live, id);
+      const m = minItemFactor(live, productId);
+      return f > 0 && m > 0 ? f / m : 0;
+    };
+    const perUnit = per(String(v.item_id));
+    if (!(perUnit > 0)) return 0;
+    const byRecency = (a: any, b: any) =>
+      String(b.date ?? "").localeCompare(String(a.date ?? "")) ||
+      String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""));
+    const canonOf = (b: any, share: number): number => {
+      const c = toCanonicalQty(live, productId, String(b.item_id), Number(b.quantity));
+      if (!(c > 0)) return 0;
+      return ((Number(b.total_paid) || 0) + share) / c;
+    };
+    const pend = prodBatches
+      .filter((b: any) => String(b.status) === "pending" && Number(b.quantity) > 0)
+      .sort(byRecency);
+    if (pend.length) {
+      const totalAll = pend.reduce((s: number, b: any) => s + (Number(b.total_paid) || 0), 0);
+      const latest = pend[0];
+      const share = totalAll > 0
+        ? transportVal * ((Number(latest.total_paid) || 0) / totalAll)
+        : (transportVal > 0 && pend.length > 0 ? transportVal / pend.length : 0);
+      const canon = canonOf(latest, share);
+      return canon > 0 ? canon * perUnit : 0;
+    }
+    const recv = prodBatches
+      .filter((b: any) => String(b.status) === "received" && Number(b.quantity) > 0)
+      .sort(byRecency)[0];
+    if (recv) {
+      const canon = canonOf(recv, 0);
+      return canon > 0 ? canon * perUnit : 0;
+    }
+    return 0;
+  }
 
-  async function add() {
-    if (!valid || busy || !selVariant) { setTouched(true); if (error) Alert.alert("Enkonplè", error); return; }
+  async function savePrices() {
+    if (!changed.length || busy) return;
     if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
     setBusy(true);
     try {
       const db = await getDb();
       const now = new Date().toISOString();
+      const dateStr = todayStr();
       const taken = new Set(prices.map(p => p.id));
-      const id = uniqueId("vpr", taken, `${variantId}-${date}`);
-      const rec = { id, variant_id: variantId, price: parseFloat(price), date, created_at: now, updated_at: now, is_deleted: 0 };
-      await db.runAsync(
-        "INSERT OR REPLACE INTO variant_prices (id, variant_id, price, date, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?)",
-        [rec.id, rec.variant_id, rec.price, rec.date, rec.created_at, rec.updated_at, 0, 1]
-      );
-      try { await insertOutbox("variant_prices", "create", { ...rec, is_deleted: false }); } catch {}
-      setPrice(""); setDate(todayStr()); setTouched(false);
+      for (const v of changed) {
+        const val = parseFloat(edits[v.id]);
+        const id = uniqueId("vpr", taken, `${v.id}-${dateStr}`);
+        const rec = { id, variant_id: v.id, price: val, date: dateStr, created_at: now, updated_at: now, is_deleted: 0 };
+        await db.runAsync(
+          "INSERT OR REPLACE INTO variant_prices (id, variant_id, price, date, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?)",
+          [rec.id, rec.variant_id, rec.price, rec.date, rec.created_at, rec.updated_at, 0, 1]
+        );
+        try { await insertOutbox("variant_prices", "create", { ...rec, is_deleted: false }); } catch {}
+      }
+      setEdits({});
       await load();
       ctx.reload();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Anrejistre pri echwe");
+      uploadError("Erè", e?.message ?? "Anrejistre pri echwe");
     } finally {
       setBusy(false);
     }
@@ -128,76 +213,53 @@ export default function PricesStep({
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-      {productName ? <Text style={{ fontSize: 12, color: "#8e8e93" }}>{productName} · pri vann aktyèl pa dat</Text> : null}
-      {variants.map(v => {
-        const cur = currentVariantPrice(prices, v.id);
-        const hist = prices.filter(p => p.variant_id === v.id);
-        return (
-          <View key={v.id} style={{ backgroundColor: "transparent", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 6 }}>
-            <View style={{ flexDirection: "row", alignItems: "baseline", justifyContent: "space-between" }}>
-              <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }} numberOfLines={1}>{itemName(v.item_id)} · {v.name}</Text>
-              <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>{cur ? fmtG(Number(cur.price)) : "—"}</Text>
+      {productName ? <Text style={{ fontWeight: "800", fontSize: 17, color: "#fff" }} numberOfLines={1}>{productName}</Text> : null}
+      {registerNext && (
+        <View style={{ borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 6 }}>
+          <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Transpò (opsyonèl)</Text>
+          <MoneyInput value={transport} onChangeText={v => setTransport(v)} placeholder="0" placeholderTextColor="#636366" keyboardType="numeric"
+            style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 14, color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
+          <Text style={{ fontSize: 11, color: "#8e8e93" }}>Reparti sou batch pending yo (pri revand) anvan Anrejistre.</Text>
+        </View>
+      )}
+      <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 10 }}>
+        {variants.map(v => (
+          <View key={v.id} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 15, color: "#fff" }} numberOfLines={1}>{formatCheckoutRow(itemName(v.item_id), productName, v.name)}</Text>
+              {(() => {
+                const ref = unitRefOf(v);
+                return (
+                  <Text style={{ fontSize: 11, color: "#ff4d00", marginTop: 2 }} numberOfLines={1}>
+                    ≈ {ref > 0 ? fmtG(Math.round(ref * 100) / 100) : "—"} / {itemName(v.item_id)} · pri acha
+                  </Text>
+                );
+              })()}
             </View>
-            {hist.slice(0, 4).map(h => (
-              <View key={h.id} style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                <Text style={{ fontSize: 12, color: "#8e8e93" }}>{h.date}</Text>
-                <Text style={{ fontSize: 12, fontWeight: "700", color: h.id === cur?.id ? "#fff" : "#8e8e93" }}>{fmtG(Number(h.price))}</Text>
-              </View>
-            ))}
-            {hist.length > 4 && <Text style={{ fontSize: 11, color: "#636366" }}>+{hist.length - 4} ansyen pri</Text>}
+            <MoneyInput
+              value={shownOf(v.id)}
+              onFocus={() => { if (!(v.id in edits)) setEdits(prev => ({ ...prev, [v.id]: "" })); }}
+              onBlur={() => { if ((edits[v.id] ?? "") === "") setEdits(prev => { const n = { ...prev }; delete n[v.id]; return n; }); }}
+              onChangeText={val => setEdits(prev => ({ ...prev, [v.id]: val }))}
+              keyboardType="numeric"
+              placeholder="—"
+              placeholderTextColor="#636366"
+              style={{ width: 110, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingVertical: 9, paddingHorizontal: 10, textAlign: "center", fontWeight: "800", fontSize: 14, color: "#fff", backgroundColor: "transparent" }}
+            />
           </View>
-        );
-      })}
-      {variants.length === 0 && (
-        <Text style={{ fontSize: 12, color: "#8e8e93", textAlign: "center" }}>Poko gen variant — tounen etap 4.</Text>
-      )}
-      <View style={{ borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 10 }}>
-        <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Nouvo pri</Text>
-        <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>VARIANT</Text>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          {variants.map(v => {
-            const active = variantId === v.id;
-            const done = pricedForDate.has(v.id);
-            return (
-              <Pressable key={v.id} disabled={done} onPress={() => { setTouched(true); setVariantId(v.id); }}
-                style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 13, paddingVertical: 9, borderRadius: 999, backgroundColor: active ? "#fff" : "transparent", borderWidth: 1, borderColor: active ? "#fff" : "#2b2b2b", opacity: done && !active ? 0.4 : 1 }}>
-                <Text style={{ fontWeight: "600", fontSize: 12, color: active ? "#000" : "#fff" }}>{itemName(v.item_id)} · {v.name}</Text>
-                {done && <Ionicons name="checkmark" size={12} color={active ? "#000" : "#8e8e93"} />}
-              </Pressable>
-            );
-          })}
-        </View>
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>PRI (G)</Text>
-            <TextInput value={price} onChangeText={v => { setTouched(true); setPrice(v.replace(/[^0-9.]/g, "")); }} placeholder="0" placeholderTextColor="#636366" keyboardType="numeric"
-              style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, marginTop: 6, fontSize: 14, color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>DAT EFÈ</Text>
-            <TextInput value={date} onChangeText={v => { setTouched(true); setDate(v); }} placeholder="AAAA-MM-JJ" placeholderTextColor="#636366"
-              style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, marginTop: 6, fontSize: 13, color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
-          </View>
-        </View>
-        {touched && error ? <Text style={{ fontSize: 12, color: "#e06c5b" }}>{error}</Text> : null}
-        <Pressable onPress={add} disabled={!valid || busy} style={{ paddingVertical: 14, borderRadius: 12, backgroundColor: valid && !busy ? "#fff" : "#2b2b2b", alignItems: "center" }}>
-          <Text style={{ fontWeight: "800", fontSize: 14, color: valid && !busy ? "#000" : "#636366" }}>Anrejistre pri</Text>
+        ))}
+        {variants.length === 0 && (
+          <Text style={{ fontSize: 12, color: "#8e8e93", textAlign: "center" }}>Poko gen variant — tounen etap 4.</Text>
+        )}
+      </View>
+      {canManageCatalog(ctx.role) ? (
+        <Pressable onPress={savePrices} disabled={!changed.length || busy} style={{ paddingVertical: 14, borderRadius: 12, backgroundColor: changed.length && !busy ? "#fff" : "#2b2b2b", alignItems: "center" }}>
+          <Text style={{ fontWeight: "800", fontSize: 14, color: changed.length && !busy ? "#000" : "#636366" }}>
+            Anrejistre pri{changed.length > 0 ? ` (${changed.length})` : ""}
+          </Text>
         </Pressable>
-      </View>
-      {!registerNext && (
-      <View style={{ flexDirection: "row", gap: 10 }}>
-        {onBack ? (
-          <Pressable onPress={onBack} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
-            <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>Retounen</Text>
-          </Pressable>
-        ) : null}
-        {onDone ? (
-          <Pressable onPress={onDone} style={{ flex: 2, paddingVertical: 14, borderRadius: 12, backgroundColor: "#fff", alignItems: "center" }}>
-            <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>Fini</Text>
-          </Pressable>
-        ) : null}
-      </View>
-      )}
+      ) : null}
+
     </ScrollView>
   );
 }

@@ -9,6 +9,22 @@ export type CreditPayResult = {
   createdAt: string;
 };
 
+// The shift a cash collection belongs to: the cashier's live (open/pending)
+// shift, else the one whose window contains the moment. Null when unresolvable.
+export async function activeShiftIdFor(db: any, userId: string | null): Promise<string | null> {
+  if (!userId) return null;
+  try {
+    const nowIso = new Date().toISOString();
+    const mine = ((await db.getAllAsync(
+      "SELECT id, status, start_time, end_time FROM shifts WHERE cashier_id = ? ORDER BY start_time DESC LIMIT 20",
+      [userId]
+    ).catch(() => [])) ?? []) as any[];
+    const live = mine.find((s: any) => s.status === "open" || s.status === "pending")
+      ?? mine.find((s: any) => String(s.start_time ?? "") <= nowIso && (!s.end_time || String(s.end_time) >= nowIso));
+    return live?.id ? String(live.id) : null;
+  } catch { return null; }
+}
+
 export async function payCreditDebt(
   db: any,
   debt: any,
@@ -27,9 +43,12 @@ export async function payCreditDebt(
   const receipt = `REC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   const payId = `pay-${Date.now()}`;
   const createdAt = new Date().toISOString();
+  // Pin the payment to the shift it was collected in — reports must only show
+  // collections under that exact shift (multi-shift days, overnight windows).
+  const shiftId = await activeShiftIdFor(db, collectedBy);
   await db.runAsync(
-    "INSERT INTO credit_payments (id, store_id, credit_id, debt_id, amount, payment_method, receipt_number, created_at, collected_by) VALUES (?,?,?,?,?,?,?,?,?)",
-    [payId, debt.store_id, debt.id, debt.id, amount, "cash", receipt, createdAt, collectedBy]
+    "INSERT INTO credit_payments (id, store_id, credit_id, debt_id, amount, payment_method, receipt_number, created_at, collected_by, shift_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    [payId, debt.store_id, debt.id, debt.id, amount, "cash", receipt, createdAt, collectedBy, shiftId]
   );
   const newPaid = paidSoFar + amount;
   const finalBalance = Math.max(0, Number(debt.amount || 0) - newPaid);

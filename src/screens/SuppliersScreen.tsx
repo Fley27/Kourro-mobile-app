@@ -24,16 +24,23 @@ import {
   NewSupplierSheet,
   EditSupplierContent,
   supplierToFormValues,
+  departmentToColumn,
+  paymentMethodsToColumn,
   type EditSupplierState,
   type SupplierFormValues,
 } from "../components/SupplierSheets";
+import { UploadTransition, minDelay, uploadSuccess, uploadError, type UploadPhase } from "../components/UploadTransition";
 
 export type Supplier = {
   id: string;
   store_id: string;
   name: string;
   phone?: string | null;
+  country?: string | null;
+  department?: string | null;
+  city?: string | null;
   address?: string | null;
+  payment_methods?: string | null;
   payment_terms?: string | null;
   bank_info?: string | null;
   notes?: string | null;
@@ -52,6 +59,7 @@ type Props = {
 };
 
 const uid = () => `sup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+const accUid = () => `sba-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const byName = (a: any, b: any) => String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
 
 export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
@@ -59,6 +67,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
   const [batchCounts, setBatchCounts] = useState<Record<string, { count: number; total: number }>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [supplierBatches, setSupplierBatches] = useState<any[]>([]);
+  const [bankAccounts, setBankAccounts] = useState<any[]>([]);
   const [profileStats, setProfileStats] = useState<SupplierStats>({ batches: 0, lastBatch: null, firstBatch: null });
   const [showAdd, setShowAdd] = useState(false);
   const [addKey, setAddKey] = useState(0);
@@ -107,9 +116,22 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
 
   useEffect(() => { load(); }, []);
 
+  async function loadBankAccounts(id: string): Promise<any[]> {
+    try {
+      const db = await getDb();
+      const rows = ((await db
+        .getAllAsync("SELECT * FROM supplier_bank_accounts WHERE supplier_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) ORDER BY sort_order, created_at", [id])
+        .catch(() => [])) ?? []) as any[];
+      return rows;
+    } catch {
+      return [];
+    }
+  }
+
   useEffect(() => {
     if (!selectedId) {
       setSupplierBatches([]);
+      setBankAccounts([]);
       setProfileStats({ batches: 0, lastBatch: null, firstBatch: null });
       setBatchDetail(null);
       setShowAllBatches(false);
@@ -121,9 +143,11 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
     setShowAllBatches(false);
     setShowEdit(false);
     setShowProfileMenu(false);
+    setBankAccounts([]);
     (async () => {
       try {
         const db = await getDb();
+        setBankAccounts(await loadBankAccounts(selectedId));
         const rows = (((await db.getAllAsync("SELECT * FROM batches WHERE supplier_id = ?", [selectedId]).catch(() => [])) ?? []) as any[])
           .slice()
           .sort((a: any, b: any) =>
@@ -152,6 +176,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
         (s.name ?? "").toLowerCase().includes(q)
         || (s.phone ?? "").toLowerCase().includes(q)
         || (s.address ?? "").toLowerCase().includes(q)
+        || (s.city ?? "").toLowerCase().includes(q)
         || (s.payment_terms ?? "").toLowerCase().includes(q)
       );
     }
@@ -179,38 +204,86 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
     })();
   }
 
+  const [upBusy, setUpBusy] = useState(false);
+  const [upPhase, setUpPhase] = useState<UploadPhase>("loading");
+  const [upMsg, setUpMsg] = useState("");
+
   async function handleAdd(vals: SupplierFormValues) {
     if (!canWrite) return Alert.alert("Pa gen dwa", "Ou pa ka kreye nouvo founisè.");
     if (!vals.name.trim()) return Alert.alert("Non obligatwa", "Bay founisè a yon non.");
+    if (upBusy) return;
     setSaving(true);
+    // Sales pattern: close the sheet first so the overlay is the only modal
+    // (same-tick modal swaps get dropped on iOS) — no receipt after.
+    setShowAdd(false);
+    setUpBusy(true);
+    setUpPhase("loading");
+    setUpMsg(`${vals.name.trim()} • ap anrejistre…`);
     try {
-      const now = new Date().toISOString();
-      const db = await getDb();
-      const id = uid();
-      const rec = {
-        id,
-        store_id: storeId,
-        name: vals.name.trim(),
-        phone: vals.phone.trim() || null,
-        address: vals.address.trim() || null,
-        payment_terms: vals.payment_terms.trim() || null,
-        bank_info: isOwner ? (vals.bank_info.trim() || null) : null,
-        notes: vals.notes.trim() || null,
-        created_at: now,
-        updated_at: now,
-        is_deleted: 0,
-      };
-      await db.runAsync(
-        "INSERT INTO suppliers (id, store_id, name, phone, address, payment_terms, bank_info, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        [rec.id, rec.store_id, rec.name, rec.phone, rec.address, rec.payment_terms, rec.bank_info, rec.notes, now]
-      );
-      try { await insertOutbox("suppliers", "create", { ...rec, is_deleted: false, lamport_clock: Date.now() }); } catch {}
+      const rec = await minDelay((async () => {
+        const now = new Date().toISOString();
+        const db = await getDb();
+        const id = uid();
+        const r = {
+          id,
+          store_id: storeId,
+          name: vals.name.trim(),
+          phone: vals.phone.trim() || null,
+          country: vals.country.trim() || "HT",
+          department: departmentToColumn(vals),
+          city: vals.city.trim() || null,
+          address: vals.address.trim() || null,
+          payment_methods: paymentMethodsToColumn(vals.payment_methods),
+          payment_terms: vals.payment_terms.trim() || null,
+          bank_info: null, // legacy blob: form no longer collects it
+          notes: vals.notes.trim() || null,
+          created_at: now,
+          updated_at: now,
+          is_deleted: 0,
+        };
+        await db.runAsync(
+          "INSERT INTO suppliers (id, store_id, name, phone, country, department, city, address, payment_methods, payment_terms, bank_info, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          [r.id, r.store_id, r.name, r.phone, r.country, r.department, r.city, r.address, r.payment_methods, r.payment_terms, r.bank_info, r.notes, now]
+        );
+        try { await insertOutbox("suppliers", "create", { ...r, is_deleted: false, lamport_clock: Date.now() }); } catch {}
+        // Repeatable bank sub-records (any combination of payment methods —
+        // accounts only exist when the user typed them).
+        const accounts = vals.bank_accounts
+          .map(a => ({ bank_name: a.bank_name.trim(), currency: a.currency.trim(), account_number: a.account_number.trim() }))
+          .filter(a => a.bank_name || a.currency || a.account_number);
+        for (let i = 0; i < accounts.length; i++) {
+          const a = accounts[i];
+          const row = {
+            id: accUid(),
+            store_id: null,
+            supplier_id: id,
+            bank_name: a.bank_name,
+            currency: a.currency || null,
+            account_number: a.account_number || null,
+            sort_order: i,
+            created_at: now,
+            updated_at: now,
+            is_deleted: 0,
+          };
+          await db.runAsync(
+            "INSERT INTO supplier_bank_accounts (id, store_id, supplier_id, bank_name, currency, account_number, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            [row.id, row.store_id, row.supplier_id, row.bank_name, row.currency, row.account_number, row.sort_order, now, now]
+          );
+          try { await insertOutbox("supplier_bank_accounts", "create", { ...row, is_deleted: false, lamport_clock: Date.now() }); } catch {}
+        }
+        return r;
+      })(), 1500);
+      setUpPhase("success");
+      setUpMsg(`${rec.name} • anrejistre`);
+      await new Promise(r => setTimeout(r, 1500));
+      setUpBusy(false);
       setSuppliers(prev => (prev.some(s => s.id === rec.id) ? prev : [rec, ...prev].sort(byName)));
-      setShowAdd(false);
       setSelectedId(rec.id);
-      Alert.alert("Founisè ajoute", `${rec.name} anrejistre.${rec.phone ? ` Telefòn: ${rec.phone}` : " Pa gen nimewo telefòn"}${rec.address ? ` · Adrès: ${rec.address}` : ""}`);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute founisè echwe");
+      setUpPhase("error");
+      setUpMsg(e?.message ?? "Ajoute founisè echwe");
+      await new Promise(r => setTimeout(r, 3000));
+      setUpBusy(false);
     } finally {
       setSaving(false);
     }
@@ -229,32 +302,77 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
       const patch = {
         name: vals.name.trim(),
         phone: vals.phone.trim() || null,
+        country: vals.country.trim() || "HT",
+        department: departmentToColumn(vals),
+        city: vals.city.trim() || null,
         address: vals.address.trim() || null,
+        payment_methods: paymentMethodsToColumn(vals.payment_methods),
         payment_terms: vals.payment_terms.trim() || null,
         notes: vals.notes.trim() || null,
       };
-      const bank = isOwner ? (vals.bank_info.trim() || null) : undefined;
-      if (isOwner) {
-        await db.runAsync(
-          "UPDATE suppliers SET name = ?, phone = ?, address = ?, payment_terms = ?, bank_info = ?, notes = ?, updated_at = ?, dirty = 1 WHERE id = ?",
-          [patch.name, patch.phone, patch.address, patch.payment_terms, bank, patch.notes, now, id]
-        );
-      } else {
-        // Admin: basic fields only — bank_info untouched.
-        await db.runAsync(
-          "UPDATE suppliers SET name = ?, phone = ?, address = ?, payment_terms = ?, notes = ?, updated_at = ?, dirty = 1 WHERE id = ?",
-          [patch.name, patch.phone, patch.address, patch.payment_terms, patch.notes, now, id]
-        );
-      }
-      const nextBank = isOwner ? bank : (selectedSupplier.bank_info ?? null);
+      // bank_info is intentionally absent: the legacy blob is never overwritten
+      // by form saves (owner or admin) — the form edits structured accounts now.
+      await db.runAsync(
+        "UPDATE suppliers SET name = ?, phone = ?, country = ?, department = ?, city = ?, address = ?, payment_methods = ?, payment_terms = ?, notes = ?, updated_at = ?, dirty = 1 WHERE id = ?",
+        [patch.name, patch.phone, patch.country, patch.department, patch.city, patch.address, patch.payment_methods, patch.payment_terms, patch.notes, now, id]
+      );
       try {
-        await insertOutbox("suppliers", "update", { id, ...patch, bank_info: nextBank, updated_at: now, is_deleted: false, lamport_clock: Date.now() });
+        await insertOutbox("suppliers", "update", { id, ...patch, bank_info: selectedSupplier.bank_info ?? null, updated_at: now, is_deleted: false, lamport_clock: Date.now() });
       } catch {}
-      setSuppliers(prev => prev.map(s => (s.id === id ? { ...s, ...patch, bank_info: nextBank, updated_at: now } : s)));
+
+      // Bank accounts: diff the form rows against what was loaded.
+      const norm = (x: any) => String(x ?? "").trim();
+      const incoming = vals.bank_accounts
+        .map(a => ({ id: a.id ?? null, bank_name: norm(a.bank_name), currency: norm(a.currency), account_number: norm(a.account_number) }))
+        .filter(a => a.bank_name || a.currency || a.account_number);
+      for (let i = 0; i < incoming.length; i++) {
+        const a = incoming[i];
+        if (!a.id) {
+          const row = {
+            id: accUid(), store_id: null, supplier_id: id,
+            bank_name: a.bank_name, currency: a.currency || null, account_number: a.account_number || null,
+            sort_order: i, created_at: now, updated_at: now, is_deleted: 0,
+          };
+          await db.runAsync(
+            "INSERT INTO supplier_bank_accounts (id, store_id, supplier_id, bank_name, currency, account_number, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            [row.id, row.store_id, row.supplier_id, row.bank_name, row.currency, row.account_number, row.sort_order, now, now]
+          );
+          try { await insertOutbox("supplier_bank_accounts", "create", { ...row, is_deleted: false, lamport_clock: Date.now() }); } catch {}
+        } else {
+          const prev = bankAccounts.find(x => x.id === a.id);
+          const changed = !prev
+            || norm(prev.bank_name) !== a.bank_name
+            || norm(prev.currency) !== a.currency
+            || norm(prev.account_number) !== a.account_number
+            || Number(prev.sort_order ?? 0) !== i;
+          if (!changed) continue;
+          await db.runAsync(
+            "UPDATE supplier_bank_accounts SET bank_name = ?, currency = ?, account_number = ?, sort_order = ?, updated_at = ?, dirty = 1 WHERE id = ?",
+            [a.bank_name, a.currency || null, a.account_number || null, i, now, a.id]
+          );
+          try {
+            await insertOutbox("supplier_bank_accounts", "update", {
+              id: a.id, store_id: prev?.store_id ?? null, supplier_id: id,
+              bank_name: a.bank_name, currency: a.currency || null, account_number: a.account_number || null,
+              sort_order: i, updated_at: now, is_deleted: false, lamport_clock: Date.now(),
+            });
+          } catch {}
+        }
+      }
+      for (const prev of bankAccounts) {
+        if (incoming.some(a => a.id === prev.id)) continue;
+        await db.runAsync("UPDATE supplier_bank_accounts SET is_deleted = 1, dirty = 1, updated_at = ? WHERE id = ?", [now, prev.id]);
+        try {
+          await insertOutbox("supplier_bank_accounts", "update", { ...prev, is_deleted: true, updated_at: now, lamport_clock: Date.now() });
+        } catch {}
+      }
+      setBankAccounts(await loadBankAccounts(id));
+
+      setSuppliers(prev => prev.map(s => (s.id === id ? { ...s, ...patch, updated_at: now } : s)));
       setShowEdit(false);
-      Alert.alert("Founisè mete ajou", "Chanjman yo anrejistre nan dosye founisè a.");
+      uploadSuccess("Founisè mete ajou", "Chanjman yo anrejistre nan dosye founisè a.");
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete founisè ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete founisè ajou echwe");
     } finally {
       setSaving(false);
     }
@@ -295,11 +413,18 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
       ? `${fmtG(Number(batchDetail.batch?.total_paid ?? 0))} | ${batchStatusLabel(batchDetail.batch?.status)}`
       : showAllBatches ? "Batches" : undefined;
 
+  // Account rows load async after selection: fold them into resetKey so the
+  // edit form always diffs against fully-loaded accounts (never saves over
+  // rows it hasn't seen).
+  const editResetKey = selectedSupplier
+    ? `${selectedSupplier.id}:${bankAccounts.map(a => a.id).join(",")}`
+    : "";
+
   const body = showEdit && selectedSupplier ? (
     <EditSupplierContent
-      resetKey={selectedSupplier.id}
+      resetKey={editResetKey}
       visible={showEdit}
-      initial={supplierToFormValues(selectedSupplier)}
+      initial={supplierToFormValues(selectedSupplier, bankAccounts)}
       isOwner={isOwner}
       onState={setEditState}
     />
@@ -316,6 +441,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
       supplier={selectedSupplier}
       stats={profileStats}
       batches={supplierBatches}
+      bankAccounts={bankAccounts}
       onOpenBatch={openBatch}
       onViewAll={() => setShowAllBatches(true)}
       isOwner={isOwner}
@@ -350,6 +476,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
           setShowAllBatches={setShowAllBatches}
           editState={editState}
           setEditState={setEditState}
+          bankAccounts={bankAccounts}
           onSaveEdit={handleSave}
           saving={saving}
           batchDetail={batchDetail}
@@ -424,6 +551,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
         saving={saving}
         isOwner={isOwner}
       />
+      <UploadTransition visible={upBusy} phase={upPhase} title="Nouvo founisè" detail={upMsg} />
     </View>
   );
 }

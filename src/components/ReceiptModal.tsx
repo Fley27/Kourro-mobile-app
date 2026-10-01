@@ -1,11 +1,11 @@
 import React from "react";
 import { Modal, View, Text, Pressable, ScrollView, Share, Alert, Linking, useWindowDimensions } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { fmtG, fmt, monoStyle } from "../format";
-import { palette, radius, fonts } from "../theme";
-import { buildReceiptHtml, receiptToText, type ReceiptData, type ReceiptCustomer } from "../receipts";
+import { palette, radius, fonts, topIconBtn } from "../theme";
+import { printHtml, printToPdf } from "../print";
+import { buildReceiptHtml, receiptToText, receiptItemsFrom, attachLineLabels, type ReceiptData, type ReceiptCustomer } from "../receipts";
 import { getDb } from "../db";
 // STAGING-PICKUP: single gated import — delete this + the STAGING block below to remove.
 import { usePickupEnabled, PickupSheet, useOnline } from "../pickup-staging";
@@ -14,8 +14,13 @@ import { buildReceipts } from "../receipts";
 import { CustomerPicker } from "./CustomerPicker";
 import { EMPTY_CUSTOMER_FORM, fullNameOf, type CustomerFormData } from "./CustomerForm";
 import { insertCustomerRecord } from "../sales/customers";
+import { uploadSuccess, uploadError } from "./UploadTransition";
 
 function statusLine(r: ReceiptData): { label: string; tint: string } | null {
+  if (r.kind === "order_bill") {
+    // A Fakti is a bill: unpaid says so, a closed order's bill reads clean.
+    return Number(r.amountDue ?? 0) > 0 ? { label: `Pa peye • ${fmtG(r.amountDue)}`, tint: palette.warning } : null;
+  }
   if (r.paymentMethod === "credit") return { label: `Kredi • Balance ${fmtG(r.amountDue)}`, tint: palette.danger };
   if (Number(r.amountDue ?? 0) > 0) return { label: `Balance ${fmtG(r.amountDue)}`, tint: palette.warning };
   return null;
@@ -73,6 +78,8 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
   const customer = custUnlinked ? null : ((overrideSaleId === saleId ? custOverride : null) ?? r?.customer ?? null);
   const hasCustomer = !!customer;
   const isSale = (r?.kind ?? "sale") === "sale";
+  // A Fakti is a standalone bill — no sale-linked customer menu on it.
+  const isBill = r?.kind === "order_bill";
   const [menuVisible, setMenuVisible] = React.useState(false);
   const [menuView, setMenuView] = React.useState<"main" | "add">("main");
   const [custDetail, setCustDetail] = React.useState<any | null>(null);
@@ -84,6 +91,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
   const [formValid, setFormValid] = React.useState(false);
   const [savingCust, setSavingCust] = React.useState(false);
   const [menuCustomers, setMenuCustomers] = React.useState<any[]>([]);
+  const [menuDebts, setMenuDebts] = React.useState<any[]>([]);
   const [showCustPicker, setShowCustPicker] = React.useState(false);
   const [menuStats, setMenuStats] = React.useState({ visits: 0, spent: 0, lastVisit: null as string | null, firstVisit: null as string | null });
   const [menuNotes, setMenuNotes] = React.useState<any[]>([]);
@@ -127,6 +135,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
     setShowProfModal(false);
     setProfMode("view");
     setMenuCustomers([]);
+    setMenuDebts([]);
     setMenuStats({ visits: 0, spent: 0, lastVisit: null, firstVisit: null });
     setMenuNotes([]);
     setMenuTxns([]);
@@ -151,7 +160,8 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
 
   async function printReceipt() {
     try {
-      await Print.printAsync({ html: buildReceiptHtml(pair.customer) });
+      // Thermal backend first when registered, else the platform print sheet.
+      await printHtml(buildReceiptHtml(pair.customer));
     } catch (e: any) {
       Alert.alert("Enpresyon", e?.message ?? "Enpresyon echwe");
     }
@@ -161,7 +171,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
     const client = pair.customer;
     const title = `Resi ${client.receiptNumber} - ${client.storeName}`;
     try {
-      const file = await Print.printToFileAsync({ html: buildReceiptHtml(client), base64: false });
+      const file = await printToPdf(buildReceiptHtml(client));
       if (!file.uri) throw new Error("no-file");
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(file.uri, {
@@ -204,6 +214,8 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
       const db = await getDb();
       const all = (await db.getAllAsync("SELECT * FROM customers")) as any[];
       setMenuCustomers(Array.from(new Map(all.map((c: any) => [c.id, c] as const)).values()));
+      const open = ((await db.getAllAsync("SELECT * FROM credits WHERE balance > 0").catch(() => [])) as any[]) ?? [];
+      setMenuDebts(open);
     } catch {}
     if (custId) {
       try {
@@ -266,6 +278,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
     try {
       const db = await getDb();
       const items = ((await db.getAllAsync("SELECT * FROM sale_items WHERE sale_id = ?", [sale.id]).catch(() => [])) as any[]) ?? [];
+      await attachLineLabels(db, items).catch(() => {});
       setTxnView({ sale, items, customer: cust });
     } catch {
       setTxnView({ sale, items: [], customer: cust });
@@ -277,13 +290,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
     try {
       const db = await getDb();
       const sale = txnView.sale;
-      const items = txnView.items.map((it: any) => ({
-        name: it.product_name ?? "Atik",
-        variant: it.variant ?? null,
-        qty: Number(it.quantity ?? 0),
-        unitPrice: Number(it.unit_price ?? 0),
-        lineTotal: Number(it.line_total ?? 0),
-      }));
+      const items = await receiptItemsFrom(db, txnView.items);
       const total = Number(sale.total ?? 0);
       const amountPaid = Number(sale.amount_paid ?? total);
       const credits = ((await db.getAllAsync("SELECT * FROM credits WHERE sale_id = ?", [sale.id]).catch(() => [])) as any[]) ?? [];
@@ -315,7 +322,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
       setShowCustPicker(false);
       setShowProfModal(false);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Resi echwe");
+      uploadError("Erè", e?.message ?? "Resi echwe");
     }
   }
 
@@ -418,7 +425,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
       setMenuNotes(prev => [row, ...prev]);
       setProfNoteInput("");
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute nòt echwe");
+      uploadError("Erè", e?.message ?? "Ajoute nòt echwe");
     } finally {
       setProfSavingNote(false);
     }
@@ -444,9 +451,9 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         setOverrideSaleId(saleId);
       }
       setProfMode("view");
-      Alert.alert("Kliyan mete ajou ✓", fullNameOf(data));
+      uploadSuccess("Kliyan mete ajou ✓", fullNameOf(data));
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete ajou echwe");
     } finally {
       setSavingCust(false);
     }
@@ -532,9 +539,9 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         } catch {}
       } catch {}
       setMenuView("main");
-      Alert.alert("Kliyan ajoute ✓", fullNameOf(formRef.current.data));
+      uploadSuccess("Kliyan ajoute ✓", fullNameOf(formRef.current.data));
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Ajoute kliyan echwe");
+      uploadError("Erè", e?.message ?? "Ajoute kliyan echwe");
     } finally {
       setSavingCust(false);
     }
@@ -554,7 +561,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
     <Modal visible animationType="slide" onRequestClose={handleClose}>
       <View style={{ flex: 1, backgroundColor: "#16db65", paddingTop: 52 }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 18, paddingBottom: 6 }}>
-          {locked ? <View style={{ width: 38 }} /> : (
+          {locked || isBill ? <View style={{ width: 38 }} /> : (
           <Pressable onPress={openMenu} accessibilityLabel="Plis opsyon" style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: palette.surface, borderWidth: 0.5, borderColor: palette.hairline, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="ellipsis-horizontal" size={18} color={palette.ink} />
           </Pressable>
@@ -567,7 +574,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, justifyContent: "center", paddingHorizontal: 18, paddingBottom: 16, paddingTop: 10, gap: 18 }}>
           {/* Hero — paid amount, centered */}
           <View style={{ alignItems: "center", paddingVertical: 10 }}>
-            <Text style={{ fontFamily: fonts.bold, fontSize: 11, color: palette.muted2, letterSpacing: 1.2 }}>TOTAL</Text>
+            <Text style={{ fontFamily: fonts.bold, fontSize: 11, color: palette.muted2, letterSpacing: 1.2 }}>{isBill ? "FAKTI" : "TOTAL"}</Text>
             <Text style={[monoStyle, { fontFamily: fonts.bold, fontSize: 44, color: palette.ink, letterSpacing: -1.5, marginTop: 4 }]}>{fmtG(r.total)}</Text>
             {st ? <Text style={{ fontFamily: fonts.bold, fontSize: 14, color: st.tint, marginTop: 6 }}>{st.label}</Text> : null}
             {Number(r.change ?? 0) > 0 ? (
@@ -597,12 +604,12 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
             <PickupSheet visible={showPickup} saleId={r.saleId} storeId={staging.storeId} cashierId={staging.cashierId ?? null} storeName={r.storeName} cashierName={r.cashier.name} onClose={() => setShowPickup(false)} onSaved={handleClose} />
           ) : null}
           <Text style={{ fontFamily: fonts.bold, fontSize: 13, color: palette.muted2, textAlign: "center", letterSpacing: 0.2 }}>
-            Kijan ou vle resi a?
+            {isBill ? "Kijan ou vle fakti a?" : "Kijan ou vle resi a?"}
           </Text>
           {hasCustomer && savedEmail && online ? (
             <Pill icon="mail-outline" label={`Email • ${savedEmail}`} tone="ink" onPress={() => emailReceipt(savedEmail, { ...r, customer })} />
           ) : null}
-          <Pill icon="print-outline" label="Print receipt" tone="paper" onPress={printReceipt} />
+          <Pill icon="print-outline" label={isBill ? "Print fakti" : "Print receipt"} tone="paper" onPress={printReceipt} />
           <Pill icon="share-outline" label="Share" tone="paper" onPress={shareReceipt} />
           {isSale ? (
             <Pill icon="close-circle-outline" label="Pa vle resi" tone="danger" onPress={paVleResi} />
@@ -683,16 +690,16 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         {showCustPicker ? (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "flex-end", zIndex: 60, elevation: 9 }}>
             <Pressable onPress={closeCustPicker} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(22,19,12,0.5)" }} />
-            <View style={{ backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
+            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
               {profCustomer ? (
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <Pressable onPress={() => setProfCustomer(null)} style={{ width: 34, height: 34, borderRadius: 12, backgroundColor: "#efe7d2", alignItems: "center", justifyContent: "center" }}>
-                      <Ionicons name="chevron-back" size={19} color="#16130c" />
+                    <Pressable onPress={() => setProfCustomer(null)} accessibilityLabel="Retounen" style={{ width: topIconBtn.size, height: topIconBtn.size, borderRadius: topIconBtn.radius, backgroundColor: topIconBtn.bg, alignItems: "center", justifyContent: "center" }}>
+                      <Ionicons name="chevron-back" size={topIconBtn.iconSize} color={topIconBtn.icon} />
                     </Pressable>
                     <View style={{ flex: 1 }} />
-                    <Pressable onPress={() => { attachMenuCustomer(profCustomer); closeCustPicker(); }} style={{ paddingHorizontal: 18, height: 40, borderRadius: 20, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center" }}>
-                      <Text style={{ color: "white", fontWeight: "800", fontSize: 14 }}>Add to sale</Text>
+                    <Pressable onPress={() => { attachMenuCustomer(profCustomer); closeCustPicker(); }} style={{ paddingHorizontal: 24, height: 52, borderRadius: 26, backgroundColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
+                      <Text style={{ color: "white", fontWeight: "800", fontSize: 15 }}>Add to sale</Text>
                     </Pressable>
                   </View>
                   <ScrollView style={{ flex: 1, marginTop: 6 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
@@ -701,10 +708,11 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
                 </View>
               ) : (
                 <View style={{ flex: 1 }}>
-                  <View style={{ width: 36, height: 4, backgroundColor: "#d1d1d6", borderRadius: 2, alignSelf: "center", marginBottom: 10 }} />
+                  <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 10 }} />
                   <CustomerPicker
                     storeId={staging?.storeId ?? "demo-store-id"}
                     customers={menuCustomers}
+                    debts={menuDebts}
                     onPick={openPickedProfile}
                     onBack={closeCustPicker}
                     onAdded={(fresh) => setMenuCustomers(prev => (prev.some(x => x.id === fresh.id) ? prev : [...prev, fresh]))}
@@ -718,11 +726,11 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         {showProfModal && (custDetail || customer) ? (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "flex-end", zIndex: 70, elevation: 10 }}>
             <Pressable onPress={closeProfModal} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(22,19,12,0.5)" }} />
-            <View style={{ backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
+            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
               {profMode === "view" ? (
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <Pressable onPress={closeProfModal} style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: "#2E2A23", alignItems: "center", justifyContent: "center" }}>
+                    <Pressable onPress={closeProfModal} accessibilityLabel="Fèmen" style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
                       <Ionicons name="close" size={20} color="#fff" />
                     </Pressable>
                     <View style={{ flex: 1 }} />
@@ -744,12 +752,12 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
               ) : (
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <Pressable onPress={() => setProfMode("view")} style={{ width: 34, height: 34, borderRadius: 12, backgroundColor: palette.surfaceGrouped, alignItems: "center", justifyContent: "center" }}>
-                      <Ionicons name="chevron-back" size={19} color={palette.ink} />
+                    <Pressable onPress={() => setProfMode("view")} accessibilityLabel="Retounen" style={{ width: 34, height: 34, borderRadius: 12, backgroundColor: "#efe7d2", alignItems: "center", justifyContent: "center" }}>
+                      <Ionicons name="chevron-back" size={19} color="#16130c" />
                     </Pressable>
-                    <Text style={{ flex: 1, textAlign: "center", fontWeight: "800", fontSize: 16, color: palette.ink }} numberOfLines={1}>Edit Customer</Text>
-                    <Pressable onPress={saveCustEdit} disabled={!formValid || savingCust} style={{ paddingHorizontal: 16, height: 34, borderRadius: 12, backgroundColor: formValid ? "#16130c" : "#E2E8F0", alignItems: "center", justifyContent: "center", opacity: formValid && !savingCust ? 1 : 0.6 }}>
-                      <Text style={{ color: "white", fontWeight: "800", fontSize: 13 }}>Save</Text>
+                    <Text style={{ flex: 1, textAlign: "center", fontWeight: "800", fontSize: 18, color: "#fff" }} numberOfLines={1}>Edit Customer</Text>
+                    <Pressable onPress={saveCustEdit} disabled={!formValid || savingCust} style={{ paddingHorizontal: 16, height: 34, borderRadius: 12, backgroundColor: formValid ? "#fff" : "#3a3a3c", alignItems: "center", justifyContent: "center", opacity: formValid && !savingCust ? 1 : 0.6 }}>
+                      <Text style={{ color: formValid ? "#16130c" : "#8e8e93", fontWeight: "800", fontSize: 13 }}>{savingCust ? "…" : "Save"}</Text>
                     </Pressable>
                   </View>
                   <ScrollView style={{ flex: 1, marginTop: 6 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
@@ -774,12 +782,12 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         {txnView ? (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "flex-end", zIndex: 80, elevation: 10 }}>
             <Pressable onPress={() => setTxnView(null)} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(22,19,12,0.5)" }} />
-            <View style={{ backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
+            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Pressable onPress={() => setTxnView(null)} style={{ width: 34, height: 34, borderRadius: 12, backgroundColor: "#efe7d2", alignItems: "center", justifyContent: "center" }}>
+                <Pressable onPress={() => setTxnView(null)} accessibilityLabel="Retounen" style={{ width: 34, height: 34, borderRadius: 12, backgroundColor: "#efe7d2", alignItems: "center", justifyContent: "center" }}>
                   <Ionicons name="chevron-back" size={19} color="#16130c" />
                 </Pressable>
-                <Text style={{ flex: 1, textAlign: "center", fontWeight: "800", fontSize: 18, color: "#16130c" }} numberOfLines={1}>
+                <Text style={{ flex: 1, textAlign: "center", fontWeight: "800", fontSize: 18, color: "#fff" }} numberOfLines={1}>
                   {`${fmtG(Number(txnView.sale?.total ?? 0))} Purchase`}
                 </Text>
                 <View style={{ width: 34 }} />

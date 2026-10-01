@@ -18,7 +18,7 @@ export interface CatalogTabletProps {
   products: Product[];
   categories: Category[];
   q: string; setQ: React.Dispatch<React.SetStateAction<string>>;
-  barcode: string; setBarcode: React.Dispatch<React.SetStateAction<string>>;
+  onOpenFilter: () => void; filterOn: boolean; draftCount: number;
   cat: string; setCat: React.Dispatch<React.SetStateAction<string>>;
   filtered: Product[];
   canEdit: boolean;
@@ -38,6 +38,7 @@ export interface CatalogTabletProps {
   getBaseCost: (productId: string) => number;
   onManageProduct: (productId: string, section?: StepKey) => void;
   onOpenProduct: (productId: string) => void;
+  onActivateProduct: (productId: string) => void;
 }
 
 /** Web Inventory KPI mini-card: white, hairline border, 2.5px left accent bar, dot-label + big value + muted sub. */
@@ -72,13 +73,13 @@ export function CatalogTablet(props: CatalogTabletProps) {
   const { width, padH } = useResponsive();
   const {
     role, products, categories,
-    q, setQ, barcode, setBarcode, cat, setCat,
+    q, setQ, onOpenFilter, filterOn, draftCount, cat, setCat,
     filtered,
     canEdit, canAddMore, canReduce, canDelete, canViewCost, canToggleAvail, onToggleAvail, displayPriceOf, defaultUnitOf, getProductCats, getProductCategoriesDisplay,
     setInfoProduct, tabletDetail,
     infoProduct,
     showNameEdit, setShowNameEdit, nameInput, setNameInput, handleChangeName,
-    v2, supplierList, getBaseCost, onManageProduct, onOpenProduct,
+    v2, supplierList, getBaseCost, onManageProduct, onOpenProduct, onActivateProduct,
   } = props;
 
   // Web Inventory KPIs — all derived from props already passed by the shell.
@@ -312,7 +313,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
 
       <View style={{ flex: 1, flexDirection: "row", gap: 12, padding: padH }}>
         <View style={{ flex: 3 }}>
-          <SearchHeader q={q} setQ={setQ} barcode={barcode} setBarcode={setBarcode} padH={padH} />
+          <SearchHeader q={q} setQ={setQ} onOpenFilter={onOpenFilter} filterOn={filterOn} draftCount={draftCount} padH={padH} />
 
           <>
             <CategoryStrip categories={categories} cat={cat} setCat={setCat} products={products} getProductCats={getProductCats} padH={padH} />

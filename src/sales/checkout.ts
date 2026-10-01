@@ -6,6 +6,8 @@ import { insertOutbox } from "../db";
 import { buildReceipts, type ReceiptData } from "../receipts";
 import { fmtG, fmt } from "../format";
 import { loadCatalogModel, currentCanonicalCost, minItemFactor, itemFactor } from "../catalogModel";
+import { inLocalDay, isStandbyWindow, localDayKey } from "../businessGuard";
+import { USERS } from "../users";
 
 export type CheckoutLine = {
   id: string;
@@ -132,17 +134,30 @@ export async function persistSale(args: {
   const amountPaid = isCashLike ? (payment.amountGiven != null ? payment.amountGiven : finalSubtotal) : akompteNum;
   const pm: string = payment.method === "mobile" ? (payment.mobileProvider ?? "moncash") : payment.method;
   const now = new Date().toISOString();
+  // Business Guard standby: sales rung while the seller's own report for
+  // today is locked (submitted/confirmed) and before their next clock-in.
+  let standbyFlag = 0;
+  if (cashier.id) {
+    try {
+      const day = localDayKey(now);
+      const reports = ((await db.getAllAsync("SELECT * FROM daily_reports").catch(() => [])) ?? []) as any[];
+      const myReport = reports.find((r: any) => r.user_id === cashier.id && r.report_date === day && (r.store_id ?? storeId) === storeId);
+      const shifts = ((await db.getAllAsync("SELECT * FROM shifts").catch(() => [])) ?? []) as any[];
+      const shiftsToday = shifts.filter((x: any) => (x.cashier_id ?? null) === cashier.id && inLocalDay(x.start_time, day));
+      if (isStandbyWindow(myReport, shiftsToday)) standbyFlag = 1;
+    } catch {}
+  }
   const sale = {
     id: saleId, store_id: storeId, sale_number: saleNumber,
     customer_id: customer?.id ?? null, status: payment.method === "credit" ? "credit" : "completed",
     payment_method: pm, subtotal: finalSubtotal, discount: 0, total: finalSubtotal, amount_paid: amountPaid,
     amount_due: Math.max(0, finalSubtotal - amountPaid),
-    seller_id: cashier.id, seller_role: cashier.role,
+    seller_id: cashier.id, seller_role: cashier.role, standby: standbyFlag,
     device_id: deviceId, lamport_clock: Date.now(), created_at: now, updated_at: now, is_deleted: false,
   };
 
-  await db.runAsync("INSERT INTO sales (id,store_id,sale_number,customer_id,status,payment_method,subtotal,total,amount_paid,amount_due,seller_id,seller_role,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-    [sale.id, sale.store_id, sale.sale_number, sale.customer_id, sale.status, sale.payment_method, sale.subtotal, sale.total, sale.amount_paid, sale.amount_due, sale.seller_id, sale.seller_role, sale.created_at, sale.updated_at]);
+  await db.runAsync("INSERT INTO sales (id,store_id,sale_number,customer_id,status,payment_method,subtotal,total,amount_paid,amount_due,seller_id,seller_role,standby,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    [sale.id, sale.store_id, sale.sale_number, sale.customer_id, sale.status, sale.payment_method, sale.subtotal, sale.total, sale.amount_paid, sale.amount_due, sale.seller_id, sale.seller_role, sale.standby, sale.created_at, sale.updated_at]);
 
   // Canonical smallest-unit counts (chain-only: base can be biggest now).
   let chainItems: any[] = [];
@@ -212,6 +227,73 @@ export async function persistSale(args: {
   }
   await insertOutbox("sales", "create", sale);
 
+  // Standby handover: cash from post-lock sales is handed to the manager
+  // immediately — timestamped hand rows (one per lock event, so multi-shift
+  // days don't collide); reconciliation rolls confirmed hands into the next
+  // report (daily_reports.standby_carry).
+  if (standbyFlag && cashier.id) {
+    try {
+      const day = localDayKey(now);
+      // Overnight-proof: standby sales from before midnight belong to the
+      // still-open shift too.
+      const prevKey = localDayKey(new Date(now).getTime() - 86400000);
+      const inDays = (ts: any) => inLocalDay(ts, day) || inLocalDay(ts, prevKey);
+      const mine = (((await db.getAllAsync("SELECT * FROM sales").catch(() => [])) ?? []) as any[])
+        .filter((x: any) => x.seller_id === cashier.id && x.store_id === storeId && Number(x.standby ?? 0) === 1
+          && x.payment_method === "cash" && inDays(x.created_at) && !Number(x.is_deleted ?? 0));
+      const amount = mine.reduce((a, x) => a + Number(x.total ?? 0), 0);
+      const count = mine.length;
+      // The locked report this handover belongs to: latest submitted/closed
+      // report of the cashier (per-shift ids), else the legacy per-day id.
+      const myReports = (((await db.getAllAsync("SELECT * FROM daily_reports").catch(() => [])) ?? []) as any[])
+        .filter((r: any) => String(r.user_id ?? "") === String(cashier.id)
+          && (String(r.status ?? "") === "submitted" || String(r.status ?? "") === "closed"))
+        .sort((a: any, b: any) => String(b.submitted_at ?? b.created_at ?? "").localeCompare(String(a.submitted_at ?? a.created_at ?? "")));
+      const lockedRepId = myReports[0]?.id ?? `rep-${cashier.id}-${day}`;
+      const handId = `hand-${cashier.id}-${Date.now()}`;
+      const hands = ((await db.getAllAsync("SELECT * FROM standby_hands").catch(() => [])) ?? []) as any[];
+      // Only sales not already swept into a report count: subtract what
+      // carried hands already took, so a second handover (or second shift)
+      // never double-counts the same cash.
+      const carriedHands = hands.filter((h: any) => String(h.cashier_id ?? "") === String(cashier.id)
+        && inLocalDay(h.handed_at ?? h.created_at, day)
+        && h.carried_into_report_id != null && String(h.carried_into_report_id) !== "");
+      const carriedAmt = carriedHands.reduce((a: any, h: any) => a + Number(h.amount ?? 0), 0);
+      const carriedCount = carriedHands.reduce((a: any, h: any) => a + Number(h.sale_count ?? 0), 0);
+      const freshAmount = Math.max(0, amount - carriedAmt);
+      const freshCount = Math.max(0, count - carriedCount);
+      const existing = hands.find((h: any) => String(h.cashier_id ?? "") === String(cashier.id)
+        && inLocalDay(h.handed_at ?? h.created_at, day)
+        && (h.carried_into_report_id == null || String(h.carried_into_report_id) === ""));
+      if (existing) {
+        await db.runAsync("UPDATE standby_hands SET amount = ?, sale_count = ?, report_id = ?, updated_at = ?, dirty = ? WHERE id = ?",
+          [freshAmount, freshCount, lockedRepId, now, 1, (existing as any).id]);
+        await insertOutbox("standby_hands", "update", { id: (existing as any).id, amount: freshAmount, sale_count: freshCount, report_id: lockedRepId, updated_at: now, dirty: 1 });
+      } else {
+        const managers = USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner")
+          && u.id !== cashier.id && (u.store === storeName || u.role === "owner" || storeId === "demo-store-id"));
+        const managerId = managers[0]?.id ?? "manager-1";
+        const row = {
+          id: handId, store_id: storeId, cashier_id: cashier.id, manager_id: managerId,
+          report_id: lockedRepId, carried_into_report_id: null,
+          sale_count: freshCount, amount: freshAmount, handed_at: now, cashier_confirmed: 0, confirmed_at: null,
+          carried_at: null, created_at: now, updated_at: now, is_deleted: 0, dirty: 1,
+        };
+        await db.runAsync(
+          "INSERT INTO standby_hands (id, store_id, cashier_id, manager_id, report_id, sale_count, amount, handed_at, cashier_confirmed, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+          [row.id, row.store_id, row.cashier_id, row.manager_id, row.report_id, row.sale_count, row.amount, row.handed_at, row.cashier_confirmed, row.created_at, row.updated_at]);
+        await insertOutbox("standby_hands", "create", row);
+        for (const t of managers.slice(0, 4)) {
+          try {
+            await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
+              [`notif-${Date.now()}-${t.id}-${Math.random().toString(36).slice(2, 5)}`, t.id, "standby_hand", handId,
+                `${cashier.name} rantre ${fmtG(freshAmount)} standby (${freshCount} vant) apre rapò li — kòb la pou ou resevwa.`, "pending", now]);
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
   if (resumedTabId) {
     await db.runAsync("UPDATE suspended_sales SET status = ?, completed_sale_id = ? WHERE id = ?", ["completed", saleId, resumedTabId]);
     await logTabEvent(db, resumedTabId, "completed", `${saleNumber} • ${fmtG(finalSubtotal)}`);
@@ -233,8 +315,10 @@ export async function persistSale(args: {
     // First installment — down payment (if any)
     if (akompteNum > 0) {
       const receipt = `REC-${now.slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-      await db.runAsync("INSERT INTO credit_payments (id, store_id, credit_id, debt_id, amount, payment_method, receipt_number, created_at, collected_by) VALUES (?,?,?,?,?,?,?,?,?)",
-        [`pay-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, storeId, credit.id, credit.id, akompteNum, "cash", receipt, now, cashier.id]);
+      const { activeShiftIdFor } = await import("./creditPayments");
+      const downShiftId = await activeShiftIdFor(db, cashier.id);
+      await db.runAsync("INSERT INTO credit_payments (id, store_id, credit_id, debt_id, amount, payment_method, receipt_number, created_at, collected_by, shift_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [`pay-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, storeId, credit.id, credit.id, akompteNum, "cash", receipt, now, cashier.id, downShiftId]);
     }
     // Only the unpaid remainder becomes debt
     customerPatch = {
@@ -264,7 +348,7 @@ export async function persistSale(args: {
     customerId: customer?.id ?? null,
     items: lines.map(it => ({
       name: it.name,
-      variant: it.variant !== "Regular" ? it.variant : null,
+      variant: it.variant ?? null,
       unitName: it.unitName ?? null,
       qty: it.qty,
       unitPrice: it.unitPrice,

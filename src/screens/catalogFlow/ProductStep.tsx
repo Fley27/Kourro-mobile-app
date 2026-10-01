@@ -9,10 +9,11 @@ import { categoryDisplayIcon } from "../CatalogShared";
 import PickerGrid from "../../components/PickerGrid";
 import type { FlowCtx } from "./types";
 import { canManageCatalog } from "./types";
+import { uploadError } from "../../components/UploadTransition";
 
 export default function ProductStep({
   ctx, productId, onNext, onBack, onDirtyChange, registerNext,
-  active: stepActive = true,
+  active: stepActive = true, showSkuField = false, allowSupplierCreate = false,
 }: {
   ctx: FlowCtx;
   productId?: string | null;
@@ -22,13 +23,19 @@ export default function ProductStep({
   registerNext?: (fn: (() => void) | null) => void;
   /** Create flow: steps stay mounted; only the visible one owns Kontinye. */
   active?: boolean;
+  /** Bulk flow: editable SKU field (otherwise auto-minted, hidden). */
+  showSkuField?: boolean;
+  /** Bulk flow: inline name-only supplier quick-create. */
+  allowSupplierCreate?: boolean;
 }) {
   const [itemType, setItemType] = useState<"goods" | "service">("goods");
   const [available, setAvailable] = useState(true);
   const [typeOpen, setTypeOpen] = useState(false);
   const [name, setName] = useState("");
+  const [sku, setSku] = useState("");
   const [categoryIds, setCategoryIds] = useState<string[]>([]);
   const [supplierIds, setSupplierIds] = useState<string[]>([]);
+  const [newSupplierName, setNewSupplierName] = useState("");
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [touched, setTouched] = useState(false);
@@ -46,6 +53,7 @@ export default function ProductStep({
           const p = (((await db2.getAllAsync("SELECT * FROM products WHERE id = ?", [productId]).catch(() => [])) ?? []) as any[])[0];
           if (p) {
             setName(String(p.name ?? ""));
+            setSku(String(p.sku ?? ""));
             setItemType(p.item_type === "service" ? "service" : "goods");
             setAvailable(p.is_available !== 0 && (p.is_available as any) !== false);
           }
@@ -55,6 +63,14 @@ export default function ProductStep({
           const ps = (((await db2.getAllAsync("SELECT supplier_id FROM product_suppliers WHERE product_id = ?", [productId]).catch(() => [])) ?? []) as any[])
             .map((r: any) => String(r.supplier_id));
           setSupplierIds(ps);
+        } else if (showSkuField && !sku) {
+          // Bulk: prefill a fresh unique SKU for the new draft.
+          const taken = new Set((((await db.getAllAsync("SELECT sku FROM products").catch(() => [])) ?? []) as any[])
+            .map((r: any) => String(r.sku ?? "")));
+          for (let i = 0; i < 50; i++) {
+            const cand = `SKU-${Math.floor(1000 + Math.random() * 9000)}`;
+            if (!taken.has(cand)) { setSku(cand); break; }
+          }
         }
       } catch {}
     })();
@@ -69,6 +85,7 @@ export default function ProductStep({
   const error = (() => {
     const nm = name.trim();
     if (nm.length < 2) return "Bay non pwodwi a (min 2 lèt).";
+    if (showSkuField && !sku.trim()) return "SKU vid.";
     if (!categoryIds.length) return "Chwazi omwen yon kategori.";
     return "";
   })();
@@ -77,15 +94,56 @@ export default function ProductStep({
   async function save() {
     if (!valid || busy) { setTouched(true); if (error) Alert.alert("Enkonplè", error); return; }
     if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè ka kreye pwodwi."); return; }
+    // Product names are unique (case-insensitive, live rows only).
+    try {
+      const db0 = await getDb();
+      const existing = (((await db0.getAllAsync("SELECT id, name FROM products WHERE is_deleted = 0 OR is_deleted IS NULL").catch(() => [])) ?? []) as any[]);
+      const norm = name.trim().toLowerCase();
+      const clash = existing.some((r: any) => String(r.name ?? "").trim().toLowerCase() === norm && String(r.id) !== String(productId ?? ""));
+      if (clash) { setTouched(true); Alert.alert("Non deja egziste", `"${name.trim()}" deja nan katalòg — chak pwodwi dwe inik`); return; }
+    } catch {}
+    // Bulk SKU field: unique across live rows (self excluded).
+    let finalSku: string | null = null;
+    if (showSkuField) {
+      try {
+        const dbS = await getDb();
+        const skus = (((await dbS.getAllAsync("SELECT id, sku FROM products WHERE is_deleted = 0 OR is_deleted IS NULL").catch(() => [])) ?? []) as any[]);
+        const clash = skus.some((r: any) => String(r.sku ?? "").trim().toUpperCase() === sku.trim().toUpperCase() && String(r.id) !== String(productId ?? ""));
+        if (!sku.trim() || clash) { setTouched(true); Alert.alert("SKU pa valab", clash ? "SKU sa deja egziste." : "SKU vid."); return; }
+        finalSku = sku.trim().toUpperCase();
+      } catch {}
+    }
     setBusy(true);
     try {
       const db = await getDb();
       const now = new Date().toISOString();
       // Services carry no suppliers (no stock, no buy price).
-      const supIds = itemType === "goods" ? supplierIds : [];
+      const supIds = [...(itemType === "goods" ? supplierIds : [])];
+      // Bulk inline quick-create (name-only supplier, linked below).
+      const quickName = allowSupplierCreate && itemType === "goods" ? newSupplierName.trim() : "";
+      if (quickName) {
+        const hit = suppliers.find(s => s.name.trim().toLowerCase() === quickName.toLowerCase());
+        if (hit) {
+          if (!supIds.includes(hit.id)) supIds.push(hit.id);
+        } else {
+          const sid = `sup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          await db.runAsync(
+            "INSERT OR REPLACE INTO suppliers (id, store_id, name, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?)",
+            [sid, "demo-store-id", quickName, now, now, 0, 1]
+          );
+          try { await insertOutbox("suppliers", "create", { id: sid, store_id: "demo-store-id", name: quickName, created_at: now, updated_at: now, is_deleted: false }); } catch {}
+          supIds.push(sid);
+          setSuppliers(prev => [...prev, { id: sid, name: quickName }]);
+        }
+        setNewSupplierName("");
+      }
       if (editing && productId) {
-        await db.runAsync("UPDATE products SET name = ?, item_type = ?, is_available = ?, updated_at = ?, dirty = 1 WHERE id = ?", [name.trim(), itemType, available ? 1 : 0, now, productId]);
-        try { await insertOutbox("products", "update", { id: productId, name: name.trim(), item_type: itemType, is_available: available ? 1 : 0, updated_at: now, is_deleted: 0 }); } catch {}
+        if (showSkuField && finalSku) {
+          await db.runAsync("UPDATE products SET name = ?, sku = ?, item_type = ?, is_available = ?, updated_at = ?, dirty = 1 WHERE id = ?", [name.trim(), finalSku, itemType, available ? 1 : 0, now, productId]);
+        } else {
+          await db.runAsync("UPDATE products SET name = ?, item_type = ?, is_available = ?, updated_at = ?, dirty = 1 WHERE id = ?", [name.trim(), itemType, available ? 1 : 0, now, productId]);
+        }
+        try { await insertOutbox("products", "update", { id: productId, name: name.trim(), ...(showSkuField && finalSku ? { sku: finalSku } : {}), item_type: itemType, is_available: available ? 1 : 0, updated_at: now, is_deleted: 0 }); } catch {}
         const prevCats = (((await db.getAllAsync("SELECT category_id FROM product_categories WHERE product_id = ?", [productId]).catch(() => [])) ?? []) as any[]).map((r: any) => String(r.category_id));
         for (const cid of categoryIds) {
           if (prevCats.includes(cid)) continue;
@@ -112,15 +170,18 @@ export default function ProductStep({
         onNext?.(productId, itemType);
       } else {
         const id = `prod-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-        // Every product mints a unique SKU at creation (SKU-0042 style).
-        const takenSkus = new Set((((await db.getAllAsync("SELECT sku FROM products").catch(() => [])) ?? []) as any[])
-          .map((r: any) => String(r.sku ?? "")));
-        let sku = "";
-        for (let i = 0; i < 50 && !sku; i++) {
-          const cand = `SKU-${Math.floor(1000 + Math.random() * 9000)}`;
-          if (!takenSkus.has(cand)) sku = cand;
+        // Every product mints a unique SKU at creation (SKU-0042 style),
+        // unless the bulk field already fixed one (validated above).
+        let sku = showSkuField && finalSku ? finalSku : "";
+        if (!sku) {
+          const takenSkus = new Set((((await db.getAllAsync("SELECT sku FROM products").catch(() => [])) ?? []) as any[])
+            .map((r: any) => String(r.sku ?? "")));
+          for (let i = 0; i < 50 && !sku; i++) {
+            const cand = `SKU-${Math.floor(1000 + Math.random() * 9000)}`;
+            if (!takenSkus.has(cand)) sku = cand;
+          }
+          if (!sku) sku = `SKU-${Date.now().toString(36).toUpperCase()}`;
         }
-        if (!sku) sku = `SKU-${Date.now().toString(36).toUpperCase()}`;
         await db.runAsync(
           "INSERT INTO products (id, store_id, sku, name, category_id, stock_quantity, current_amount_available, low_stock_threshold, status, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
           [id, "demo-store-id", sku, name.trim(), categoryIds[0] ?? null, 0, 0, 5, "draft", now]
@@ -140,7 +201,7 @@ export default function ProductStep({
         onNext?.(id, itemType);
       }
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Sove pwodwi echwe");
+      uploadError("Erè", e?.message ?? "Sove pwodwi echwe");
     } finally {
       setBusy(false);
     }
@@ -187,6 +248,13 @@ export default function ProductStep({
           style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, marginTop: 8, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
         {touched && error && !name.trim() ? <Text style={{ fontSize: 12, color: "#e06c5b", marginTop: 6 }}>{error}</Text> : null}
       </View>
+      {showSkuField ? (
+        <View>
+          <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>SKU *</Text>
+          <TextInput value={sku} onChangeText={v => { setTouched(true); setSku(v.toUpperCase().replace(/[^A-Z0-9-]/g, "")); }} placeholder="SKU-0000" placeholderTextColor="#636366" autoCapitalize="characters"
+            style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, marginTop: 8, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
+        </View>
+      ) : null}
       <PickerGrid
         title={`KATEGORI * (${categoryIds.length})`}
         searchPlaceholder="Chèche kategori…"
@@ -207,6 +275,13 @@ export default function ProductStep({
           <Text style={{ fontSize: 12, color: "#8e8e93" }}>Pa gen founisè — kreye youn nan Founisè.</Text>
         )
       )}
+      {itemType === "goods" && allowSupplierCreate ? (
+        <View>
+          <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Oubyen nouvo founisè (kreyasyon rapid)</Text>
+          <TextInput value={newSupplierName} onChangeText={v => { setTouched(true); setNewSupplierName(v); }} placeholder="Non founisè a" placeholderTextColor="#636366"
+            style={{ height: 60, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, marginTop: 8, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
+        </View>
+      ) : null}
       {!registerNext && (
       <View style={{ flexDirection: "row", gap: 10, marginTop: 6 }}>
         {onBack ? (

@@ -10,10 +10,12 @@
  * legacy seed_v1 demo rows (18 products) are wiped first on dev upgrades.
  * Seeded rows write dirty=0 with NO outbox entries — dev data never syncs.
  */
-import CATS from "../data/catalog.categories.json";
-import SUPS from "../data/catalog.suppliers.json";
-import PRODS from "../data/catalog.products.json";
-import COSTS from "../data/catalog.costs.json";
+// Demo seed JSONs deleted (owner wiped the catalog) — seed is inert.
+// To reseed, restore src/data/catalog.*.json and re-add the imports.
+const CATS: Cat[] = [];
+const SUPS: Sup[] = [];
+const PRODS: Prod[] = [];
+const COSTS: Cost[] = [];
 
 export const DEV_SEED_KEY = "seed_catalog_v1";
 const LEGACY_SEED_KEY = "seed_v1";

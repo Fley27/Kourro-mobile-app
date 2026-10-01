@@ -2,23 +2,25 @@
 // (typed/scanned, id or VTE-...), plus lost-receipt search (customer/date/item).
 import React, { useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Alert } from "react-native";
-import { palette } from "../theme";
 import { findSaleForPickup, recordPickup, listOpenPickups, toNum, remainingOf } from "./store";
 import { printPickupReceipt, type PickupReceiptLine } from "./receipt";
-import { PAYMENT_LABELS } from "../receipts";
+import { PAYMENT_LABELS, receiptLineLabels, attachLineLabels } from "../receipts";
+import { saleLineLabel } from "../labels";
+import { getDb } from "../db";
+import { uploadSuccess, uploadError } from "../components/UploadTransition";
 
 export function PickupReceiptExtra({ items, saleId }: { items: any[]; saleId: string }) {
   const open = (items ?? []).filter(it => remainingOf(it) > 0);
   if (!open.length) return null;
   return (
-    <View style={{ marginTop: 8, backgroundColor: palette.warningBg, borderWidth: 1, borderColor: palette.warningBd, borderRadius: 10, padding: 10 }}>
-      <Text style={{ fontWeight: "800", fontSize: 11, color: palette.warning }}>RETE POU PRAN</Text>
+    <View style={{ marginTop: 8, backgroundColor: "rgba(255,214,10,0.14)", borderWidth: 1, borderColor: "rgba(255,214,10,0.4)", borderRadius: 10, padding: 10 }}>
+      <Text style={{ fontWeight: "800", fontSize: 11, color: "#FFD60A" }}>RETE POU PRAN</Text>
       {open.map(it => (
-        <Text key={it.id} style={{ fontSize: 11, color: palette.warning, marginTop: 2 }}>
-          {it.product_name}: rete {remainingOf(it)}
+        <Text key={it.id} style={{ fontSize: 11, color: "#FFD60A", marginTop: 2 }}>
+          {saleLineLabel(it)}: rete {remainingOf(it)}
         </Text>
       ))}
-      <Text style={{ fontSize: 10, color: palette.muted2, marginTop: 4 }}>ID pou rekipere: {saleId}</Text>
+      <Text style={{ fontSize: 10, color: "#8e8e93", marginTop: 4 }}>ID pou rekipere: {saleId}</Text>
     </View>
   );
 }
@@ -46,14 +48,19 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
     if (!open.length) return Alert.alert("Pa gen balans", "Tout machandiz vant sa a deja pran.");
     setSaleId(found.sale.id);
     setSaleNumber(found.sale.sale_number ?? found.sale.id);
+    await attachLineLabels(await getDb(), found.items).catch(() => {});
     setLines(found.items);
+    // Empty on purpose: the remaining quantity is only a placeholder hint
+    // (empty = take all that remains) — nothing is committed until typed.
     const init: Record<string, string> = {};
-    for (const it of open) init[it.id] = String(remainingOf(it));
+    for (const it of open) init[it.id] = "";
     setInputs(init);
   }
 
   async function searchOpen() {
     const rows = await listOpenPickups(storeId, { q: query }).catch(() => []);
+    const db = await getDb();
+    for (const r of rows) await attachLineLabels(db, r.openItems ?? []).catch(() => {});
     setOpenList(rows.slice(0, 20));
   }
 
@@ -74,11 +81,12 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
       const fresh = await findSaleForPickup(storeId, saleId).catch(() => null);
       const allItems = fresh?.items ?? lines;
       const sale = fresh?.sale ?? null;
-      const receiptLines: PickupReceiptLine[] = allItems.map((it: any) => {
+      const labels = await receiptLineLabels(await getDb(), allItems);
+      const receiptLines: PickupReceiptLine[] = allItems.map((it: any, i: number) => {
         const bought = toNum(it.quantity);
         const takenNow = toNum(it.quantity_delivered ?? bought);
         return {
-          name: it.product_name ?? "—",
+          name: labels[i] ?? it.product_name ?? "—",
           bought,
           taken: Math.round(takenNow * 100) / 100,
           remaining: Math.max(0, Math.round((bought - takenNow) * 100) / 100),
@@ -108,15 +116,15 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
         });
       } catch {}
       const still = touched.filter(t => t.remainingAfter > 0.000001);
-      Alert.alert(
+      uploadSuccess(
         "Rekipere ✓ • Resi enprime",
         still.length
-          ? `${touched.map(t => `${t.product_name}: achte ${toNum(t.quantity)}, pran ${t.takenNow}, rete ${t.remainingAfter}`).join("\n")}\nID: ${saleId}`
+          ? `${touched.map(t => `${saleLineLabel(t)}: achte ${toNum(t.quantity)}, pran ${t.takenNow}, rete ${t.remainingAfter}`).join("\n")}\nID: ${saleId}`
           : `Tout pran. Balans 0.`,
-        [{ text: "OK", onPress: () => { setLines([]); setSaleId(null); setInputs({}); setQuery(""); onClose(); } }]
+        () => { setLines([]); setSaleId(null); setInputs({}); setQuery(""); onClose(); }
       );
     } catch (e: any) {
-      Alert.alert("Bloke", e?.message ?? "Rekipere echwe");
+      uploadError("Bloke", e?.message ?? "Rekipere echwe");
     } finally {
       setSaving(false);
     }
@@ -124,56 +132,58 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
-        <View style={{ backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 16, maxHeight: "90%" }}>
-          <Text style={{ fontWeight: "800", fontSize: 17 }}>Rekipere machandiz</Text>
-          <Text style={{ color: "#6b7280", fontSize: 12, marginTop: 4 }}>Chèche pa ID vant / VTE-… (eskane oswa tape). Ka repete jiskaske 0.</Text>
+      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+        <View style={{ backgroundColor: "#1C1C1E", borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 16, paddingBottom: 28, maxHeight: "90%" }}>
+          <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
+          <Text style={{ fontWeight: "800", fontSize: 17, color: "#fff" }}>Rekipere machandiz</Text>
+          <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 4 }}>Chèche pa ID vant / VTE-… (eskane oswa tape). Ka repete jiskaske 0.</Text>
           <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
             <TextInput value={query} onChangeText={setQuery} placeholder="ID oswa VTE-…, non kliyan, pwodwi" autoCapitalize="none"
-              style={{ flex: 1, borderWidth: 1, borderColor: "#e5e5ea", borderRadius: 10, padding: 11 }} />
-            <Pressable onPress={search} style={{ paddingHorizontal: 16, backgroundColor: "#16130c", borderRadius: 10, justifyContent: "center" }}>
-              <Text style={{ color: "white", fontWeight: "800" }}>Chèche</Text>
+              placeholderTextColor="#8e8e93"
+              style={{ flex: 1, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 10, padding: 11, color: "#fff", backgroundColor: "#000" }} />
+            <Pressable onPress={search} style={{ paddingHorizontal: 16, backgroundColor: "#fff", borderRadius: 10, justifyContent: "center" }}>
+              <Text style={{ color: "#16130c", fontWeight: "800" }}>Chèche</Text>
             </Pressable>
           </View>
           <Pressable onPress={searchOpen} style={{ marginTop: 8, padding: 8, alignItems: "center" }}>
-            <Text style={{ color: "#6b7280", fontSize: 12, fontWeight: "600" }}>Pèdi resi? Lis vant ki gen balans (pa kliyan/dat/atik)</Text>
+            <Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>Pèdi resi? Lis vant ki gen balans (pa kliyan/dat/atik)</Text>
           </Pressable>
           {openList.length > 0 ? (
             <ScrollView style={{ maxHeight: 140, marginTop: 6 }}>
               {openList.map(r => (
                 <Pressable key={r.sale.id} onPress={() => { setQuery(r.sale.sale_number ?? r.sale.id); setOpenList([]); }}
-                  style={{ padding: 10, borderWidth: 1, borderColor: "#f1f5f9", borderRadius: 10, marginBottom: 6 }}>
-                  <Text style={{ fontWeight: "700", fontSize: 12 }}>{r.sale.sale_number} • {r.customer?.name ?? "—"}</Text>
-                  <Text style={{ fontSize: 11, color: "#6b7280" }}>{r.openItems.map((it: any) => `${it.product_name} (rete ${remainingOf(it)})`).join(", ")}</Text>
+                  style={{ padding: 10, borderWidth: 0.5, borderColor: "#3a3a3c", backgroundColor: "#2b2b2b", borderRadius: 10, marginBottom: 6 }}>
+                  <Text style={{ fontWeight: "700", fontSize: 12, color: "#fff" }}>{r.sale.sale_number} • {r.customer?.name ?? "—"}</Text>
+                  <Text style={{ fontSize: 11, color: "#8e8e93" }}>{r.openItems.map((it: any) => `${saleLineLabel(it)} (rete ${remainingOf(it)})`).join(", ")}</Text>
                 </Pressable>
               ))}
             </ScrollView>
           ) : null}
           {saleId ? (
-            <ScrollView style={{ marginTop: 10, maxHeight: 320 }}>
-              <Text style={{ fontWeight: "700", fontSize: 13, marginBottom: 8 }}>Vant {saleNumber}</Text>
+            <ScrollView style={{ marginTop: 10, maxHeight: 320 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              <Text style={{ fontWeight: "700", fontSize: 13, marginBottom: 8, color: "#fff" }}>Vant {saleNumber}</Text>
               {lines.filter(it => remainingOf(it) > 0.000001).map(it => (
-                <View key={it.id} style={{ borderWidth: 1, borderColor: "#e5e5ea", borderRadius: 12, padding: 10, marginBottom: 8 }}>
-                  <Text style={{ fontWeight: "700", fontSize: 13 }}>{it.product_name}</Text>
-                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "#F8FAFC", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, marginTop: 6 }}>
-                    <Text style={{ fontSize: 10, color: "#64748B", fontWeight: "800", letterSpacing: 0.5 }}>ACHTE</Text>
-                    <Text style={{ fontWeight: "900", fontSize: 15, color: "#0F172A" }}>{toNum(it.quantity)}</Text>
+                <View key={it.id} style={{ borderWidth: 0.5, borderColor: "#3a3a3c", backgroundColor: "#2b2b2b", borderRadius: 12, padding: 10, marginBottom: 8 }}>
+                  <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>{saleLineLabel(it)}</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "#1c1c1e", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, marginTop: 6 }}>
+                    <Text style={{ fontSize: 10, color: "#8e8e93", fontWeight: "800", letterSpacing: 0.5 }}>ACHTE</Text>
+                    <Text style={{ fontWeight: "900", fontSize: 15, color: "#fff" }}>{toNum(it.quantity)}</Text>
                   </View>
-                  <Text style={{ fontSize: 11, color: palette.warning, fontWeight: "700", marginTop: 4 }}>Rete pou pran: {remainingOf(it)}</Text>
+                  <Text style={{ fontSize: 11, color: "#FFD60A", fontWeight: "700", marginTop: 4 }}>Rete pou pran: {remainingOf(it)}</Text>
                   <TextInput value={inputs[it.id] ?? ""} onChangeText={v => setInputs(p => ({ ...p, [it.id]: v.replace(/[^0-9.,]/g, "") }))}
-                    keyboardType="decimal-pad" placeholder="kantite k ap pran kounye a"
-                    style={{ marginTop: 8, borderWidth: 1, borderColor: "#e5e5ea", borderRadius: 10, padding: 10, fontWeight: "700" }} />
+                    keyboardType="decimal-pad" placeholder={String(Math.round(remainingOf(it) * 100) / 100)} placeholderTextColor="#8e8e93"
+                    style={{ marginTop: 8, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 10, padding: 10, fontWeight: "700", color: "#fff", backgroundColor: "#000" }} />
                 </View>
               ))}
             </ScrollView>
           ) : null}
           <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
-            <Pressable onPress={onClose} style={{ flex: 1, padding: 13, backgroundColor: "#f1f5f9", borderRadius: 12, alignItems: "center" }}>
-              <Text style={{ fontWeight: "700" }}>Fèmen</Text>
+            <Pressable onPress={onClose} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
+              <Text style={{ fontWeight: "700", color: "#fff", fontSize: 14 }}>Fèmen</Text>
             </Pressable>
             {saleId ? (
-              <Pressable onPress={save} disabled={saving} style={{ flex: 2, padding: 13, backgroundColor: palette.success, borderRadius: 12, alignItems: "center", opacity: saving ? 0.6 : 1 }}>
-                <Text style={{ color: "white", fontWeight: "800" }}>{saving ? "Ap anrejistre…" : "Konfime rekipere"}</Text>
+              <Pressable onPress={save} disabled={saving} style={{ flex: 2, paddingVertical: 14, backgroundColor: saving ? "#2b2b2b" : "#fff", borderRadius: 12, alignItems: "center" }}>
+                <Text style={{ color: saving ? "#8e8e93" : "#16130c", fontWeight: "800", fontSize: 14 }}>{saving ? "Ap anrejistre…" : "Konfime rekipere"}</Text>
               </Pressable>
             ) : null}
           </View>

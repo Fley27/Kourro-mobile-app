@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, Alert } from "react-native";
 import { palette } from "../theme";
 import { getPickupEnabled, setPickupEnabled } from "./flag";
+import { uploadError } from "../components/UploadTransition";
 
 export default function PickupToggleCard({ storeId, role }: { storeId: string; role?: string | null }) {
   void role; // every seller role has full access
@@ -18,7 +19,7 @@ export default function PickupToggleCard({ storeId, role }: { storeId: string; r
       await setPickupEnabled(storeId, next);
       setEnabled(next);
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Toggle echwe");
+      uploadError("Erè", e?.message ?? "Toggle echwe");
     }
   }
   return (

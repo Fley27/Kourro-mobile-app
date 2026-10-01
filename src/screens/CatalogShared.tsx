@@ -86,8 +86,9 @@ const ICON_KEYWORDS: [string[], keyof typeof Ionicons.glyphMap][] = [
   [["eneji", "enerji", "energy"], "flash-outline"],
 ];
 
-function normName(s: string): string {
-  return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+/** Accent-insensitive lowercase (ze matches Zè) for all search filters. */
+export function normName(s: string): string {
+  return (s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 /** Glyphs relevant to a name, best match first. Empty when nothing matches. */
@@ -239,10 +240,10 @@ export function StockStatusPill({ status, large }: { status: StockStatus; large?
   );
 }
 
-/** Apple search bar (catalog only — batch tabs live in Inventory now). Identical on phone/tablet. */
-export function SearchHeader({ q, setQ, barcode, setBarcode, padH }: {
+/** Apple search bar + status filter (no more barcode pill). Identical on phone/tablet. */
+export function SearchHeader({ q, setQ, onOpenFilter, filterOn, draftCount, padH }: {
   q: string; setQ: (v: string) => void;
-  barcode: string; setBarcode: (v: string) => void;
+  onOpenFilter: () => void; filterOn: boolean; draftCount: number;
   padH: number;
 }) {
   return (
@@ -253,10 +254,22 @@ export function SearchHeader({ q, setQ, barcode, setBarcode, padH }: {
           <TextInput placeholder="Chèche pwodwi, SKU" placeholderTextColor="#8e8e93" value={q} onChangeText={setQ} style={{ flex: 1, fontSize: 16, color: "#fff" }} returnKeyType="search" />
           {q.length > 0 && <Pressable onPress={() => setQ("")} hitSlop={8} style={{ padding: 4 }}><Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>✕</Text></Pressable>}
         </View>
-        <View style={{ width: 124, height: 52, flexDirection: "row", alignItems: "center", backgroundColor: "transparent", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 26, paddingHorizontal: 16 }}>
-          <Ionicons name="barcode-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
-          <TextInput placeholder="Kòd bar" placeholderTextColor="#8e8e93" value={barcode} onChangeText={setBarcode} style={{ flex: 1, fontSize: 15, color: "#fff" }} autoCapitalize="characters" />
-          {barcode.length > 0 && <Pressable onPress={() => setBarcode("")} hitSlop={8} style={{ padding: 4 }}><Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>✕</Text></Pressable>}
+        <View>
+          <Pressable
+            onPress={onOpenFilter}
+            style={{
+              width: 52, height: 52, borderRadius: 14, alignItems: "center", justifyContent: "center",
+              backgroundColor: filterOn ? "#fff" : "transparent",
+              borderWidth: 1, borderColor: filterOn ? "#fff" : "#3a3a3c",
+            }}
+          >
+            <Ionicons name="filter" size={20} color={filterOn ? "#000" : "#fff"} />
+          </Pressable>
+          {draftCount > 0 && (
+            <View style={{ position: "absolute", top: -6, right: -6, minWidth: 20, height: 20, borderRadius: 10, backgroundColor: "#d99a2b", alignItems: "center", justifyContent: "center", paddingHorizontal: 5 }}>
+              <Text style={{ fontSize: 11, fontWeight: "800", color: "#000" }}>{draftCount}</Text>
+            </View>
+          )}
         </View>
       </View>
     </View>
@@ -297,10 +310,10 @@ export function CategoryStrip({ categories, cat, setCat, products, getProductCat
  *  status pill, SKU · categories, qty + unit, gold price, chevron.
  *  Quantities stay white unless stock warns (FÈB/EPUIZE bright tint);
  *  `selected` highlights the pick. */
-export function ProductCard({ item, role, prodCats, status, recentMoves, displayPrice, unitName, isTablet, canEdit, canViewCost, canToggleAvail, selected, isFirst, isLast, stockItems, variants, baseCost, onPress }: {
+export function ProductCard({ item, role, prodCats, status, recentMoves, displayPrice, unitName, isTablet, canEdit, canViewCost, canToggleAvail, selected, isFirst, isLast, stockItems, variants, baseCost, footer, onPress }: {
   item: Product; role: string; prodCats: Category[]; status: StockStatus;
   recentMoves: StockMovement[]; displayPrice: number; unitName: string;
-  isTablet: boolean; canEdit: boolean; canViewCost: boolean; canToggleAvail?: boolean; selected?: boolean; isFirst?: boolean; isLast?: boolean; stockItems?: Item[]; variants?: Variant[]; baseCost?: number; onPress: () => void;
+  isTablet: boolean; canEdit: boolean; canViewCost: boolean; canToggleAvail?: boolean; selected?: boolean; isFirst?: boolean; isLast?: boolean; stockItems?: Item[]; variants?: Variant[]; baseCost?: number; footer?: React.ReactNode; onPress: () => void;
 }) {
   void role; void recentMoves; void canToggleAvail; void isFirst; void isLast;
   void displayPrice; void canViewCost; void baseCost;
@@ -328,7 +341,6 @@ export function ProductCard({ item, role, prodCats, status, recentMoves, display
   const paperSub = "#a89f88";
   const cardStyle = {
     flex: isTablet ? 1 : undefined,
-    flexDirection: "row" as const, alignItems: "center" as const, gap: 12,
     backgroundColor: selected ? "#2b2b2b" : "#232327",
     borderWidth: 1,
     borderColor: warnBorder ?? (selected ? "#3a3a3c" : "rgba(246,241,228,0.12)"),
@@ -337,8 +349,10 @@ export function ProductCard({ item, role, prodCats, status, recentMoves, display
     padding: 14,
     opacity: service && !available ? 0.55 : 1,
   };
+  const pressable = canEdit || (!!canToggleAvail && service);
   const inner = (
     <>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
       <View style={{ width: 52, height: 52, borderRadius: 14, backgroundColor: "rgba(221,138,62,0.12)", alignItems: "center", justifyContent: "center" }}>
         <Ionicons name="cube-outline" size={24} color="#dd8a3e" />
       </View>
@@ -363,14 +377,13 @@ export function ProductCard({ item, role, prodCats, status, recentMoves, display
           {variantCount} variant
         </Text>
       </View>
+      {pressable ? <Ionicons name="chevron-forward" size={18} color="#636366" style={{ marginRight: -4 }} /> : null}
+      </View>
+      {footer ? <View style={{ marginTop: 10 }}>{footer}</View> : null}
     </>
   );
-  const pressable = canEdit || (!!canToggleAvail && service);
-  const chevron = pressable
-    ? <Ionicons name="chevron-forward" size={18} color="#636366" style={{ marginRight: -4 }} />
-    : null;
   return pressable ? (
-    <Pressable onPress={onPress} style={cardStyle}>{inner}{chevron}</Pressable>
+    <Pressable onPress={onPress} style={cardStyle}>{inner}</Pressable>
   ) : (
     <View style={cardStyle}>{inner}</View>
   );

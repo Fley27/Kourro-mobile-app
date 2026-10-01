@@ -1,5 +1,5 @@
 import React from "react";
-import { View, Text, FlatList } from "react-native";
+import { View, Text, FlatList, Pressable } from "react-native";
 import { radius } from "../theme";
 import { useResponsive, centerBox } from "../responsive";
 import type { Role } from "../users";
@@ -15,7 +15,7 @@ export interface CatalogPhoneProps {
   products: Product[];
   categories: Category[];
   q: string; setQ: React.Dispatch<React.SetStateAction<string>>;
-  barcode: string; setBarcode: React.Dispatch<React.SetStateAction<string>>;
+  onOpenFilter: () => void; filterOn: boolean; draftCount: number;
   cat: string; setCat: React.Dispatch<React.SetStateAction<string>>;
   filtered: Product[];
   canEdit: boolean;
@@ -27,6 +27,7 @@ export interface CatalogPhoneProps {
   v2: CatalogModel;
   getBaseCost: (productId: string) => number;
   onOpenProduct: (productId: string) => void;
+  onActivateProduct: (productId: string) => void;
 }
 
 /** Phone layout: search + category strip + 1-col product cards. */
@@ -34,17 +35,17 @@ export function CatalogPhone(props: CatalogPhoneProps) {
   const { width, padH } = useResponsive();
   const {
     role, products, categories,
-    q, setQ, barcode, setBarcode, cat, setCat,
+    q, setQ, onOpenFilter, filterOn, draftCount, cat, setCat,
     filtered,
     canEdit,
     canViewCost, canToggleAvail,
     displayPriceOf, defaultUnitOf, getProductCats, getProductCategoriesDisplay,
-    v2, getBaseCost, onOpenProduct,
+    v2, getBaseCost, onOpenProduct, onActivateProduct,
   } = props;
 
   return (
     <View style={{ flex: 1, ...centerBox(false, width, 880) }}>
-      <SearchHeader q={q} setQ={setQ} barcode={barcode} setBarcode={setBarcode} padH={padH} />
+      <SearchHeader q={q} setQ={setQ} onOpenFilter={onOpenFilter} filterOn={filterOn} draftCount={draftCount} padH={padH} />
 
       <>
         <CategoryStrip categories={categories} cat={cat} setCat={setCat} products={products} getProductCats={getProductCats} padH={padH} />

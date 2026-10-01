@@ -9,6 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { radius, shadow, topIconBtn } from "../theme";
 import { getDb, insertOutbox } from "../db";
 import { type Category, categoryDisplayIcon, categoryIonicon, matchCategoryIconNames, slugify } from "../screens/CatalogShared";
+import { uploadError } from "./UploadTransition";
 
 type Glyph = keyof typeof Ionicons.glyphMap;
 
@@ -509,7 +510,7 @@ export default function CategoryFormModal({
       onSaved([newId]);
       onClose();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Mete kategori ajou echwe");
+      uploadError("Erè", e?.message ?? "Mete kategori ajou echwe");
     } finally {
       setBusy(false);
     }
@@ -587,7 +588,7 @@ export default function CategoryFormModal({
       onSaved(ids);
       onClose();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Kreye kategori echwe");
+      uploadError("Erè", e?.message ?? "Kreye kategori echwe");
     } finally {
       setBusy(false);
     }

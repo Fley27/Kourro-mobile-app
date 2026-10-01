@@ -1,4 +1,5 @@
 import { fmtG, fmt } from "./format";
+import { formatCheckoutRow } from "./labels";
 
 export type ReceiptCopyType = "customer" | "store";
 
@@ -20,7 +21,8 @@ export interface ReceiptCustomer {
 
 export interface ReceiptData {
   id: string;
-  kind: "sale" | "credit_payment";
+  /** order_bill = synthetic "Fakti" over open-order lines (never a sale row). */
+  kind: "sale" | "credit_payment" | "order_bill";
   copyType: ReceiptCopyType;
   receiptNumber: string;
   saleNumber: string;
@@ -60,6 +62,68 @@ export function fmtDateTime(iso: string | null | undefined): string {
   const d = new Date(iso ?? "");
   if (isNaN(d.getTime())) return "—";
   return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+/** Printed line label — the app-wide "{item} {product} {variant}". */
+export function receiptItemLabel(it: Pick<ReceiptItem, "name" | "variant" | "unitName">): string {
+  return formatCheckoutRow(String(it.unitName ?? ""), it.name, it.variant ?? null);
+}
+
+/** Minimal DB shape used to resolve item names (structural, test-friendly). */
+type NameResolverDb = { getAllAsync<T = any>(sql: string, params?: any[]): Promise<T[]> };
+
+/**
+ * unit_id → item name for sale_items rows. sale_items stores product_name
+ * but not the item's own name, so receipts join it here — the printed label
+ * is "{item} {product} {variant}" like every other screen.
+ */
+export async function resolveItemNames(db: NameResolverDb, rows: any[]): Promise<Map<string, string>> {
+  const ids = [...new Set((rows ?? []).map(r => String(r?.unit_id ?? "")).filter(Boolean))];
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  try {
+    const found = await db.getAllAsync(`SELECT id, name FROM items WHERE id IN (${ids.map(() => "?").join(",")})`, ids);
+    for (const r of (found ?? []) as any[]) out.set(String(r?.id), String(r?.name ?? ""));
+  } catch {
+    /* no items table (older db) → product-only labels */
+  }
+  return out;
+}
+
+/** sale_items rows → receipt items with the item name resolved where possible. */
+export async function receiptItemsFrom(db: NameResolverDb, rows: any[]): Promise<ReceiptItem[]> {
+  const names = await resolveItemNames(db, rows);
+  return (rows ?? []).map(r => ({
+    name: r?.product_name ?? r?.name ?? "Atik",
+    unitName: names.get(String(r?.unit_id ?? "")) ?? null,
+    variant: r?.variant ?? null,
+    qty: Number(r?.quantity ?? 0),
+    unitPrice: Number(r?.unit_price ?? 0),
+    lineTotal: Number(r?.line_total ?? 0),
+  }));
+}
+
+/**
+ * sale_items rows → one "{item} {product} {variant}" label per row, in order.
+ * For receipts that only need the printed name (pickup receipts).
+ */
+export async function receiptLineLabels(db: NameResolverDb, rows: any[], fallback = "—"): Promise<string[]> {
+  const names = await resolveItemNames(db, rows);
+  return (rows ?? []).map(r =>
+    formatCheckoutRow(
+      names.get(String(r?.unit_id ?? "")) ?? "",
+      r?.product_name ?? r?.name ?? fallback,
+      r?.variant ?? null
+    )
+  );
+}
+
+/** Attach that label to each row as `.label` (read back via saleLineLabel). */
+export async function attachLineLabels(db: NameResolverDb, rows: any[]): Promise<void> {
+  const labels = await receiptLineLabels(db, rows);
+  (rows ?? []).forEach((r, i) => {
+    if (r && typeof r === "object") r.label = labels[i];
+  });
 }
 
 export function buildReceipts(input: {
@@ -154,12 +218,13 @@ export function receiptToText(r: ReceiptData): string {
   const rule = "------------------------------------";
   const money = (n: number) => `${fmtG(n)}`;
   const isPayment = r.kind === "credit_payment";
+  const isBill = r.kind === "order_bill";
   push("     JESYON MAGAZEN");
-  push(isPayment ? "   RESI PEMAN DÈT" : "         RESI");
+  push(isPayment ? "   RESI PEMAN DÈT" : isBill ? "          FAKTI" : "         RESI");
   push(rule);
   push(copyLabel(r.copyType));
   push(`N° ${r.receiptNumber}`);
-  push(`${isPayment ? "Dèt:" : "Vant:"} ${r.saleNumber}`);
+  push(isBill ? `Kòmand: ${r.saleNumber}` : `${isPayment ? "Dèt:" : "Vant:"} ${r.saleNumber}`);
   push(`Dat: ${fmtDateTime(r.createdAt)}`);
   push(rule);
   push(`Kesye: ${r.cashier.name}`);
@@ -177,25 +242,29 @@ export function receiptToText(r: ReceiptData): string {
     push(`Nouvo balans: ${money(r.amountDue)}`);
   } else {
     for (const it of r.items) {
-      push(`${it.qty} × ${it.name}${it.variant ? ` · ${it.variant}` : ""}${it.unitName ? ` (${it.unitName})` : ""}`);
+      push(`${it.qty} × ${receiptItemLabel(it)}`);
       push(`  ${fmtG(it.unitPrice)} × ${it.qty} = ${money(it.lineTotal)}`);
     }
     push(rule);
     push(`Sou-total: ${money(r.subtotal)}`);
     if (r.discount > 0) push(`Escompte: − ${money(r.discount)}`);
-    push(`TOTAL A PEYE: ${money(r.total)}`);
+    push(isBill ? "TOTAL FAKTI: " + money(r.total) : `TOTAL A PEYE: ${money(r.total)}`);
   }
   push(rule);
-  push(`Peman: ${PAYMENT_LABELS[r.paymentMethod] ?? r.paymentMethod}`);
-  if (isPayment) {
-    if (r.change > 0) push(`Monnen: ${money(r.change)}`);
-  } else if (r.paymentMethod === "credit") {
-    push(`Akompte / Peze: ${money(r.amountPaid)}`);
-    push(`Rès dèt: ${money(r.amountDue)}`);
-    if (r.dueDate) push(`Echèans: ${new Date(r.dueDate + "T00:00:00").toLocaleDateString()}`);
+  if (isBill) {
+    push(`Stati: ${Number(r.amountDue ?? 0) > 0 ? "Pa peye" : "Peye"}`);
   } else {
-    push(`Montan peye: ${money(r.amountPaid)}`);
-    if (r.change > 0) push(`Monnen: ${money(r.change)}`);
+    push(`Peman: ${PAYMENT_LABELS[r.paymentMethod] ?? r.paymentMethod}`);
+    if (isPayment) {
+      if (r.change > 0) push(`Monnen: ${money(r.change)}`);
+    } else if (r.paymentMethod === "credit") {
+      push(`Akompte / Peze: ${money(r.amountPaid)}`);
+      push(`Rès dèt: ${money(r.amountDue)}`);
+      if (r.dueDate) push(`Echèans: ${new Date(r.dueDate + "T00:00:00").toLocaleDateString()}`);
+    } else {
+      push(`Montan peye: ${money(r.amountPaid)}`);
+      if (r.change > 0) push(`Monnen: ${money(r.change)}`);
+    }
   }
   push(rule);
   push(isPayment ? "Mèsi pou peyi dèt la!" : "Mèsi pou acha w!");
@@ -215,8 +284,11 @@ export function buildReceiptHtml(r: ReceiptData): string {
     `<div class="row"><span>${esc(label)}</span><span class="${strong ? "strong" : ""}" ${tint ? `style="color:${tint}"` : ""}>${value}</span></div>`;
   const payLabel = PAYMENT_LABELS[r.paymentMethod] ?? r.paymentMethod;
   const isPayment = r.kind === "credit_payment";
+  const isBill = r.kind === "order_bill";
   let paymentBlock: string;
-  if (isPayment) {
+  if (isBill) {
+    paymentBlock = row("Stati", Number(r.amountDue ?? 0) > 0 ? "Pa peye" : "Peye", true, Number(r.amountDue ?? 0) > 0 ? "#B00020" : "#0A7C3E");
+  } else if (isPayment) {
     paymentBlock =
       row("Peman", esc(payLabel)) +
       (r.change > 0 ? row("Monnen", money(r.change), false, "#0A7C3E") : "");
@@ -240,7 +312,7 @@ export function buildReceiptHtml(r: ReceiptData): string {
     : r.items
       .map(
         it =>
-          `<div class="item"><div class="item-top"><span class="qty">${it.qty} x</span><span class="name">${esc(it.name)}${it.variant ? ` · ${esc(it.variant)}` : ""}</span><span class="line">${money(it.lineTotal)}</span></div><div class="item-sub">${money(it.unitPrice)} / ${esc(it.unitName ?? "inite")}</div></div>`
+          `<div class="item"><div class="item-top"><span class="qty">${it.qty} x</span><span class="name">${esc(receiptItemLabel(it))}</span><span class="line">${money(it.lineTotal)}</span></div><div class="item-sub">${money(it.unitPrice)} / ${esc(it.unitName ?? "inite")}</div></div>`
       )
       .join("");
   return `<!DOCTYPE html>
@@ -277,7 +349,7 @@ export function buildReceiptHtml(r: ReceiptData): string {
   <div class="head">
     <h1>JESYON MAGAZEN</h1>
     <div class="store">${esc(r.storeName)}</div>
-    <div class="label">${isPayment ? "RESI PEMAN DÈT" : "RESI"}</div>
+    <div class="label">${isPayment ? "RESI PEMAN DÈT" : isBill ? "FAKTI" : "RESI"}</div>
   </div>
   ${spacedRule}
   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -285,7 +357,7 @@ export function buildReceiptHtml(r: ReceiptData): string {
     <span style="font-size:11px;font-weight:700;color:#78716c">N° ${esc(r.receiptNumber)}</span>
   </div>
   <div class="meta">
-    ${row(isPayment ? "Dèt" : "Vant", esc(r.saleNumber), true)}
+    ${row(isBill ? "Kòmand" : isPayment ? "Dèt" : "Vant", esc(r.saleNumber), true)}
     ${row("Dat", esc(fmtDateTime(r.createdAt)))}
     ${row("Kesye", `${esc(r.cashier.name)} · ${esc(r.cashier.role)}`, true)}
     ${r.customer ? row("Kliyan", esc(r.customer.name)) + (r.customer.idCard ? row("ID", esc(r.customer.idCard), true) : "") + (r.customer.phone ? row("Tel", esc(r.customer.phone)) : "") : ""}
@@ -295,7 +367,7 @@ export function buildReceiptHtml(r: ReceiptData): string {
   ${spacedRule}
   ${isPayment ? "" : row("Sou-total", money(r.subtotal))}
   ${!isPayment && r.discount > 0 ? row("Escompte", `− ${money(r.discount)}`, false, "#B00020") : ""}
-  <div class="total-band"><span>${isPayment ? "TOTAL PEMAN" : "TOTAL"}</span><span class="amount">${money(r.total)}</span></div>
+  <div class="total-band"><span>${isPayment ? "TOTAL PEMAN" : isBill ? "TOTAL FAKTI" : "TOTAL"}</span><span class="amount">${money(r.total)}</span></div>
   <div style="margin-top:8px">${paymentBlock}</div>
   <div class="foot">
     <div class="thanks">${isPayment ? "Mèsi pou peyi dèt la!" : "Mèsi pou acha w!"}</div>

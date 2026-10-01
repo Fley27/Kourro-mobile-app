@@ -8,6 +8,7 @@ import { View, Text, TextInput, Pressable, ScrollView, Modal, useWindowDimension
 import { Ionicons } from "@expo/vector-icons";
 import CustomerForm, { EMPTY_CUSTOMER_FORM, type CustomerFormData } from "./CustomerForm";
 import { CustomerProfileHeader, ModalScreen } from "./CustomerProfile";
+import { MoneyInput } from "./maskedInput";
 
 export type CustomerSaveExtra = { creditLimit: number | null };
 
@@ -75,10 +76,10 @@ function CreditLimitSection({ value, onChange, editable, current }: {
           </View>
         ) : null}
       </View>
-      <TextInput
+      <MoneyInput
         editable={editable}
         value={value}
-        onChangeText={v => onChange(v.replace(/[^0-9.]/g, ""))}
+        onChangeText={onChange}
         keyboardType="numeric"
         placeholder={current == null ? "San limit" : String(current)}
         placeholderTextColor="#8e8e93"

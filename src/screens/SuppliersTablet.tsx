@@ -3,7 +3,7 @@ import { View, Text, Pressable, FlatList, ScrollView, TextInput } from "react-na
 import { palette, radius, shadow } from "../theme";
 import { CustomerProfileHeader, ProfileMenu } from "../components/CustomerProfile";
 import { SupplierProfileBody, SupplierBatchesList, SupplierBatchDetailBody, batchStatusLabel, type SupplierStats } from "../components/SupplierProfile";
-import { EditSupplierContent, type EditSupplierState } from "../components/SupplierSheets";
+import { EditSupplierContent, supplierToFormValues, type EditSupplierState } from "../components/SupplierSheets";
 import { fmtG, monoStyle } from "../format";
 
 export interface SuppliersTabletProps {
@@ -31,6 +31,7 @@ export interface SuppliersTabletProps {
   setShowAllBatches: (v: boolean) => void;
   editState: EditSupplierState;
   setEditState: (s: EditSupplierState) => void;
+  bankAccounts: any[];
   onSaveEdit: () => void;
   saving: boolean;
   batchDetail: { batch: any; itemLabel: string | null; productName: string | null } | null;
@@ -168,7 +169,7 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
     suppliers, displaySuppliers, batchCounts, search, setSearch, showBatchOnly, setShowBatchOnly,
     selectedId, setSelectedId, selectedSupplier,
     canManageSuppliers, isOwner, onOpenMenu, showProfileMenu, onCloseMenu, onOpenEdit, onDelete, onOpenBatch,
-    showEdit, onCloseEdit, showAllBatches, setShowAllBatches, editState, setEditState, onSaveEdit, saving,
+    showEdit, onCloseEdit, showAllBatches, setShowAllBatches, editState, setEditState, bankAccounts, onSaveEdit, saving,
     batchDetail, setBatchDetail, profileStats, profileBatches, padH, width, isTablet, onAdd,
   } = props;
   const inspectorScroll = useRef<any>(null);
@@ -297,16 +298,9 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
                 <View style={{ backgroundColor: "#000", borderWidth: 0.5, borderColor: "#262626", borderRadius: radius.lg, padding: 16 }}>
                   {showEdit && selectedSupplier ? (
                     <EditSupplierContent
-                      resetKey={selectedSupplier.id}
+                      resetKey={`${selectedSupplier.id}:${bankAccounts.map((a: any) => a.id).join(",")}`}
                       visible={showEdit}
-                      initial={{
-                        name: selectedSupplier.name ?? "",
-                        phone: selectedSupplier.phone ?? "",
-                        address: selectedSupplier.address ?? "",
-                        payment_terms: selectedSupplier.payment_terms ?? "",
-                        bank_info: selectedSupplier.bank_info ?? "",
-                        notes: selectedSupplier.notes ?? "",
-                      }}
+                      initial={supplierToFormValues(selectedSupplier, bankAccounts)}
                       isOwner={isOwner}
                       onState={setEditState}
                     />
@@ -323,6 +317,7 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
                       supplier={selectedSupplier}
                       stats={profileStats}
                       batches={profileBatches}
+                      bankAccounts={bankAccounts}
                       onOpenBatch={onOpenBatch}
                       onViewAll={() => setShowAllBatches(true)}
                       isOwner={isOwner}

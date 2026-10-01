@@ -7,8 +7,11 @@ import { View, Text, Pressable, TextInput, ScrollView, Modal, KeyboardAvoidingVi
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../db";
 import { currentVariantPrice, type UnpricedVariantRow } from "../catalogModel";
+import { formatCheckoutRow } from "../labels";
+import { UploadTransition, minDelay, type UploadPhase } from "./UploadTransition";
 import { useResponsive, sheetBox } from "../responsive";
 import { fmtG } from "../format";
+import { MoneyInput } from "./maskedInput";
 
 function todayStr(): string {
   const d = new Date();
@@ -24,7 +27,21 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
   const { width, isTablet } = useResponsive();
   const [vals, setVals] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  useEffect(() => { if (visible) { setVals({}); setBusy(false); } }, [visible]);
+  const [upBusy, setUpBusy] = useState(false);
+  const [upPhase, setUpPhase] = useState<UploadPhase>("loading");
+  const [upMsg, setUpMsg] = useState("");
+  useEffect(() => {
+    if (visible) {
+      // Prefill live prices for bulk edit; empty = unpriced.
+      const init: Record<string, string> = {};
+      for (const r of rows) {
+        if ((r.current ?? 0) > 0) init[r.variantId ?? `new:${r.itemId}`] = String(r.current);
+      }
+      setVals(init);
+      setBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
 
   const keyOf = (r: UnpricedVariantRow) => r.variantId ?? `new:${r.itemId}`;
   const groups = new Map<string, { name: string; rows: UnpricedVariantRow[] }>();
@@ -33,16 +50,26 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
     g.rows.push(r);
     groups.set(r.productId, g);
   }
-  const filled = rows.filter(r => parseFloat(vals[keyOf(r)] ?? "") > 0);
+  // Changed or newly filled rows only — untouched live prices are skipped.
+  const filled = rows.filter(r => {
+    const v = parseFloat(vals[keyOf(r)] ?? "");
+    if (!(v > 0)) return false;
+    if ((r.current ?? 0) > 0 && v === r.current) return false;
+    return true;
+  });
 
   async function save() {
     if (!filled.length) { Alert.alert("Pa gen pri", "Antre omwen yon pri."); return; }
-    if (busy) return;
+    if (busy || upBusy) return;
     setBusy(true);
+    setUpBusy(true);
+    setUpPhase("loading");
+    setUpMsg(`${filled.length} pri • ap anrejistre…`);
     try {
-      const db = await getDb();
-      const now = new Date().toISOString();
-      const dateStr = todayStr();
+      const saved = await minDelay((async () => {
+        const db = await getDb();
+        const now = new Date().toISOString();
+        const dateStr = todayStr();
       const [allV, allP] = await Promise.all([
         db.getAllAsync("SELECT id, item_id FROM variants").catch(() => []),
         db.getAllAsync("SELECT id, variant_id, price, date, created_at FROM variant_prices").catch(() => []),
@@ -74,7 +101,7 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
             liveV.push({ id: vid, item_id: r.itemId });
           }
           const cur = currentVariantPrice(liveP as any, vid, now);
-          if (cur && Number(cur.price) > 0) continue; // priced meanwhile — skip
+          if (cur && Number(cur.price) === v) continue; // unchanged — skip
           let pid = `vpr-${vid}-${dateStr}`;
           let n = 2;
           while (takenP.has(pid)) pid = `vpr-${vid}-${dateStr}-${n++}`;
@@ -87,17 +114,26 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
           liveP.push({ id: pid, variant_id: vid, price: v, date: dateStr, created_at: now });
           saved++;
         } catch {}
-      }
-      Alert.alert("Pri anrejistre ✓", `${saved} pri ekri (dat jodi a) — variant yo parèt nan kes kounye a.`);
+        }
+        return saved;
+      })(), 1500);
+      setUpPhase("success");
+      setUpMsg(`${saved} pri anrejistre`);
+      await new Promise(r => setTimeout(r, 1500));
+      setUpBusy(false);
       onSaved();
     } catch (e: any) {
-      Alert.alert("Erè", e?.message ?? "Sove pri echwe");
+      setUpPhase("error");
+      setUpMsg(e?.message ?? "Sove pri echwe");
+      await new Promise(r => setTimeout(r, 3000));
+      setUpBusy(false);
     } finally {
       setBusy(false);
     }
   }
 
   return (
+    <>
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView enabled={Platform.OS === "ios"} behavior="padding" keyboardVerticalOffset={0} style={{ flex: 1 }}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
@@ -109,9 +145,9 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
                   <Ionicons name="pricetag-outline" size={18} color="#fff" />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Pri mankan</Text>
+                  <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Pri</Text>
                   <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 1 }} numberOfLines={2}>
-                    {rows.length} variant san pri — yo pa parèt nan kes. Vid = sote.
+                    {rows.length} variant — chanje sa ou vle, vid = sote. Ekri dat jodi a.
                   </Text>
                 </View>
                 <Pressable onPress={onClose} style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
@@ -126,12 +162,12 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
                     return (
                       <View key={k} style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 }}>
                         <View style={{ flex: 1 }}>
-                          <Text style={{ fontWeight: "600", fontSize: 12, color: "#fff" }} numberOfLines={1}>{r.itemName} · {r.variantName}</Text>
+                          <Text style={{ fontWeight: "600", fontSize: 12, color: "#fff" }} numberOfLines={1}>{formatCheckoutRow(r.itemName, g.name, r.variantName)}</Text>
                           {!r.variantId && <Text style={{ fontSize: 10, color: "#8e8e93", marginTop: 1 }}>Ap kreye Standard otomatik</Text>}
                         </View>
-                        <TextInput
+                        <MoneyInput
                           value={vals[k] ?? ""}
-                          onChangeText={v => setVals(prev => ({ ...prev, [k]: v.replace(/[^0-9.]/g, "") }))}
+                          onChangeText={v => setVals(prev => ({ ...prev, [k]: v }))}
                           keyboardType="numeric"
                           placeholder="—"
                           placeholderTextColor="#636366"
@@ -168,5 +204,7 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
         </View>
       </KeyboardAvoidingView>
     </Modal>
+    <UploadTransition visible={upBusy} phase={upPhase} title="Sove pri" detail={upMsg} />
+    </>
   );
 }
