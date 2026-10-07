@@ -10,6 +10,9 @@ import PickerGrid from "../../components/PickerGrid";
 import type { FlowCtx } from "./types";
 import { canManageCatalog } from "./types";
 import { uploadError } from "../../components/UploadTransition";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { FALLBACK_STORE_ID } from "../../db/ids";
+import { mintId } from "../../db/ids";
 
 export default function ProductStep({
   ctx, productId, onNext, onBack, onDirtyChange, registerNext,
@@ -126,12 +129,12 @@ export default function ProductStep({
         if (hit) {
           if (!supIds.includes(hit.id)) supIds.push(hit.id);
         } else {
-          const sid = `sup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          const sid = mintId();
           await db.runAsync(
             "INSERT OR REPLACE INTO suppliers (id, store_id, name, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?)",
-            [sid, "demo-store-id", quickName, now, now, 0, 1]
+            [sid, FALLBACK_STORE_ID, quickName, now, now, 0, 1]
           );
-          try { await insertOutbox("suppliers", "create", { id: sid, store_id: "demo-store-id", name: quickName, created_at: now, updated_at: now, is_deleted: false }); } catch {}
+          try { await insertOutbox("suppliers", "create", { id: sid, store_id: FALLBACK_STORE_ID, name: quickName, created_at: now, updated_at: now, is_deleted: false }); } catch {}
           supIds.push(sid);
           setSuppliers(prev => [...prev, { id: sid, name: quickName }]);
         }
@@ -169,7 +172,7 @@ export default function ProductStep({
         ctx.reload();
         onNext?.(productId, itemType);
       } else {
-        const id = `prod-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const id = mintId();
         // Every product mints a unique SKU at creation (SKU-0042 style),
         // unless the bulk field already fixed one (validated above).
         let sku = showSkuField && finalSku ? finalSku : "";
@@ -184,10 +187,10 @@ export default function ProductStep({
         }
         await db.runAsync(
           "INSERT INTO products (id, store_id, sku, name, category_id, stock_quantity, current_amount_available, low_stock_threshold, status, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-          [id, "demo-store-id", sku, name.trim(), categoryIds[0] ?? null, 0, 0, 5, "draft", now]
+          [id, FALLBACK_STORE_ID, sku, name.trim(), categoryIds[0] ?? null, 0, 0, 5, "draft", now]
         );
         await db.runAsync("UPDATE products SET item_type = ?, is_available = ? WHERE id = ?", [itemType, available ? 1 : 0, id]);
-        try { await insertOutbox("products", "create", { id, store_id: "demo-store-id", sku, name: name.trim(), item_type: itemType, is_available: available ? 1 : 0, stock_quantity: 0, status: "draft", updated_at: now, is_deleted: 0 }); } catch {}
+        try { await insertOutbox("products", "create", { id, store_id: FALLBACK_STORE_ID, sku, name: name.trim(), item_type: itemType, is_available: available ? 1 : 0, stock_quantity: 0, status: "draft", updated_at: now, is_deleted: 0 }); } catch {}
         for (const cid of categoryIds) {
           await db.runAsync("INSERT OR IGNORE INTO product_categories (product_id, category_id) VALUES (?,?)", [id, cid]);
           try { await insertOutbox("product_categories", "create", { product_id: id, category_id: cid }); } catch {}
@@ -208,7 +211,7 @@ export default function ProductStep({
   }
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       <View style={{ borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 12, overflow: "hidden" }}>
         <Pressable onPress={() => setTypeOpen(o => !o)} style={{ flexDirection: "row", alignItems: "center", gap: 10, height: 60, paddingHorizontal: 12 }}>
           <Text style={{ flex: 1, fontWeight: "700", fontSize: 13, color: "#fff" }}>Kalite pwodwi *</Text>
@@ -294,6 +297,6 @@ export default function ProductStep({
         </Pressable>
       </View>
       )}
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

@@ -37,8 +37,9 @@ import { fmtG, monoStyle } from "../format";
 import { topIconBtn } from "../theme";
 import { useResponsive } from "../responsive";
 import { getDb } from "../db";
-import { SyncManager } from "../sync/syncManager";
+import { syncNow } from "../sync/autoSync";
 import { loadAnalyticsData, type AnalyticsData } from "../analytics/load";
+import { FALLBACK_STORE_ID } from "../db/ids";
 import {
   saleAmount,
   saleTime,
@@ -225,7 +226,7 @@ function RankedRow({
 
 /** A breakdown section: headline block total + ranked rows + chart bars. */
 function RankedBreakdown({
-  title, subtitle, badge, rows, total, emptyText, moreLabel,
+  title, subtitle, badge, rows, total, emptyText, moreLabel, limit = 5,
 }: {
   title: string;
   subtitle: string;
@@ -234,9 +235,11 @@ function RankedBreakdown({
   total: number;
   emptyText: string;
   moreLabel: string;
+  /** Rows shown before the "+N more" roll-up — tablets surface more depth. */
+  limit?: number;
 }) {
-  const top = rows.slice(0, 5);
-  const rest = rows.slice(5);
+  const top = rows.slice(0, limit);
+  const rest = rows.slice(limit);
   const restSum = rest.reduce((a, r) => a + r.revenue, 0);
   const leader = top.length ? Math.max(...top.map(r => r.revenue)) : 0;
   return (
@@ -279,7 +282,7 @@ function RankedBreakdown({
 
 export default function SalesReportScreen({
   role = "manager",
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   storeName,
   currentUser,
   userStoreIds = [],
@@ -294,7 +297,7 @@ export default function SalesReportScreen({
   deviceId?: string;
   onBack?: () => void;
 }) {
-  const { padH } = useResponsive();
+  const { padH, width, isTablet } = useResponsive();
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [range, setRange] = useState<ReportRange>("month");
   const [refreshing, setRefreshing] = useState(false);
@@ -366,7 +369,7 @@ export default function SalesReportScreen({
     setRefreshing(true);
     try {
       if (withCloud) {
-        try { await new SyncManager(storeId, deviceId).fullSync({ quiet: true }); } catch {}
+        try { await syncNow({ quiet: true, storeId, deviceId }); } catch {}
         if (!mounted.current) return;
       }
       await load();
@@ -474,6 +477,131 @@ export default function SalesReportScreen({
     m.mobileOther > 0 ? `Other ${fmtG(Math.round(m.mobileOther))}` : null,
   ].filter(Boolean) as string[];
 
+  // ── Layout blocks — one definition, two compositions: phone stacks hero →
+  // category → product → type top-to-bottom; tablet opens with an overview
+  // row (revenue hero beside the cash/credit/mobile mix) and then runs the
+  // two ranked breakdowns side by side. Same data, same blocks, wider canvas. ──
+  const heroCard = (
+    <View style={{ backgroundColor: CARD, borderRadius: 20, borderWidth: 0.5, borderColor: CARD_BD, padding: 20 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+        <Text style={{ flex: 1, fontSize: 16, fontWeight: "600", color: "#d9d9d9" }}>Total sales revenue</Text>
+        <View style={{ backgroundColor: "rgba(255,255,255,0.08)", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 }}>
+          <Text style={{ fontSize: 12, fontWeight: "700", color: TXT2 }} numberOfLines={1}>{rangeLabel}</Text>
+        </View>
+      </View>
+      <Text
+        style={{ fontSize: 40, fontWeight: "800", color: TXT, letterSpacing: -1, marginTop: 8, ...monoStyle }}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+      >
+        {fmtG(Math.round(m.total))}
+      </Text>
+      <Sparkline values={m.spark} />
+    </View>
+  );
+
+  const categorySection = (
+    <RankedBreakdown
+      title="Revenue by category"
+      subtitle="Products rolled up to their primary category"
+      badge={rangeLabel}
+      rows={m.categoriesRanked}
+      total={m.categoriesRanked.reduce((a, r) => a + r.revenue, 0)}
+      emptyText={rowsEmptyText}
+      moreLabel="categories"
+      limit={isTablet ? 8 : 5}
+    />
+  );
+
+  const productSection = (
+    <RankedBreakdown
+      title="Revenue by product"
+      subtitle="Variants sold, rolled up to product"
+      badge={rangeLabel}
+      rows={m.productsRanked}
+      total={m.productsRanked.reduce((a, r) => a + r.revenue, 0)}
+      emptyText={rowsEmptyText}
+      moreLabel="products"
+      limit={isTablet ? 8 : 5}
+    />
+  );
+
+  const typeSection = (
+    <View>
+      <SectionHead
+        title="Revenue by transaction type"
+        subtitle="Cash and credit lead — mobile is rarely used"
+        badge={rangeLabel}
+      />
+      {!hasSales ? (
+        <Empty text="No sales in this period." />
+      ) : (
+        <>
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+            {([["Cash", m.cash, GREEN], ["Credit", m.credit, GOLD]] as const).map(([label, value, color]) => (
+              <View key={label} style={{ flex: 1, backgroundColor: CARD, borderRadius: 14, borderWidth: 0.5, borderColor: CARD_BD, padding: 14 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
+                  <Text style={{ fontSize: 10, fontWeight: "800", color: TXT2, textTransform: "uppercase", letterSpacing: 0.8 }}>{label}</Text>
+                </View>
+                <Text style={{ fontSize: 24, fontWeight: "800", color: TXT, letterSpacing: -0.6, marginTop: 8 }} numberOfLines={1} adjustsFontSizeToFit>
+                  {fmtG(Math.round(value))}
+                </Text>
+                <Text style={{ fontSize: 11.5, color: TXT2, marginTop: 4, ...monoStyle }}>{typeShare(value).toFixed(0)}% of revenue</Text>
+              </View>
+            ))}
+          </View>
+
+          {/* Mix donut — one chart for the whole section */}
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 16, marginTop: 18 }}>
+            <PieChart
+              donut
+              data={pieData}
+              radius={64}
+              innerRadius={42}
+              innerCircleColor="#000"
+              strokeWidth={0}
+              centerLabelComponent={() => (
+                <View style={{ alignItems: "center", justifyContent: "center" }}>
+                  <Text style={{ fontSize: 13, fontWeight: "800", color: TXT, ...monoStyle }}>{shortG(Math.round(typeTotal))}</Text>
+                  <Text style={{ fontSize: 9, color: TXT3 }}>total</Text>
+                </View>
+              )}
+            />
+            <View style={{ flex: 1, gap: 12 }}>
+              {([["Cash", m.cash, GREEN], ["Credit", m.credit, GOLD]] as const).map(([label, value, color]) => (
+                <View key={label} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <View style={{ width: 10, height: 10, borderRadius: 3, backgroundColor: color }} />
+                  <Text style={{ flex: 1, fontSize: 14.5, fontWeight: "700", color: TXT }}>{label}</Text>
+                  <Text style={{ fontSize: 15, fontWeight: "800", color: TXT, ...monoStyle }}>{fmtG(Math.round(value))}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+
+          {/* Mobile — deliberately smaller: rare method, no equal weight */}
+          <View style={{ marginTop: 14, backgroundColor: "rgba(255,255,255,0.03)", borderRadius: 12, borderWidth: 0.5, borderColor: LINE, paddingHorizontal: 12, paddingVertical: 10 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: BLUE }} />
+              <Text style={{ fontSize: 11.5, fontWeight: "700", color: TXT2, textTransform: "uppercase", letterSpacing: 0.6 }}>Mobile</Text>
+              <Text style={{ flex: 1 }} />
+              <Text style={{ fontSize: 13, fontWeight: "700", color: TXT2, ...monoStyle }}>{fmtG(Math.round(m.mobile))}</Text>
+              <Text style={{ fontSize: 11, color: TXT3, minWidth: 40, textAlign: "right", ...monoStyle }}>{typeShare(m.mobile).toFixed(0)}%</Text>
+            </View>
+            {mobileParts.length > 0 ? (
+              <Text style={{ fontSize: 10.5, color: TXT3, marginTop: 4, paddingLeft: 15, ...monoStyle }}>{mobileParts.join("  ·  ")}</Text>
+            ) : null}
+          </View>
+
+          {/* Repayments are credit-analytics territory — say why, in-app. */}
+          <Text style={{ fontSize: 11, color: TXT3, marginTop: 12, lineHeight: 16 }}>
+            Credit repayments aren't counted here — they're tracked separately, so revenue is never double counted.
+          </Text>
+        </>
+      )}
+    </View>
+  );
+
   // Collapse animation targets. Until the block's height is measured we let
   // it lay out naturally (undefined height), then interpolate it away.
   const heightAnim = headerH > 0
@@ -553,129 +681,48 @@ export default function SalesReportScreen({
       >
 
       {/* 1 — total sales revenue: headline block + sparkline. Top-line only:
-          no cost, no margin — just what came in during the period. */}
-      <View style={{ backgroundColor: CARD, borderRadius: 20, borderWidth: 0.5, borderColor: CARD_BD, padding: 20 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <Text style={{ flex: 1, fontSize: 16, fontWeight: "600", color: "#d9d9d9" }}>Total sales revenue</Text>
-          <View style={{ backgroundColor: "rgba(255,255,255,0.08)", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 }}>
-            <Text style={{ fontSize: 12, fontWeight: "700", color: TXT2 }} numberOfLines={1}>{rangeLabel}</Text>
-          </View>
+          no cost, no margin — just what came in during the period.
+          Tablet: the hero shares the overview row with the type mix. */}
+      {isTablet ? (
+        <View style={{ flexDirection: "row", gap: 14, alignItems: "flex-start" }}>
+          <View style={{ flex: 3 }}>{heroCard}</View>
+          <View style={{ flex: 2 }}>{typeSection}</View>
         </View>
-        <Text
-          style={{ fontSize: 40, fontWeight: "800", color: TXT, letterSpacing: -1, marginTop: 8, ...monoStyle }}
-          numberOfLines={1}
-          adjustsFontSizeToFit
-        >
-          {fmtG(Math.round(m.total))}
-        </Text>
-        <Sparkline values={m.spark} />
-      </View>
+      ) : (
+        heroCard
+      )}
 
       <Divider />
 
-      {/* 2 — revenue by category: block totals + bars, ranked */}
-      <RankedBreakdown
-        title="Revenue by category"
-        subtitle="Products rolled up to their primary category"
-        badge={rangeLabel}
-        rows={m.categoriesRanked}
-        total={m.categoriesRanked.reduce((a, r) => a + r.revenue, 0)}
-        emptyText={rowsEmptyText}
-        moreLabel="categories"
-      />
-
-      <Divider />
-
-      {/* 3 — revenue by product: aggregated at the VARIANT level (what
-          actually sells), rolled up to product — items are cost containers,
-          never a reporting dimension. */}
-      <RankedBreakdown
-        title="Revenue by product"
-        subtitle="Variants sold, rolled up to product"
-        badge={rangeLabel}
-        rows={m.productsRanked}
-        total={m.productsRanked.reduce((a, r) => a + r.revenue, 0)}
-        emptyText={rowsEmptyText}
-        moreLabel="products"
-      />
-
-      <Divider />
+      {/* 2-3 — ranked breakdowns. Phone: stacked full-width. Tablet: side by
+          side with a vertical rule, each surfacing up to 8 rows instead of 5. */}
+      {isTablet ? (
+        <View style={{ flexDirection: "row" }}>
+          <View style={{ flex: 1, paddingRight: 22 }}>{categorySection}</View>
+          <View style={{ width: 1, backgroundColor: LINE, marginVertical: 6 }} />
+          <View style={{ flex: 1, paddingLeft: 22 }}>{productSection}</View>
+        </View>
+      ) : (
+        <>
+          {/* 2 — revenue by category: block totals + bars, ranked */}
+          {categorySection}
+          <Divider />
+          {/* 3 — revenue by product: aggregated at the VARIANT level (what
+              actually sells), rolled up to product — items are cost containers,
+              never a reporting dimension. */}
+          {productSection}
+        </>
+      )}
 
       {/* 4 — revenue by transaction type: cash + credit prominent, mobile
-          smaller (rarely used). The chart is the mix donut. */}
-      <View>
-        <SectionHead
-          title="Revenue by transaction type"
-          subtitle="Cash and credit lead — mobile is rarely used"
-          badge={rangeLabel}
-        />
-        {!hasSales ? (
-          <Empty text="No sales in this period." />
-        ) : (
-          <>
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
-              {([["Cash", m.cash, GREEN], ["Credit", m.credit, GOLD]] as const).map(([label, value, color]) => (
-                <View key={label} style={{ flex: 1, backgroundColor: CARD, borderRadius: 14, borderWidth: 0.5, borderColor: CARD_BD, padding: 14 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
-                    <Text style={{ fontSize: 10, fontWeight: "800", color: TXT2, textTransform: "uppercase", letterSpacing: 0.8 }}>{label}</Text>
-                  </View>
-                  <Text style={{ fontSize: 24, fontWeight: "800", color: TXT, letterSpacing: -0.6, marginTop: 8 }} numberOfLines={1} adjustsFontSizeToFit>
-                    {fmtG(Math.round(value))}
-                  </Text>
-                  <Text style={{ fontSize: 11.5, color: TXT2, marginTop: 4, ...monoStyle }}>{typeShare(value).toFixed(0)}% of revenue</Text>
-                </View>
-              ))}
-            </View>
-
-            {/* Mix donut — one chart for the whole section */}
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 16, marginTop: 18 }}>
-              <PieChart
-                donut
-                data={pieData}
-                radius={64}
-                innerRadius={42}
-                innerCircleColor="#000"
-                strokeWidth={0}
-                centerLabelComponent={() => (
-                  <View style={{ alignItems: "center", justifyContent: "center" }}>
-                    <Text style={{ fontSize: 13, fontWeight: "800", color: TXT, ...monoStyle }}>{shortG(Math.round(typeTotal))}</Text>
-                    <Text style={{ fontSize: 9, color: TXT3 }}>total</Text>
-                  </View>
-                )}
-              />
-              <View style={{ flex: 1, gap: 12 }}>
-                {([["Cash", m.cash, GREEN], ["Credit", m.credit, GOLD]] as const).map(([label, value, color]) => (
-                  <View key={label} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <View style={{ width: 10, height: 10, borderRadius: 3, backgroundColor: color }} />
-                    <Text style={{ flex: 1, fontSize: 14.5, fontWeight: "700", color: TXT }}>{label}</Text>
-                    <Text style={{ fontSize: 15, fontWeight: "800", color: TXT, ...monoStyle }}>{fmtG(Math.round(value))}</Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-
-            {/* Mobile — deliberately smaller: rare method, no equal weight */}
-            <View style={{ marginTop: 14, backgroundColor: "rgba(255,255,255,0.03)", borderRadius: 12, borderWidth: 0.5, borderColor: LINE, paddingHorizontal: 12, paddingVertical: 10 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: BLUE }} />
-                <Text style={{ fontSize: 11.5, fontWeight: "700", color: TXT2, textTransform: "uppercase", letterSpacing: 0.6 }}>Mobile</Text>
-                <Text style={{ flex: 1 }} />
-                <Text style={{ fontSize: 13, fontWeight: "700", color: TXT2, ...monoStyle }}>{fmtG(Math.round(m.mobile))}</Text>
-                <Text style={{ fontSize: 11, color: TXT3, minWidth: 40, textAlign: "right", ...monoStyle }}>{typeShare(m.mobile).toFixed(0)}%</Text>
-              </View>
-              {mobileParts.length > 0 ? (
-                <Text style={{ fontSize: 10.5, color: TXT3, marginTop: 4, paddingLeft: 15, ...monoStyle }}>{mobileParts.join("  ·  ")}</Text>
-              ) : null}
-            </View>
-
-            {/* Repayments are credit-analytics territory — say why, in-app. */}
-            <Text style={{ fontSize: 11, color: TXT3, marginTop: 12, lineHeight: 16 }}>
-              Credit repayments aren't counted here — they're tracked separately, so revenue is never double counted.
-            </Text>
-          </>
-        )}
-      </View>
+          smaller (rarely used). The chart is the mix donut. Phone: last
+          block after the breakdowns; tablet: shown in the overview row. */}
+      {!isTablet ? (
+        <>
+          <Divider />
+          {typeSection}
+        </>
+      ) : null}
 
       <Text style={{ fontSize: 10, color: TXT3, textAlign: "center", marginTop: 18 }} numberOfLines={1}>
         {scopeLabel} • {ROLE_KR[role] ?? role}{lastUpdated ? ` • updated ${lastUpdated}` : ""}

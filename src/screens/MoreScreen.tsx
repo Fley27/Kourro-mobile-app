@@ -1,6 +1,11 @@
 // "More" (Plis) hub — houses everything that left the navbar, gated per role.
+// Phone: the Plis tab renders the list hub, then bodies (its selection is
+// internal). Tablet: the MenuSidebar owns navigation, so this component is
+// passed a CONTROLLED selection and renders only the body — the hub never
+// shows (the sidebar is the menu). Entry definitions/ranking are shared
+// with the sidebar via src/menu/entries.ts so the two navs can't drift.
 import React, { useEffect, useState } from "react";
-import { View, Text, Pressable, ScrollView, Alert, TextInput } from "react-native";
+import { View, Text, Pressable, ScrollView, TextInput } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { NAV_MENU_TEXT_SCALE } from "../theme";
 import { useResponsive } from "../responsive";
@@ -10,71 +15,22 @@ import CatalogScreen from "./CatalogScreen";
 import InventoryScreen from "./InventoryScreen";
 import CustomersScreen from "./CustomersScreen";
 import ReportsScreen from "./ReportsScreen";
+import SalesReportScreen from "./SalesReportScreen";
+import CreditReportScreen from "./credit/CreditReportScreen";
+import BusinessGuardScreen from "./BusinessGuardScreen";
 import SuppliersScreen from "./SuppliersScreen";
 import OrdersScreen from "../orders/OrdersScreen";
 import PickupsScreen from "./PickupsScreen";
-import { uploadSuccess, uploadError } from "../components/UploadTransition";
+import ProformatScreen from "./promos/ProformatScreen";
 import { ordersUI } from "../ordersUI";
 import { inLocalDay, localDayKey } from "../businessGuard";
-
-export type MoreEntry = "reports" | "shift" | "catalog" | "inventory" | "customers" | "suppliers" | "orders" | "pickups" | "store" | "staff";
-
-type EntryDef = {
-  id: MoreEntry;
-  title: string;
-  subtitle: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  roles: string[];
-};
-
-const ENTRIES: EntryDef[] = [
-  { id: "reports", title: "Rapò", subtitle: "Reports", icon: "bar-chart-outline", roles: ["owner", "admin", "manager"] },
-  // The unified shift lifecycle — open, daily report, cash register in one flow.
-  { id: "shift", title: "Shift", subtitle: "Chanjman • rapò • kès", icon: "key-outline", roles: ["owner", "admin", "manager", "cashier"] },
-  { id: "catalog", title: "Katalòg", subtitle: "Catalog", icon: "cube-outline", roles: ["owner", "admin", "manager", "cashier", "associate", "cook"] },
-  { id: "inventory", title: "Envantè", subtitle: "Inventory", icon: "archive-outline", roles: ["owner", "admin", "manager", "cashier"] },
-  { id: "customers", title: "Kliyan", subtitle: "Customers", icon: "people-outline", roles: ["owner", "admin", "manager", "cashier", "associate"] },
-  { id: "suppliers", title: "Founisè", subtitle: "Suppliers", icon: "storefront-outline", roles: ["owner", "admin"] },
-  { id: "orders", title: "Kòmand", subtitle: "Orders", icon: "clipboard-outline", roles: ["owner", "admin", "manager", "cashier", "cook"] },
-  // Goods owed (paid, not yet collected) — open to every role, deliberately
-  // separate from money/credit.
-  { id: "pickups", title: "Pickups", subtitle: "Byen pou pran", icon: "bag-handle-outline", roles: ["owner", "admin", "manager", "cashier", "cook"] },
-  { id: "store", title: "Magazen", subtitle: "Store", icon: "business-outline", roles: ["owner", "cook"] },
-  { id: "staff", title: "Ekip", subtitle: "Staff", icon: "people-circle-outline", roles: ["owner", "admin", "manager"] },
-];
+import { confirmClearCatalog } from "../menu/clearCatalog";
+import { ENTRIES, rank, type MoreEntry } from "../menu/entries";
+import type { Proformat } from "../promos/types";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 // +15% readability bump across menu text (22→25.3, 15→17.3, 12→13.8, 11→12.7, 13→15)
 const scale = (n: number) => Math.round(n * NAV_MENU_TEXT_SCALE * 10) / 10;
-
-// Hub order is per role: each role opens this screen for a different reason,
-// so what they reach for most sits highest. Rapò is pinned first and Magazen
-// pinned last (right above Log out) — they never appear in these lists.
-// Tweak a row here to reorder that role's menu.
-const PRIORITY: Record<Role, MoreEntry[]> = {
-  // Restock → stock → goods owed → credit/debt → sourcing → occasional edits.
-  owner: ["orders", "inventory", "pickups", "customers", "suppliers", "catalog", "staff"],
-  admin: ["orders", "inventory", "pickups", "customers", "suppliers", "catalog", "staff"],
-  // Runs the floor: same daily rhythm, no sourcing access.
-  manager: ["shift", "orders", "inventory", "pickups", "customers", "catalog", "staff"],
-  // At the till: the shift is the daily heartbeat, then credit, stock, goods owed.
-  cashier: ["shift", "customers", "inventory", "pickups", "orders", "catalog"],
-  // Front of house reads the menu.
-  associate: ["catalog"],
-  // Kitchen asks for supplies, then checks the menu.
-  cook: ["orders", "catalog", "pickups"],
-};
-
-const UNRANKED = 500;
-
-function rank(role: string, id: MoreEntry): number {
-  if (id === "reports") return -2;  // pinned first
-  // The shift is the daily heartbeat for the floor roles — pinned with reports.
-  if (id === "shift" && (role === "cashier" || role === "manager")) return -2;
-  if (id === "store") return 999;   // pinned last, just above Log out
-  const list = PRIORITY[role as Role];
-  const i = list ? list.indexOf(id) : -1;
-  return i === -1 ? UNRANKED : i;
-}
 
 export default function MoreScreen({
   role = "cashier",
@@ -91,6 +47,9 @@ export default function MoreScreen({
   userStoreIds = [],
   stores = [],
   deviceId = "device-unknown",
+  onLoadIntoCart,
+  selection: controlledSelection,
+  onSelectionChange,
 }: {
   role?: Role;
   businessType?: BusinessType;
@@ -106,15 +65,28 @@ export default function MoreScreen({
   userStoreIds?: string[];
   stores?: { id: string; name: string }[];
   deviceId?: string;
+  /** Hand a proformat's lines to the POS tab (App swaps the seed into POS). */
+  onLoadIntoCart?: (proformat: Proformat, customerId: string | null) => void;
+  /** CONTROLLED selection — the tablet passes it (App's moreSel) so the
+   *  sidebar drives the body. Omit both on the phone: the hub stays
+   *  uncontrolled so re-pressing Plis can remount/reset it. */
+  selection?: MoreEntry | null;
+  onSelectionChange?: (s: MoreEntry | null) => void;
 }) {
-  const { padH } = useResponsive();
-  const [selection, setSelection] = useState<MoreEntry | null>(null);
+  const { padH, isTablet } = useResponsive();
+  const [internalSelection, setInternalSelection] = useState<MoreEntry | null>(null);
+  const selection = controlledSelection !== undefined ? controlledSelection : internalSelection;
+  const setSelection = (s: MoreEntry | null) => {
+    if (controlledSelection !== undefined) onSelectionChange?.(s);
+    else setInternalSelection(s);
+  };
   // Pending deliveries waiting on "Rive" — surfaced as a badge on Envantè.
   // Re-read every time the hub becomes visible (a receive inside Inventory
-  // doesn't bump inventoryVersion) and whenever a save does.
+  // doesn't bump inventoryVersion) and whenever a save does. Skipped on the
+  // tablet: the sidebar owns the badges (this component only shows bodies).
   const [pendingBatches, setPendingBatches] = useState(0);
   useEffect(() => {
-    if (selection) return;
+    if (isTablet || selection) return;
     let alive = true;
     (async () => {
       try {
@@ -129,15 +101,16 @@ export default function MoreScreen({
   }, [selection, inventoryVersion]);
   // Not-yet-paid orders badge on the Kòmand row — the same live count the
   // root OrdersFab shows (OrdersScreen reloads + the root DB refresh own it).
+  // Tablet: the sidebar's Kòmand badge owns it instead.
   const [ordersCount, setOrdersCount] = useState(0);
-  useEffect(() => ordersUI.subscribeCount(setOrdersCount), []);
+  useEffect(() => (isTablet ? undefined : ordersUI.subscribeCount(setOrdersCount)), []);
   const badges: Partial<Record<MoreEntry, number>> = { inventory: pendingBatches };
   if (ordersCount > 0) badges.orders = ordersCount;
   // Live shift status for the Shift row — one continuous flow: the row shows
   // whether YOU have a shift and what the team needs, no separate screens.
   const [shiftLive, setShiftLive] = useState<{ mine: string | null; active: number; pending: number } | null>(null);
   useEffect(() => {
-    if (selection) return;
+    if (isTablet || selection) return;
     let alive = true;
     const refreshShiftLive = async () => {
       try {
@@ -181,8 +154,51 @@ export default function MoreScreen({
     setSelection(id);
   };
 
+  // Back-to-hub only exists on the phone (bodies can bounce to the Plis
+  // list). On the tablet there is no hub — the sidebar never unmounts and
+  // its rows ARE the navigation, so bodies get onBack=undefined and hide
+  // their chevron (Pickups takes showBack={false} for the same reason).
+  const back = isTablet ? undefined : () => setSelection(null);
+
   const renderBody = () => {
     switch (selection) {
+      // Tablet sidebar rows — the Rapò hub flattened (the phone mounts
+      // ReportsScreen, which keeps its own hub of these three).
+      case "sales":
+        return (
+          <SalesReportScreen
+            role={role}
+            storeId={storeId}
+            storeName={storeName}
+            currentUser={currentUser}
+            userStoreIds={userStoreIds}
+            deviceId={deviceId}
+            onBack={back}
+          />
+        );
+      case "credits":
+        return (
+          <CreditReportScreen
+            role={role}
+            storeId={storeId}
+            storeName={storeName}
+            userStoreIds={userStoreIds}
+            deviceId={deviceId}
+            onBack={back}
+          />
+        );
+      case "guard":
+        return (
+          <BusinessGuardScreen
+            role={role}
+            storeId={storeId}
+            storeName={storeName}
+            currentUser={currentUser}
+            userStoreIds={userStoreIds}
+            deviceId={deviceId}
+            onBack={back}
+          />
+        );
       case "reports":
         return (
           <ReportsScreen
@@ -192,7 +208,7 @@ export default function MoreScreen({
             currentUser={currentUser}
             userStoreIds={userStoreIds}
             deviceId={deviceId}
-            onBack={() => setSelection(null)}
+            onBack={back}
           />
         );
       case "catalog":
@@ -202,7 +218,7 @@ export default function MoreScreen({
             currentUser={currentUser}
             onOpenInventory={() => setSelection("inventory")}
             inventoryVersion={inventoryVersion}
-            onBack={() => setSelection(null)}
+            onBack={back}
           />
         );
       case "inventory":
@@ -244,7 +260,20 @@ export default function MoreScreen({
             role={role}
             currentUser={currentUser}
             storeId={storeId}
-            onBack={() => setSelection(null)}
+            onBack={back}
+            showBack={!isTablet}
+          />
+        );
+      case "proformat":
+        return (
+          <ProformatScreen
+            role={role}
+            currentUser={currentUser}
+            storeId={storeId}
+            storeName={storeName}
+            deviceId={deviceId}
+            onBack={back}
+            onLoadIntoCart={onLoadIntoCart}
           />
         );
       default:
@@ -252,7 +281,7 @@ export default function MoreScreen({
     }
   };
 
-  if (selection) {
+  if (selection && !isTablet) {
     return (
       <View style={{ flex: 1 }}>
         {renderBody()}
@@ -260,7 +289,29 @@ export default function MoreScreen({
     );
   }
 
-  return (
+  // Tablet: bodies only — the MenuSidebar IS the menu (it sits permanently in
+  // the rail), so the list hub never renders here and tool rows land directly
+  // on their screen. Empty state = a body without a selection (can happen
+  // after Inventory closes itself).
+  if (isTablet) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        {selection ? (
+          renderBody()
+        ) : (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(47,128,237,0.12)", borderWidth: 1, borderColor: "rgba(47,128,237,0.3)", alignItems: "center", justifyContent: "center" }}>
+              <Ionicons name="grid-outline" size={28} color="#2f80ed" />
+            </View>
+            <Text style={{ color: "#fff", fontWeight: "800", fontSize: 16, marginTop: 14, textAlign: "center" }}>Chwazi yon zouti</Text>
+            <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 6, textAlign: "center", lineHeight: 19 }}>Tape yon zouti nan meni an pou louvri l isit la.</Text>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  const hubView = (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
       <View style={{ paddingHorizontal: padH, paddingTop: 8, paddingBottom: 12 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 4 }}>
@@ -283,7 +334,7 @@ export default function MoreScreen({
           {menuSearch.length > 0 && <Pressable onPress={() => setMenuSearch("")} hitSlop={8} style={{ padding: 4 }}><Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>✕</Text></Pressable>}
         </View>
       </View>
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 24 }}>
+      <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 24 }}>
         <View style={{ height: 12 }} />
         {visible.map(e => {
           const isShiftRow = e.id === "shift";
@@ -328,40 +379,7 @@ export default function MoreScreen({
       ) : null}
       {role === "owner" && (
         <Pressable
-          onPress={() => {
-            Alert.alert(
-              "Efase done katalòg?",
-              "Ap efase TOUT pwodwi, inite, variant, batch, pri ak founisè (kategori yo rete). Aksyon sa a pa ka defèt.",
-              [
-                { text: "Anile", style: "cancel" },
-                {
-                  text: "Efase tout", style: "destructive",
-                  onPress: () => {
-                    Alert.alert(
-                      "Konfime yon dènye fwa",
-                      "Vre efase? Fèmen app la epi relouvri apre.",
-                      [
-                        { text: "Retounen", style: "cancel" },
-                        {
-                          text: "Wi, efase", style: "destructive",
-                          onPress: async () => {
-                            try {
-                              const db = await getDb();
-                              const { wipeCatalogData } = await import("../db/cutoverCatalog");
-                              await wipeCatalogData(db);
-                              uploadSuccess("Efase ✓", "Katalòg vid. Fèmen app la epi relouvri pou rekòmanse pwòp.");
-                            } catch (e: any) {
-                              uploadError("Erè", e?.message ?? "Efase echwe");
-                            }
-                          },
-                        },
-                      ]
-                    );
-                  },
-                },
-              ]
-            );
-          }}
+          onPress={() => confirmClearCatalog()}
           style={{ flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: "rgba(224,108,91,0.08)", borderWidth: 1, borderColor: "rgba(224,108,91,0.4)", borderRadius: 18, padding: 14, marginTop: 2 }}
         >
           <View style={{ width: 48, height: 48, borderRadius: 12, backgroundColor: "rgba(224,108,91,0.16)", alignItems: "center", justifyContent: "center" }}>
@@ -387,7 +405,9 @@ export default function MoreScreen({
         </View>
         <Ionicons name="chevron-forward" size={18} color="#8e8e93" />
       </Pressable>
-    </ScrollView>
+    </KeyboardSafeScrollView>
     </View>
   );
+
+  return hubView;
 }

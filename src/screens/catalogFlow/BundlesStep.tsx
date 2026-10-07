@@ -6,6 +6,7 @@ import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../../db";
+import { useSalesEvents } from "../../salesEvents";
 import { fmtG } from "../../format";
 import type { Item, Variant } from "../../catalogModel";
 import { currentBundlePrice, upsertBundleRow } from "../../catalogModel";
@@ -14,6 +15,7 @@ import type { FlowCtx } from "./types";
 import { canManageCatalog } from "./types";
 import { uploadError } from "../../components/UploadTransition";
 import { MoneyInput } from "../../components/maskedInput";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
 
 export default function BundlesStep({
   ctx, productId, productName, onBack,
@@ -64,6 +66,9 @@ export default function BundlesStep({
     } catch {}
   }
   useEffect(() => { load(); }, [productId]);
+  // Live: a bundle edited on another register arrives through autoSync's pull
+  // (load() is a no-op until a product is selected).
+  useSalesEvents(() => { load().catch(() => {}); });
 
   const itemName = (id: string) => items.find(i => i.id === id)?.name ?? "?";
   const bundleVariant = (bid: string) => variants.find(v => v.id === bid);
@@ -160,7 +165,7 @@ export default function BundlesStep({
   }
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {productName ? <Text style={{ fontSize: 12, color: "#8e8e93" }}>{productName} · of espesyal (ex. 3 pou 500)</Text> : null}
       {variants.length === 0 && (
         <Text style={{ fontSize: 12, color: "#8e8e93", textAlign: "center" }}>Poko gen variant — kreye variant anvan.</Text>
@@ -263,6 +268,6 @@ export default function BundlesStep({
           <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>+ ajoute bundle</Text>
         </Pressable>
       )}
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

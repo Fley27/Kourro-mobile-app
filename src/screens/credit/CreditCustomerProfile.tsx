@@ -4,17 +4,7 @@
 // every suggestion. Nothing here blocks a sale; it informs the owner's
 // decision — the two buttons write the limit the owner picks.
 import React, { useMemo, useState } from "react";
-import {
-  Alert,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  TextInput,
-  View,
-} from "react-native";
+import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
 import { Text } from "../../components/InterText";
 import { Ionicons } from "@expo/vector-icons";
 import { fmtG, monoStyle } from "../../format";
@@ -29,6 +19,9 @@ import {
   type CustomerRow,
   type PaymentRow,
 } from "../../creditAnalytics";
+import { SafeScreen } from "../../components/SafeScreen";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { mintId } from "../../db/ids";
 
 const BG = "rgba(0,0,0,0.96)";
 const CARD = "rgba(255,255,255,0.05)";
@@ -208,7 +201,7 @@ export default function CreditCustomerProfile({
       try {
         await db.runAsync(
           "INSERT INTO customer_history (id, customer_id, user_id, action, field_name, old_value, new_value, created_at) VALUES (?,?,?,?,?,?,?,?)",
-          [`cust-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, customerId, "credit-report", "updated", "credit_limit", oldLimit ?? null, value, new Date().toISOString()]
+          [mintId(), customerId, "credit-report", "updated", "credit_limit", oldLimit ?? null, value, new Date().toISOString()]
         );
       } catch {}
       try {
@@ -231,7 +224,7 @@ export default function CreditCustomerProfile({
 
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: BG }}>
+      <SafeScreen style={{ flex: 1, backgroundColor: BG }}>
         {/* Header */}
         <View style={{ paddingHorizontal: padH, paddingTop: 6, flexDirection: "row", alignItems: "center", gap: 12 }}>
           <Pressable onPress={onClose} accessibilityLabel="Close" style={SQUARE}>
@@ -252,7 +245,7 @@ export default function CreditCustomerProfile({
           </View>
         </View>
 
-        <ScrollView
+        <KeyboardSafeScrollView
           contentContainerStyle={{ padding: padH, paddingTop: 16, paddingBottom: 44 }}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
@@ -446,7 +439,7 @@ export default function CreditCustomerProfile({
             Aging runs from each credit's due date, or its sale date when no due date was set. Days to clear count from the day the credit was
             issued to the day the payment landed. Suggestions are guidance — the decision stays with you.
           </Text>
-        </ScrollView>
+        </KeyboardSafeScrollView>
 
         {/* Limit editor */}
         {editing ? (
@@ -498,7 +491,7 @@ export default function CreditCustomerProfile({
             </View>
           </KeyboardAvoidingView>
         ) : null}
-      </SafeAreaView>
+      </SafeScreen>
     </Modal>
   );
 }

@@ -2,6 +2,7 @@ import { fmtG, fmt } from "./format";
 import { getUserById } from "./users";
 import { insertOutbox } from "./db";
 import { buildReceipts, receiptItemsFrom, attachLineLabels } from "./receipts";
+import { FALLBACK_STORE_ID, mintId } from "./db/ids";
 
 export type PaymentMethod = "cash" | "moncash" | "natcash" | "credit";
 
@@ -19,7 +20,7 @@ export async function findSaleDetail(db: any, storeId: string, query: string): P
   const sales = (await db.getAllAsync("SELECT * FROM sales")) as any[];
   const sale = sales.find((s: any) => {
     const store = s.store_id ?? storeId;
-    if (String(store) !== storeId && String(store) !== "demo-store-id") return false;
+    if (String(store) !== storeId && String(store) !== FALLBACK_STORE_ID) return false;
     return String(s.id ?? "").toLowerCase() === q || String(s.sale_number ?? s.id ?? "").toLowerCase() === q;
   });
   if (!sale) return null;
@@ -94,19 +95,33 @@ export async function changeSalePaymentMethod(
       const outstanding = Math.max(0, Number(credit.balance ?? 0));
       if (customer) {
         const custTotal = Math.max(0, Number(customer.total_debt ?? 0) - outstanding);
+        const custOpen = Math.max(0, (Number(customer.open_debt_count ?? 0)) - (outstanding > 0 ? 1 : 0));
         await db.runAsync(
           "UPDATE customers SET total_debt = ?, is_high_risk = ?, open_debt_count = ? WHERE id = ?",
-          [custTotal, custTotal > 0 ? 1 : 0, Math.max(0, (Number(customer.open_debt_count ?? 0)) - (outstanding > 0 ? 1 : 0)), customer.id]
+          [custTotal, custTotal > 0 ? 1 : 0, custOpen, customer.id]
         );
+        try {
+          await insertOutbox("customers", "update", {
+            id: customer.id,
+            total_debt: custTotal,
+            is_high_risk: custTotal > 0,
+            open_debt_count: custOpen,
+            updated_at: now, lamport_clock: Date.now(),
+          });
+        } catch {}
       }
       await db.runAsync("DELETE FROM credits WHERE id = ?", [cid]);
-      try { await insertOutbox("credits", "delete", { id: cid, sale_id: sale.id }); } catch {}
+      // Tombstone must carry is_deleted + clocks, or the server's LWW keeps the
+      // old row alive and the other register never sees the credit disappear.
+      try { await insertOutbox("credits", "delete", { id: cid, sale_id: sale.id, is_deleted: true, updated_at: now, lamport_clock: Date.now() }); } catch {}
     }
   } else {
     const dueDate = new Date(); dueDate.setDate(dueDate.getDate() + 30);
     const ds = dueDate.toISOString().slice(0, 10);
     const creditRec = {
-      id: `cr_${sale.id}`,
+      // uuid on purpose — credits.id is uuid in the cloud (the `cr_` prefix
+      // made every push fail, so correction-created debts never synced).
+      id: mintId(),
       store_id: opts.storeId,
       sale_id: sale.id,
       customer_id: customer.id,
@@ -116,6 +131,7 @@ export async function changeSalePaymentMethod(
       status: "pending",
       due_date: ds,
       updated_at: now,
+      created_at: now, lamport_clock: Date.now(), is_deleted: false, will_be_late: false,
     };
     await db.runAsync(
       "INSERT INTO credits (id,store_id,sale_id,customer_id,amount,amount_paid,balance,status,due_date,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -127,6 +143,15 @@ export async function changeSalePaymentMethod(
       [custTotal, 1, customer.id]
     );
     try { await insertOutbox("credits", "create", creditRec); } catch {}
+    try {
+      await insertOutbox("customers", "update", {
+        id: customer.id,
+        total_debt: custTotal,
+        is_high_risk: true,
+        open_debt_count: Number(customer.open_debt_count ?? 0) + 1,
+        updated_at: now, lamport_clock: Date.now(),
+      });
+    } catch {}
   }
 
   const updatedSale = {

@@ -22,7 +22,7 @@ export interface ReceiptCustomer {
 export interface ReceiptData {
   id: string;
   /** order_bill = synthetic "Fakti" over open-order lines (never a sale row). */
-  kind: "sale" | "credit_payment" | "order_bill";
+  kind: "sale" | "credit_payment" | "order_bill" | "proformat";
   copyType: ReceiptCopyType;
   receiptNumber: string;
   saleNumber: string;
@@ -219,12 +219,13 @@ export function receiptToText(r: ReceiptData): string {
   const money = (n: number) => `${fmtG(n)}`;
   const isPayment = r.kind === "credit_payment";
   const isBill = r.kind === "order_bill";
+  const isPfo = r.kind === "proformat";
   push("     JESYON MAGAZEN");
-  push(isPayment ? "   RESI PEMAN DÈT" : isBill ? "          FAKTI" : "         RESI");
+  push(isPayment ? "   RESI PEMAN DÈT" : isBill ? "          FAKTI" : isPfo ? "       PROFORMAT" : "         RESI");
   push(rule);
   push(copyLabel(r.copyType));
   push(`N° ${r.receiptNumber}`);
-  push(isBill ? `Kòmand: ${r.saleNumber}` : `${isPayment ? "Dèt:" : "Vant:"} ${r.saleNumber}`);
+  push(isBill ? `Kòmand: ${r.saleNumber}` : isPfo ? `Proformat: ${r.saleNumber}` : `${isPayment ? "Dèt:" : "Vant:"} ${r.saleNumber}`);
   push(`Dat: ${fmtDateTime(r.createdAt)}`);
   push(rule);
   push(`Kesye: ${r.cashier.name}`);
@@ -251,7 +252,9 @@ export function receiptToText(r: ReceiptData): string {
     push(isBill ? "TOTAL FAKTI: " + money(r.total) : `TOTAL A PEYE: ${money(r.total)}`);
   }
   push(rule);
-  if (isBill) {
+  if (isPfo) {
+    push("Stati: Devi pri — pa peye");
+  } else if (isBill) {
     push(`Stati: ${Number(r.amountDue ?? 0) > 0 ? "Pa peye" : "Peye"}`);
   } else {
     push(`Peman: ${PAYMENT_LABELS[r.paymentMethod] ?? r.paymentMethod}`);
@@ -267,7 +270,7 @@ export function receiptToText(r: ReceiptData): string {
     }
   }
   push(rule);
-  push(isPayment ? "Mèsi pou peyi dèt la!" : "Mèsi pou acha w!");
+  push(isPfo ? "Mèsi!" : isPayment ? "Mèsi pou peyi dèt la!" : "Mèsi pou acha w!");
   push(r.storeName);
   push(`Jesyon Magazen · ${fmtDateTime(r.createdAt)}`);
   return L.join("\n");
@@ -285,8 +288,11 @@ export function buildReceiptHtml(r: ReceiptData): string {
   const payLabel = PAYMENT_LABELS[r.paymentMethod] ?? r.paymentMethod;
   const isPayment = r.kind === "credit_payment";
   const isBill = r.kind === "order_bill";
+  const isPfo = r.kind === "proformat";
   let paymentBlock: string;
-  if (isBill) {
+  if (isPfo) {
+    paymentBlock = row("Stati", "Devi pri — pa peye", true, "#1D4ED8");
+  } else if (isBill) {
     paymentBlock = row("Stati", Number(r.amountDue ?? 0) > 0 ? "Pa peye" : "Peye", true, Number(r.amountDue ?? 0) > 0 ? "#B00020" : "#0A7C3E");
   } else if (isPayment) {
     paymentBlock =
@@ -349,7 +355,7 @@ export function buildReceiptHtml(r: ReceiptData): string {
   <div class="head">
     <h1>JESYON MAGAZEN</h1>
     <div class="store">${esc(r.storeName)}</div>
-    <div class="label">${isPayment ? "RESI PEMAN DÈT" : isBill ? "FAKTI" : "RESI"}</div>
+    <div class="label">${isPfo ? "PROFORMAT" : isPayment ? "RESI PEMAN DÈT" : isBill ? "FAKTI" : "RESI"}</div>
   </div>
   ${spacedRule}
   <div style="display:flex;justify-content:space-between;align-items:center">
@@ -357,7 +363,7 @@ export function buildReceiptHtml(r: ReceiptData): string {
     <span style="font-size:11px;font-weight:700;color:#78716c">N° ${esc(r.receiptNumber)}</span>
   </div>
   <div class="meta">
-    ${row(isBill ? "Kòmand" : isPayment ? "Dèt" : "Vant", esc(r.saleNumber), true)}
+    ${row(isPfo ? "Proformat" : isBill ? "Kòmand" : isPayment ? "Dèt" : "Vant", esc(r.saleNumber), true)}
     ${row("Dat", esc(fmtDateTime(r.createdAt)))}
     ${row("Kesye", `${esc(r.cashier.name)} · ${esc(r.cashier.role)}`, true)}
     ${r.customer ? row("Kliyan", esc(r.customer.name)) + (r.customer.idCard ? row("ID", esc(r.customer.idCard), true) : "") + (r.customer.phone ? row("Tel", esc(r.customer.phone)) : "") : ""}
@@ -370,7 +376,7 @@ export function buildReceiptHtml(r: ReceiptData): string {
   <div class="total-band"><span>${isPayment ? "TOTAL PEMAN" : isBill ? "TOTAL FAKTI" : "TOTAL"}</span><span class="amount">${money(r.total)}</span></div>
   <div style="margin-top:8px">${paymentBlock}</div>
   <div class="foot">
-    <div class="thanks">${isPayment ? "Mèsi pou peyi dèt la!" : "Mèsi pou acha w!"}</div>
+    <div class="thanks">${isPfo ? "Mèsi!" : isPayment ? "Mèsi pou peyi dèt la!" : "Mèsi pou acha w!"}</div>
     <div class="small">${esc(r.storeName)} · ${esc(fmtDateTime(r.createdAt))}</div>
     <div class="small">Jesyon Magazen · Resi ofisyèl</div>
   </div>

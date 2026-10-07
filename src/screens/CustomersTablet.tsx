@@ -1,7 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { View, Text, Pressable, FlatList, ScrollView, TextInput } from "react-native";
-import { centerBox } from "../responsive";
-import { palette, radius, shadow } from "../theme";
+import { blackPalette as palette, radius, shadow } from "../theme";
 import { CustomerProfileBody, CustomerProfileHeader, CustomerTxnsList, ProfileMenu, tenderLabel } from "../components/CustomerProfile";
 import { CreditPayFlow } from "../components/CreditPayFlow";
 import { EditCustomerContent, type EditCustomerState } from "../components/CustomerSheets";
@@ -9,11 +8,15 @@ import { customerToFormData } from "../sales/customers";
 import { TxnDetailBody } from "./cartViews";
 import { fmtG, fmt, monoStyle } from "../format";
 import { CustomerListEmpty, CreditLimitViewCard } from "./CustomersShared";
+import { SkeletonListRow } from "../components/Skeleton";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export interface CustomersTabletProps {
   customers: any[];
   debts: any[];
   displayCustomers: any[];
+  /** First DB load — show skeleton rows instead of the "Pa gen kliyan" flash. */
+  loading?: boolean;
   search: string;
   setSearch: (v: string) => void;
   showDebtOnly: boolean;
@@ -103,24 +106,24 @@ function TabletSearchBlock(props: {
           onPress={() => setShowDebtOnly(false)}
           style={{
             flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill,
-            backgroundColor: !showDebtOnly ? palette.surface : "transparent",
+            backgroundColor: !showDebtOnly ? palette.ink : "transparent",
             borderWidth: !showDebtOnly ? 0.5 : 0, borderColor: palette.hairline,
             shadowColor: "#000", shadowOpacity: !showDebtOnly ? 0.06 : 0, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
           }}
         >
-          <Text style={{ fontWeight: "600", fontSize: 12.5, color: !showDebtOnly ? palette.ink : palette.muted, letterSpacing: -0.1 }}>Tout • {customers.length}</Text>
+          <Text style={{ fontWeight: "600", fontSize: 12.5, color: !showDebtOnly ? "#000" : palette.muted, letterSpacing: -0.1 }}>Tout • {customers.length}</Text>
         </Pressable>
         <Pressable
           onPress={() => setShowDebtOnly(true)}
           style={{
             flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill,
-            backgroundColor: showDebtOnly ? palette.surface : "transparent",
+            backgroundColor: showDebtOnly ? palette.ink : "transparent",
             borderWidth: showDebtOnly ? 0.5 : 0, borderColor: palette.hairline,
             shadowColor: "#000", shadowOpacity: showDebtOnly ? 0.06 : 0, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
           }}
         >
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: showDebtOnly ? palette.warningDot : "#CBD5E1" }} />
-          <Text style={{ fontWeight: "600", fontSize: 12.5, color: showDebtOnly ? palette.ink : palette.muted, letterSpacing: -0.1 }}>Ki gen dèt • {debts.length}</Text>
+          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: showDebtOnly ? palette.warningDot : "rgba(255,255,255,0.3)" }} />
+          <Text style={{ fontWeight: "600", fontSize: 12.5, color: showDebtOnly ? "#000" : palette.muted, letterSpacing: -0.1 }}>Ki gen dèt • {debts.length}</Text>
         </Pressable>
       </View>
     </View>
@@ -139,9 +142,9 @@ function TabletCustomerRow(props: { item: any; debts: any[]; isSelected: boolean
     <Pressable
       onPress={onPress}
       style={{
-        backgroundColor: active ? palette.ink : palette.surface,
+        backgroundColor: active ? palette.surfaceGrouped : palette.surface,
         borderWidth: 0.5,
-        borderColor: active ? palette.ink : hasDebt ? palette.dangerBd : palette.hairline,
+        borderColor: active ? palette.accentGold : hasDebt ? palette.dangerBd : palette.hairline,
         borderRadius: radius.md,
         padding: 12,
         flexDirection: "row",
@@ -165,7 +168,7 @@ function TabletCustomerRow(props: { item: any; debts: any[]; isSelected: boolean
           backgroundColor: active ? palette.surface : hasDebt ? palette.dangerBg : palette.successBg,
         }}
       >
-        <Text style={{ fontWeight: "800", fontSize: 13, color: active ? palette.ink : hasDebt ? "#7F1D1D" : "#065F46" }}>
+        <Text style={{ fontWeight: "800", fontSize: 13, color: active ? palette.ink : hasDebt ? palette.danger : palette.success }}>
           {(item.name?.[0] ?? "•").toUpperCase()}
         </Text>
       </View>
@@ -191,7 +194,7 @@ function TabletCustomerRow(props: { item: any; debts: any[]; isSelected: boolean
 
 export function CustomersTablet(props: CustomersTabletProps) {
   const {
-    customers, debts, displayCustomers, search, setSearch, showDebtOnly, setShowDebtOnly,
+    customers, debts, displayCustomers, loading, search, setSearch, showDebtOnly, setShowDebtOnly,
     selectedCustomerId, setSelectedCustomerId, selectedCustomer,
     canManageCustomers, isManagerPlus, onOpenMenu, showProfileMenu, onCloseMenu, onAddSale, onOpenEdit, onOpenTxn, onShareReceipt, txnDetail, setTxnDetail, showAllTxns, setShowAllTxns, showEditSheet, onCloseEditSheet, showPay, onClosePay, payDue, onPayDue, onPaySuccess, txnDue, txnPaid, txnPayments, onPayPress, editNotesProps, editFormState, setEditFormState, onSaveEdit, savingCustomer, profileStats, profileNotes, profileTxns, padH, width, isTablet, onAdd,
   } = props;
@@ -212,14 +215,14 @@ export function CustomersTablet(props: CustomersTabletProps) {
         </View>
         <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <View style={{ backgroundColor: palette.surfaceGrouped, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 5 }}>
-            <Text style={{ fontSize: 11, fontWeight: "700", color: "#3A3A3C" }}>{customers.length} kliyan • {debts.length} dèt aktif</Text>
+            <Text style={{ fontSize: 11, fontWeight: "700", color: palette.muted2 }}>{customers.length} kliyan • {debts.length} dèt aktif</Text>
           </View>
           {onAdd ? (
             <Pressable
               onPress={onAdd}
               style={{ backgroundColor: palette.ink, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 9, ...shadow.card }}
             >
-              <Text style={{ fontSize: 13, fontWeight: "600", color: "#FFFFFF" }}>＋ Nouvo Kliyan</Text>
+              <Text style={{ fontSize: 13, fontWeight: "600", color: "#000" }}>＋ Nouvo Kliyan</Text>
             </Pressable>
           ) : null}
         </View>
@@ -250,7 +253,15 @@ export function CustomersTablet(props: CustomersTabletProps) {
                   <TabletCustomerRow item={item} debts={debts} isSelected={isSelected} onPress={() => setSelectedCustomerId(isSelected ? null : item.id)} />
                 );
               }}
-              ListEmptyComponent={<CustomerListEmpty />}
+              ListEmptyComponent={
+                loading ? (
+                  <View>
+                    {[0, 1, 2, 3, 4].map(i => <SkeletonListRow key={i} tone="dark" padH={10} divider={false} />)}
+                  </View>
+                ) : (
+                  <CustomerListEmpty />
+                )
+              }
             />
           </View>
         </View>
@@ -309,7 +320,7 @@ export function CustomersTablet(props: CustomersTabletProps) {
               </View>
               ) : null}
               {!showPay ? (
-              <ScrollView ref={inspectorScroll} style={{ flex: 1 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 4 }}>
+              <KeyboardSafeScrollView ref={inspectorScroll} style={{ flex: 1 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 4 }}>
                 {/* Shared full profile — identical to checkout */}
                 <View style={{ backgroundColor: "#000", borderWidth: 0.5, borderColor: "#262626", borderRadius: radius.lg, padding: 16 }}>
                   {showEditSheet && selectedCustomer ? (                    <EditCustomerContent
@@ -349,7 +360,7 @@ export function CustomersTablet(props: CustomersTabletProps) {
                     />
                   )}
                 </View>
-              </ScrollView>
+              </KeyboardSafeScrollView>
               ) : (
               <View style={{ flex: 1 }}>
                 <CreditPayFlow
@@ -368,7 +379,7 @@ export function CustomersTablet(props: CustomersTabletProps) {
                   onPress={() => setSelectedCustomerId(null)}
                   style={{ flex: 1, paddingVertical: 12, backgroundColor: palette.ink, borderRadius: radius.pill, alignItems: "center" }}
                 >
-                  <Text style={{ fontWeight: "600", color: "#FFFFFF", fontSize: 14 }}>Fèmen</Text>
+                  <Text style={{ fontWeight: "600", color: "#000", fontSize: 14 }}>Fèmen</Text>
                 </Pressable>
               </View>
             </View>

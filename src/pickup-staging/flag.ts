@@ -3,8 +3,9 @@
 // Flag lives in _meta (never synced); missing key = enabled for everyone.
 import { useEffect, useState } from "react";
 import { getDb } from "../db";
+import { FALLBACK_STORE_ID } from "../db/ids";
 
-export const pickupFlagKey = (storeId: string) => `pickup_staging_${storeId || "demo-store-id"}`;
+export const pickupFlagKey = (storeId: string) => `pickup_staging_${storeId || FALLBACK_STORE_ID}`;
 
 export async function getPickupEnabled(storeId: string): Promise<boolean> {
   try {

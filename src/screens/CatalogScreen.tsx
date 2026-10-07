@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { palette, radius, topIconBtn } from "../theme";
 import { View, Text, Pressable, Alert, ScrollView, Modal } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb } from "../db";
+import { useSalesEvents } from "../salesEvents";
 import type { Role } from "../users";
 import {
   loadPricing, ensurePricingForProducts, getUnitsForProduct, getPricesForUnit,
@@ -11,7 +13,7 @@ import {
 } from "../pricing";
 import { fmtG } from "../format";
 import { uploadSuccess, uploadError } from "../components/UploadTransition";
-import { useResponsive } from "../responsive";
+import { useResponsive, sheetBox } from "../responsive";
 import { CatalogPhone } from "./CatalogPhone";
 import { CatalogTablet } from "./CatalogTablet";
 import CategoryFormModal from "../components/CategoryFormModal";
@@ -20,16 +22,21 @@ import CatalogFlowModal, { type StepKey } from "./catalogFlow/CatalogFlowModal";
 import BulkProductFlowModal from "./catalogFlow/BulkProductFlowModal";
 import ProductDetail from "./ProductDetail";
 import { loadCatalogModel, currentBaseCost, currentVariantPrice, unpricedVariantRows, type CatalogModel, type Item, type Batch, type Variant, type VariantPrice } from "../catalogModel";
+import { FALLBACK_STORE_ID } from "../db/ids";
 import {
   DEFAULT_CATEGORIES, getCategoryForProduct, slugify, isGoods, isService, isAvailable, categoryDisplayIcon, statusForProduct, ProductCard, normName,
   type Category, type Product,
 } from "./CatalogShared";
 
 export default function CatalogScreen({ role = "cashier", currentUser, onOpenInventory, inventoryVersion, onBack }: { role?: Role; currentUser?: any; onOpenInventory?: () => void; inventoryVersion?: number; onBack?: () => void }) {
-  const { isTablet, isLandscape, padH } = useResponsive();
+  const insets = useSafeAreaInsets();
+  const { isTablet, isLandscape, padH, width } = useResponsive();
   // Master-detail shows in portrait; landscape tablets use phone layout.
-  const showTablet = isTablet && !isLandscape;
+  const showTablet = isTablet;
   const [products, setProducts] = useState<Product[]>([]);
+  // First-load flag — skeleton cards instead of the "Pa gen pwodwi" flash.
+  // Never reset: inventoryVersion reloads keep the list visible.
+  const [loading, setLoading] = useState(true);
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
   const [productCategories, setProductCategories] = useState<{ product_id: string; category_id: string }[]>([]);
 
@@ -111,7 +118,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       const catRows = (await db.getAllAsync("SELECT * FROM categories")) as any[];
       if (catRows.length === 0) {
         for (const c of DEFAULT_CATEGORIES.filter(x => x.id !== "all")) {
-          await db.runAsync("INSERT OR REPLACE INTO categories (id, store_id, name, icon, color, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", [c.id, "demo-store-id", c.name, c.icon, c.color, DEFAULT_CATEGORIES.findIndex(x => x.id === c.id), new Date().toISOString(), new Date().toISOString()]);
+          await db.runAsync("INSERT OR REPLACE INTO categories (id, store_id, name, icon, color, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)", [c.id, FALLBACK_STORE_ID, c.name, c.icon, c.color, DEFAULT_CATEGORIES.findIndex(x => x.id === c.id), new Date().toISOString(), new Date().toISOString()]);
         }
         setCategories(DEFAULT_CATEGORIES);
       } else {
@@ -147,9 +154,12 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       } catch { setModelItems([]); setModelBatches([]); setModelVariants([]); setModelPrices([]); setSupplierList([]); }
     } catch {}
     } catch (e) { console.log("[Stock load] failed:", e); }
+    finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
   useEffect(() => { if (inventoryVersion) load(); }, [inventoryVersion]);
+  // Live: catalog rows edited on another register arrive through autoSync.
+  useSalesEvents(() => { load().catch(() => {}); });
 
   function getProductCats(productId: string): string[] {
     const linked = productCategories.filter(pc => pc.product_id === productId).map(pc => pc.category_id);
@@ -720,6 +730,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       ) : showTablet ? (
         <CatalogTablet
           role={role} products={products} categories={categories}
+          loading={loading}
           q={q} setQ={setQ} onOpenFilter={() => { setDraftStatusSel(statusSel); setShowFilter(true); }} filterOn={statusSel !== "active"} draftCount={draftCount} cat={cat} setCat={setCat}
           filtered={filtered}
           canEdit={canEdit} canAddMore={canAddMore} canReduce={canReduce} canDelete={canDelete} canViewCost={canViewCost} canToggleAvail={canToggleAvail} onToggleAvail={toggleAvail} displayPriceOf={displayPriceOf} defaultUnitOf={defaultUnitOf}
@@ -735,6 +746,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       ) : (
         <CatalogPhone
           role={role} products={products} categories={categories}
+          loading={loading}
           q={q} setQ={setQ} onOpenFilter={() => { setDraftStatusSel(statusSel); setShowFilter(true); }} filterOn={statusSel !== "active"} draftCount={draftCount} cat={cat} setCat={setCat}
           filtered={filtered}
           canEdit={canEdit}
@@ -757,7 +769,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       <Modal visible={showFilter} transparent animationType="slide" onRequestClose={() => setShowFilter(false)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
           <Pressable style={{ flex: 1 }} onPress={() => setShowFilter(false)} />
-          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32, maxHeight: "85%" }}>
+          <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 + insets.bottom, maxHeight: "85%" }}>
             <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
               <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff" }}>Filtre</Text>
@@ -806,7 +818,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       <Modal visible={showFlowChoice} transparent animationType="fade" onRequestClose={() => setShowFlowChoice(false)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
           <Pressable style={{ flex: 1 }} onPress={() => setShowFlowChoice(false)} />
-          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 }}>
+          <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 + insets.bottom }}>
             <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
             <Text style={{ fontSize: 20, fontWeight: "800", color: "#fff", marginBottom: 12 }}>Nouvo pwodwi</Text>
             <Pressable

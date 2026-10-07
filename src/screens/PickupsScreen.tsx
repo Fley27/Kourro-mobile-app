@@ -8,14 +8,18 @@
 // filter, so a settled sale drops out on its own). Detail logs one pickup per
 // visit, validated so it can never exceed what is still owed, and appends to
 // `sale_pickups` (one row per visit, multi-visit supported).
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { View, Text, Pressable, ScrollView, TextInput, Alert, ActivityIndicator } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { View, Text, Pressable, ScrollView, TextInput, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { fmt, monoStyle } from "../format";
 import { useResponsive } from "../responsive";
+import { useSalesEvents } from "../salesEvents";
 import { listOpenPickups, findSaleForPickup, recordPickup, remainingOf, toNum } from "../pickup-staging/store";
 import { uploadError } from "../components/UploadTransition";
 import { saleLineLabel } from "../labels";
+import { SkeletonCardRow } from "../components/Skeleton";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { FALLBACK_STORE_ID } from "../db/ids";
 
 const HT_MONTHS = ["janvye", "fevriye", "mas", "avril", "me", "juin", "jiyè", "out", "septanm", "oktòb", "novanm", "desanm"];
 
@@ -63,7 +67,7 @@ export default function PickupsScreen({
   /** false when this screen IS the home (tab root) — no back chevron. */
   showBack?: boolean;
 }) {
-  const { padH } = useResponsive();
+  const { padH, width, isTablet } = useResponsive();
   const [rows, setRows] = useState<OpenRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -73,9 +77,12 @@ export default function PickupsScreen({
   const [detail, setDetail] = useState<Detail | null>(null);
   const [taken, setTaken] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  const loadedOnce = useRef(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    // Skeleton on first load only — after that the list stays put while a
+    // reload (e.g. post-pickup refresh) resolves in the background.
+    if (!loadedOnce.current) setLoading(true);
     try {
       // listOpenPickups is store-agnostic by design; scope it here with the
       // same rule findSaleForPickup uses (demo store id is a wildcard).
@@ -83,11 +90,13 @@ export default function PickupsScreen({
       const sid = String(storeId ?? "");
       setRows(all.filter(r => {
         const s = String(r.sale.store_id ?? "");
-        return s === sid || s === "demo-store-id" || sid === "demo-store-id";
+        return s === sid || s === FALLBACK_STORE_ID || sid === FALLBACK_STORE_ID;
       }));
-    } catch {} finally { setLoading(false); }
+    } catch {} finally { loadedOnce.current = true; setLoading(false); }
   }, [storeId]);
   useEffect(() => { load(); }, [load]);
+  // Live: a pickup recorded on another register must show up here.
+  useSalesEvents(() => { load().catch(() => {}); });
 
   // Pinned search: filters the open list, and an exact id / sale_number also
   // resolves settled sales (that is the "look one up after the fact" path).
@@ -156,7 +165,7 @@ export default function PickupsScreen({
   if (detail) {
     const settled = remainingTotal(detail.items) <= 0;
     return (
-      <ScrollView style={{ flex: 1, backgroundColor: "#000" }} contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 32 }}>
+      <KeyboardSafeScrollView style={{ flex: 1, backgroundColor: "#000" }} contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 32 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingTop: 8, paddingBottom: 4 }}>
           <Pressable onPress={() => { setDetail(null); setTaken({}); }} hitSlop={10} style={{ width: 40, height: 40, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="chevron-back" size={24} color="#fff" />
@@ -278,7 +287,7 @@ export default function PickupsScreen({
             })}
           </>
         )}
-      </ScrollView>
+      </KeyboardSafeScrollView>
     );
   }
 
@@ -318,7 +327,7 @@ export default function PickupsScreen({
         </View>
       </View>
 
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: padH, paddingTop: 14, paddingBottom: 28 }}>
+      <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: padH, paddingTop: 14, paddingBottom: 28 }}>
         {settledHit && (
           <Pressable onPress={() => openSale(String(settledHit.sale.id))} style={{ flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "#2f80ed55", backgroundColor: "#0e1626", borderRadius: 16, padding: 16, marginBottom: 12 }}>
             <Ionicons name="receipt-outline" size={22} color="#2f80ed" />
@@ -331,8 +340,11 @@ export default function PickupsScreen({
         )}
 
         {loading ? (
-          <View style={{ paddingTop: 60, alignItems: "center" }}>
-            <ActivityIndicator color="#8e8e93" />
+          <View style={{ paddingTop: 16 }}>
+            <SkeletonCardRow />
+            <SkeletonCardRow />
+            <SkeletonCardRow />
+            <SkeletonCardRow />
           </View>
         ) : filtered.length === 0 ? (
           <View style={{ paddingTop: 48, alignItems: "center", paddingHorizontal: 20 }}>
@@ -373,7 +385,7 @@ export default function PickupsScreen({
             );
           })
         )}
-      </ScrollView>
+      </KeyboardSafeScrollView>
     </View>
   );
 }

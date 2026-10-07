@@ -11,6 +11,7 @@
 // collects no due date/ID (validateCheckout still guards it).
 import React, { useMemo, useState } from "react";
 import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { fmtG, monoStyle } from "../format";
 import { topIconBtn } from "../theme";
@@ -139,6 +140,8 @@ export function OrderPaySheet({
     { id: "natcash", label: "NatCash" },
   ];
 
+  const insets = useSafeAreaInsets();
+
   const backBtn = (onPress: () => void) => (
     <Pressable
       onPress={onPress}
@@ -161,7 +164,7 @@ export function OrderPaySheet({
             keyboardDismissMode="interactive"
             showsVerticalScrollIndicator={false}
             bounces={false}
-            contentContainerStyle={{ flexGrow: 1, padding: 18, paddingTop: 60, paddingBottom: 24 }}
+            contentContainerStyle={{ flexGrow: 1, padding: 18, paddingTop: insets.top + 12, paddingBottom: 24 + insets.bottom }}
           >
             {view === "main" ? (
               <View style={{ flexDirection: "row", alignItems: "center" }}>

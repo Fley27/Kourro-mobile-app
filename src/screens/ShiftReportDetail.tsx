@@ -3,11 +3,12 @@
 // total, cash-out / collected tiles, breakdown and recent activity. Read-only:
 // every line is preserved so any discrepancy traces to its exact source.
 import React from "react";
-import { View, Text, Pressable, ScrollView, Modal, SafeAreaView } from "react-native";
+import { View, Text, Pressable, ScrollView, Modal } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { reconcileShift, localDayKey, localDayRange } from "../businessGuard";
 import { getUserById } from "../users";
 import { fmtG, monoStyle } from "../format";
+import { SafeScreen } from "../components/SafeScreen";
 
 export type ReportDetailData = {
   report: any;
@@ -179,7 +180,7 @@ export default function ShiftReportDetail({ data, onClose }: { data: ReportDetai
 
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: D.bg }}>
+      <SafeScreen style={{ flex: 1, backgroundColor: D.bg }}>
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 10, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
           {/* Top bar */}
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
@@ -360,7 +361,7 @@ export default function ShiftReportDetail({ data, onClose }: { data: ReportDetai
           ) : null}
           <View style={{ height: 20 }} />
         </ScrollView>
-      </SafeAreaView>
+      </SafeScreen>
     </Modal>
   );
 }

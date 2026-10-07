@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { palette, radius, shadow } from "../theme";
+import { blackPalette as palette, radius, shadow } from "../theme";
 import { fmtG, fmt, monoStyle } from "../format";
 import type { ProductUnit } from "../pricing";
 import { breakdownStock, countInUnit, itemFactor, minItemFactor, type Item, type Variant } from "../catalogModel";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { CATEGORY_IDS, mintId } from "../db/ids";
 
 export type Category = { id: string; name: string; icon: string; color: string; created_at?: string };
 export type Product = { id: string; name: string; sku?: string; barcode?: string; category?: string; category_id?: string; category_ids?: string[]; item_type?: "goods" | "service"; is_available?: number | boolean; stock_quantity: number; low_stock_threshold: number; cost_price?: number; selling_price?: number; unit?: string };
@@ -19,12 +21,12 @@ export type StockTab = "store" | "incoming";
 
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: "all", name: "Tout", icon: "⊞", color: palette.ink2 },
-  { id: "food", name: "Manje", icon: "🍚", color: palette.ink2 },
-  { id: "drinks", name: "Bwason", icon: "🥤", color: palette.ink2 },
-  { id: "household", name: "Kay", icon: "🧴", color: palette.ink2 },
-  { id: "dairy", name: "Letye", icon: "🥛", color: palette.ink2 },
-  { id: "bakery", name: "Boulanjri", icon: "🥐", color: palette.ink2 },
-  { id: "produce", name: "Lejume", icon: "🥬", color: palette.ink2 },
+  { id: CATEGORY_IDS.food, name: "Manje", icon: "🍚", color: palette.ink2 },
+  { id: CATEGORY_IDS.drinks, name: "Bwason", icon: "🥤", color: palette.ink2 },
+  { id: CATEGORY_IDS.household, name: "Kay", icon: "🧴", color: palette.ink2 },
+  { id: CATEGORY_IDS.dairy, name: "Letye", icon: "🥛", color: palette.ink2 },
+  { id: CATEGORY_IDS.bakery, name: "Boulanjri", icon: "🥐", color: palette.ink2 },
+  { id: CATEGORY_IDS.produce, name: "Lejume", icon: "🥬", color: palette.ink2 },
 ];
 
 // Dark surfaces for the black-background Products / Category views — same
@@ -137,16 +139,16 @@ export function isAvailable(p: Product | null | undefined): boolean {
 
 export function getCategoryForProduct(p: Product): string {
   const name = p.name.toLowerCase();
-  if (name.includes("rice") || name.includes("flour") || name.includes("sugar") || name.includes("pasta") || name.includes("corn") || name.includes("salt") || name.includes("mayi") || name.includes("sèl") || name.includes("sik") || name.includes("farin")) return "food";
-  if (name.includes("beer") || name.includes("cola") || name.includes("water") || name.includes("dlo") || name.includes("kola") || name.includes("prestige")) return "drinks";
-  if (name.includes("soap") || name.includes("savon") || name.includes("detergent") || name.includes("colgate") || name.includes("pat")) return "household";
-  if (name.includes("milk") || name.includes("lèt") || name.includes("coffee") || name.includes("kafe")) return "dairy";
-  if (name.includes("biscuit") || name.includes("bisk")) return "bakery";
-  if (name.includes("tomato") || name.includes("tomat") || name.includes("sardine")) return "produce";
-  return "food";
+  if (name.includes("rice") || name.includes("flour") || name.includes("sugar") || name.includes("pasta") || name.includes("corn") || name.includes("salt") || name.includes("mayi") || name.includes("sèl") || name.includes("sik") || name.includes("farin")) return CATEGORY_IDS.food;
+  if (name.includes("beer") || name.includes("cola") || name.includes("water") || name.includes("dlo") || name.includes("kola") || name.includes("prestige")) return CATEGORY_IDS.drinks;
+  if (name.includes("soap") || name.includes("savon") || name.includes("detergent") || name.includes("colgate") || name.includes("pat")) return CATEGORY_IDS.household;
+  if (name.includes("milk") || name.includes("lèt") || name.includes("coffee") || name.includes("kafe")) return CATEGORY_IDS.dairy;
+  if (name.includes("biscuit") || name.includes("bisk")) return CATEGORY_IDS.bakery;
+  if (name.includes("tomato") || name.includes("tomat") || name.includes("sardine")) return CATEGORY_IDS.produce;
+  return CATEGORY_IDS.food;
 }
 
-export function nid(p: string) { return `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`; }
+export function nid(_p: string) { return mintId(); }
 export function slugify(s: string) { return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""); }
 
 export type StockStatus = { label: string; border: string; bg: string; text: string; dot: string; accent: string; sub: string; bar: string };
@@ -283,7 +285,7 @@ export function CategoryStrip({ categories, cat, setCat, products, getProductCat
 }) {
   return (
     <View style={{ backgroundColor: catalogDark.bg, borderBottomWidth: 0.5, borderColor: catalogDark.hairline, paddingVertical: 8 }}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: padH, gap: 8 }}>
+      <KeyboardSafeScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: padH, gap: 8 }}>
         {categories.map(c => {
           const active = cat === c.id;
           const count = c.id === "all" ? products.length : products.filter(p => getProductCats(p.id).includes(c.id)).length;
@@ -300,7 +302,7 @@ export function CategoryStrip({ categories, cat, setCat, products, getProductCat
             </Pressable>
           );
         })}
-      </ScrollView>
+      </KeyboardSafeScrollView>
     </View>
   );
 }

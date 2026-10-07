@@ -2,14 +2,13 @@
 // customer orders. This screen owns the whole order flow (list, create,
 // board, item picking) — checkout never runs in order mode anymore, so a
 // cashier's sale is never covered by an open tab.
-import React, { useCallback, useEffect, useState } from "react";
-import {
-  ActivityIndicator, Alert, Modal, Pressable, RefreshControl, SafeAreaView, ScrollView, Text, TextInput, View,
-} from "react-native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Alert, Modal, Pressable, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { fmtG } from "../format";
 import { PROD_DARK } from "../screens/POSShared";
 import { getDb } from "../db";
+import { useSalesEvents } from "../salesEvents";
 import type { BusinessType, User } from "../users";
 import {
   ORDER_STATUS_LABELS,
@@ -28,7 +27,13 @@ import { CustomerDetailBody, CustomerProfileBody, TxnDetailBody } from "../scree
 import { attachLineLabels } from "../receipts";
 import { palette } from "../theme";
 import { GlobalUploadTransition, uploadError } from "../components/UploadTransition";
+import { SkeletonOrderCard } from "../components/Skeleton";
 import { ordersUI } from "../ordersUI";
+import { notifUI, type NotifRoute } from "../notifRoute";
+import { SafeScreen } from "../components/SafeScreen";
+import { KeyboardSafeView } from "../components/KeyboardSafe";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { useResponsive } from "../responsive";
 
 export default function OrdersScreen({
   storeId,
@@ -55,6 +60,8 @@ export default function OrdersScreen({
     role: role ?? currentUser?.role ?? "",
   };
   const hospitality = businessType !== "retail";
+  const { width, isTablet } = useResponsive();
+  const paneW = Math.min(430, Math.max(330, Math.round(width * 0.36)));
 
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -101,6 +108,9 @@ export default function OrdersScreen({
   }, [storeId]);
 
   React.useEffect(() => { reload(); }, [reload, reloadKey]);
+  // Live: reload whenever a pull lands (another register opened/billed an
+  // order) or a local change commits.
+  useSalesEvents(() => { reload().catch(() => {}); });
 
   const { bundle: boardBundle, reload: reloadBoard } = useOrderBundle(boardOrderId);
   // The picker's order: prefer the live board bundle when both target the
@@ -113,6 +123,19 @@ export default function OrdersScreen({
     setBoardOrderId(null);
     setPickerOrderId(null);
   }, []);
+
+  // --- Notification deep-link (src/notifRoute.ts) ---
+  // "Ready to pay" pings name their order. The board reads off
+  // `boardOrderId` alone — no waiting on the list reload — so the tapped
+  // order is on screen as soon as this screen is.
+  const notifHandler = useRef<(r: NotifRoute) => boolean>(() => false);
+  useEffect(() => {
+    notifHandler.current = (r) => {
+      if (r.screen === "order") { setBoardOrderId(r.id); return true; }
+      return false;
+    };
+  });
+  useEffect(() => notifUI.register(r => notifHandler.current(r)), []);
 
   // Quick print from an order card: load a fresh bundle, build the synthetic
   // Fakti (pure — no DB writes, no settle), open the receipt modal in bill mode.
@@ -151,98 +174,8 @@ export default function OrdersScreen({
     || orderCodeLabel(o).toLowerCase().includes(query)
   );
 
-  return (
-    <View style={{ flex: 1, backgroundColor: "#000" }}>
-      <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <View>
-            <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 24, letterSpacing: -0.6 }}>Kòmand</Text>
-            <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 12, marginTop: 2 }}>
-              {openCount} louvri{readyCount ? ` • ${readyCount} pare pou peye` : ""}{settling.length ? ` • ${settling.length} ap peye` : ""}
-            </Text>
-          </View>
-          {/* Only Associate/Server takes orders — everyone else never sees
-              the create button (order creation is an associate job). */}
-          {actor.role === "associate" ? (
-            <Pressable
-              // Orders never touch money — creating one needs no open shift.
-              // The shift gate lives on settlement (OrderBoard pay), not here.
-              onPress={() => setShowCreate(true)}
-              style={({ pressed }) => [{
-                width: 56, height: 56, borderRadius: 28, backgroundColor: "#2b2b2b",
-                alignItems: "center", justifyContent: "center",
-              }, pressed && { opacity: 0.7 }]}
-            >
-              <Ionicons name="add" size={26} color="#fff" />
-            </Pressable>
-          ) : null}
-        </View>
-        {/* Search bar — same pill shape as the customer picker's search. */}
-        <View style={{ flexDirection: "row", alignItems: "center", marginTop: 12 }}>
-          <View style={{ flex: 1, height: 60, flexDirection: "row", alignItems: "center", backgroundColor: "#000", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 30, paddingHorizontal: 16 }}>
-            <Ionicons name="search" size={18} color="#8e8e93" style={{ marginRight: 10 }} />
-            <TextInput
-              value={search}
-              onChangeText={setSearch}
-              placeholder="Chèche tab oswa kliyan"
-              placeholderTextColor="#8e8e93"
-              style={{ flex: 1, fontSize: 15, color: "#fff", paddingVertical: 8 }}
-              returnKeyType="search"
-            />
-            {search.length > 0 ? (
-              <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ padding: 4 }}>
-                <Ionicons name="close-circle" size={18} color="#8e8e93" />
-              </Pressable>
-            ) : null}
-          </View>
-        </View>
-      </View>
-
-      {loading ? (
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <ActivityIndicator color="#2f80ed" />
-        </View>
-      ) : (
-        <ScrollView
-          contentContainerStyle={{ padding: 16, paddingTop: 0, paddingBottom: 40 }}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2f80ed" />}
-        >
-          {orders.length === 0 ? (
-            <View style={{ alignItems: "center", paddingVertical: 64, paddingHorizontal: 24 }}>
-              <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(47,128,237,0.12)", borderWidth: 1, borderColor: "rgba(47,128,237,0.3)", alignItems: "center", justifyContent: "center" }}>
-                <Ionicons name="reader-outline" size={28} color="#2f80ed" />
-              </View>
-              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 16, marginTop: 14, textAlign: "center" }}>Poko gen kòmand</Text>
-              <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 13, marginTop: 6, textAlign: "center", lineHeight: 19 }}>
-                {hospitality
-                  ? "Kreye yon kòmand pou yon tab, lè sa a mete manje yo pandan plizyè wonn."
-                  : "Kreye yon kòmand pou yon kliyan pou ou ka mete atik yo pandan plizyè vizit."}
-              </Text>
-            </View>
-          ) : filtered.length === 0 ? (
-            <View style={{ alignItems: "center", paddingVertical: 56, paddingHorizontal: 24 }}>
-              <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: PROD_DARK.hair, alignItems: "center", justifyContent: "center" }}>
-                <Ionicons name="search-outline" size={28} color={PROD_DARK.muted} />
-              </View>
-              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 16, marginTop: 14, textAlign: "center" }}>Pa jwenn kòmand</Text>
-              <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 13, marginTop: 6, textAlign: "center" }}>Eseye yon lòt rechèch</Text>
-            </View>
-          ) : (
-            filtered.map(o => (
-              <OrderCard
-                key={o.id}
-                order={o}
-                billable={canBill(o, billIds.has(o.id), actor)}
-                onOpen={() => setBoardOrderId(o.id)}
-                onPrint={() => printBill(o)}
-              />
-            ))
-          )}
-        </ScrollView>
-      )}
-
-      <Modal visible={!!boardOrderId} animationType="slide" onRequestClose={closeBoard}>
-        <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
+  const boardView = (
+    <>
           {!boardBundle ? (
             <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
               <ActivityIndicator color="#2f80ed" />
@@ -308,7 +241,121 @@ export default function OrdersScreen({
           {/* In-window upload overlay — the app-root Modal version would
               present UNDER this board Modal on iOS. */}
           <GlobalUploadTransition overlay />
-        </SafeAreaView>
+    </>
+  );
+
+  return (
+    <View style={{ flex: 1, backgroundColor: "#000", flexDirection: isTablet ? "row" : "column" }}>
+      <View style={{ width: isTablet ? paneW : undefined, flex: isTablet ? undefined : 1, borderRightWidth: isTablet ? 1 : 0, borderRightColor: "#1c1c1f" }}>
+      <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View>
+            <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 24, letterSpacing: -0.6 }}>Kòmand</Text>
+            <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 12, marginTop: 2 }}>
+              {openCount} louvri{readyCount ? ` • ${readyCount} pare pou peye` : ""}{settling.length ? ` • ${settling.length} ap peye` : ""}
+            </Text>
+          </View>
+          {/* Only Associate/Server takes orders — everyone else never sees
+              the create button (order creation is an associate job). */}
+          {actor.role === "associate" ? (
+            <Pressable
+              // Orders never touch money — creating one needs no open shift.
+              // The shift gate lives on settlement (OrderBoard pay), not here.
+              onPress={() => setShowCreate(true)}
+              style={({ pressed }) => [{
+                width: 56, height: 56, borderRadius: 28, backgroundColor: "#2b2b2b",
+                alignItems: "center", justifyContent: "center",
+              }, pressed && { opacity: 0.7 }]}
+            >
+              <Ionicons name="add" size={26} color="#fff" />
+            </Pressable>
+          ) : null}
+        </View>
+        {/* Search bar — same pill shape as the customer picker's search. */}
+        <View style={{ flexDirection: "row", alignItems: "center", marginTop: 12 }}>
+          <View style={{ flex: 1, height: 60, flexDirection: "row", alignItems: "center", backgroundColor: "#000", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 30, paddingHorizontal: 16 }}>
+            <Ionicons name="search" size={18} color="#8e8e93" style={{ marginRight: 10 }} />
+            <TextInput
+              value={search}
+              onChangeText={setSearch}
+              placeholder="Chèche tab oswa kliyan"
+              placeholderTextColor="#8e8e93"
+              style={{ flex: 1, fontSize: 15, color: "#fff", paddingVertical: 8 }}
+              returnKeyType="search"
+            />
+            {search.length > 0 ? (
+              <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ padding: 4 }}>
+                <Ionicons name="close-circle" size={18} color="#8e8e93" />
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      </View>
+
+      {loading ? (
+        <View style={{ flex: 1, padding: 16, paddingTop: 0 }}>
+          <SkeletonOrderCard />
+          <SkeletonOrderCard />
+          <SkeletonOrderCard />
+          <SkeletonOrderCard />
+        </View>
+      ) : (
+        <KeyboardSafeScrollView
+          contentContainerStyle={{ padding: 16, paddingTop: 0, paddingBottom: 40 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2f80ed" />}
+        >
+          {orders.length === 0 ? (
+            <View style={{ alignItems: "center", paddingVertical: 64, paddingHorizontal: 24 }}>
+              <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(47,128,237,0.12)", borderWidth: 1, borderColor: "rgba(47,128,237,0.3)", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="reader-outline" size={28} color="#2f80ed" />
+              </View>
+              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 16, marginTop: 14, textAlign: "center" }}>Poko gen kòmand</Text>
+              <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 13, marginTop: 6, textAlign: "center", lineHeight: 19 }}>
+                {hospitality
+                  ? "Kreye yon kòmand pou yon tab, lè sa a mete manje yo pandan plizyè wonn."
+                  : "Kreye yon kòmand pou yon kliyan pou ou ka mete atik yo pandan plizyè vizit."}
+              </Text>
+            </View>
+          ) : filtered.length === 0 ? (
+            <View style={{ alignItems: "center", paddingVertical: 56, paddingHorizontal: 24 }}>
+              <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: PROD_DARK.hair, alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="search-outline" size={28} color={PROD_DARK.muted} />
+              </View>
+              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 16, marginTop: 14, textAlign: "center" }}>Pa jwenn kòmand</Text>
+              <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 13, marginTop: 6, textAlign: "center" }}>Eseye yon lòt rechèch</Text>
+            </View>
+          ) : (
+            filtered.map(o => (
+              <OrderCard
+                key={o.id}
+                order={o}
+                billable={canBill(o, billIds.has(o.id), actor)}
+                onOpen={() => setBoardOrderId(o.id)}
+                onPrint={() => printBill(o)}
+              />
+            ))
+          )}
+        </KeyboardSafeScrollView>
+      )}
+      </View>
+      {isTablet ? (
+        <View style={{ flex: 1, backgroundColor: "#000" }}>
+          {boardOrderId ? boardView : (
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+              <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(47,128,237,0.12)", borderWidth: 1, borderColor: "rgba(47,128,237,0.3)", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="reader-outline" size={28} color="#2f80ed" />
+              </View>
+              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 16, marginTop: 14, textAlign: "center" }}>Chwazi yon kòmand</Text>
+              <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 13, marginTop: 6, textAlign: "center", lineHeight: 19 }}>Tape yon kòmand nan lis la pou wè detay li isit la.</Text>
+            </View>
+          )}
+        </View>
+      ) : null}
+
+      <Modal visible={!isTablet && !!boardOrderId} animationType="slide" onRequestClose={closeBoard}>
+        <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
+          {boardView}
+        </SafeScreen>
       </Modal>
 
       <CreateOrderSheet
@@ -525,7 +572,8 @@ function CreateOrderSheet({
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={goBack}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
+      <KeyboardSafeView>
+      <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
         {/* Header: back top-left, title dead-center, Kreye top-right. */}
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 }}>
           <Pressable onPress={goBack} hitSlop={10} style={({ pressed }) => [{ padding: 6, borderRadius: 999 }, pressed && { opacity: 0.6 }]}>
@@ -620,7 +668,7 @@ function CreateOrderSheet({
               </Pressable>
             ) : null}
 
-            <ScrollView
+            <KeyboardSafeScrollView
               style={{ flex: 1, marginTop: 12 }}
               contentContainerStyle={{ paddingBottom: 12 }}
               showsVerticalScrollIndicator={false}
@@ -653,7 +701,7 @@ function CreateOrderSheet({
                   <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.7)" />
                 </Pressable>
               ))}
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         ) : view === "profile" ? (
           profLoading ? (
@@ -662,7 +710,7 @@ function CreateOrderSheet({
             </View>
           ) : (
             <View style={{ flex: 1, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 12 }}>
-              <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 8 }}>
+              <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 8 }}>
                 <CustomerDetailBody
                   customer={profCustomer}
                   stats={profStats}
@@ -673,7 +721,7 @@ function CreateOrderSheet({
                   lastVisitItems={lastVisitItems}
                   lastVisitDate={profStats.lastVisit}
                 />
-              </ScrollView>
+              </KeyboardSafeScrollView>
               {/* Same footer as checkout's cart detail (POSScreen 1822-1829). */}
               <View style={{ gap: 10, paddingTop: 10, paddingBottom: 4 }}>
                 <Pressable onPress={() => setView("full")} style={{ height: 60, borderRadius: 12, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center" }}>
@@ -686,7 +734,7 @@ function CreateOrderSheet({
             </View>
           )
         ) : view === "full" ? (
-          <ScrollView style={{ flex: 1, paddingHorizontal: 20, paddingTop: 12 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
+          <KeyboardSafeScrollView style={{ flex: 1, paddingHorizontal: 20, paddingTop: 12 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
             <CustomerProfileBody
               customer={profCustomer}
               stats={profStats}
@@ -694,18 +742,20 @@ function CreateOrderSheet({
               transactions={profTxns}
               onOpenTransaction={openTxn}
             />
-          </ScrollView>
+          </KeyboardSafeScrollView>
         ) : txnDetail ? (
-          <ScrollView style={{ flex: 1, paddingHorizontal: 20, paddingTop: 12 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
+          <KeyboardSafeScrollView style={{ flex: 1, paddingHorizontal: 20, paddingTop: 12 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
             <TxnDetailBody
               sale={txnDetail.sale}
               items={txnDetail.items}
               customer={profCustomer}
               payments={txnDetail.payments ?? []}
             />
-          </ScrollView>
+          </KeyboardSafeScrollView>
         ) : null}
-      </SafeAreaView>
+      </SafeScreen>
+    
+      </KeyboardSafeView>
     </Modal>
   );
 }

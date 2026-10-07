@@ -1,8 +1,10 @@
 // STAGING-PICKUP: DB helpers. Additive only; never called when flag OFF,
 // so the current checkout path is untouched. Decimal-safe (parseFloat).
-import { getDb } from "../db";
+import { getDb, insertOutbox } from "../db";
 import { attachLineLabels } from "../receipts";
 import { saleLineLabel } from "../labels";
+import { FALLBACK_STORE_ID } from "../db/ids";
+import { mintId } from "../db/ids";
 
 export function toNum(v: any): number {
   const n = Number(String(v ?? "").replace(",", "."));
@@ -15,8 +17,16 @@ export function remainingOf(item: any): number {
   return Math.max(0, Math.round((paid - delivered) * 100) / 100);
 }
 
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+function uid(_prefix: string): string {
+  return mintId();
+}
+
+/** Queue the freshly updated line for the other registers (best-effort). */
+async function pushSaleItem(db: any, id: string): Promise<void> {
+  try {
+    const rows = ((await db.getAllAsync("SELECT * FROM sale_items WHERE id = ?", [id])) as any[]) ?? [];
+    if (rows[0]) await insertOutbox("sale_items", "update", { ...rows[0], updated_at: new Date().toISOString() });
+  } catch {}
 }
 
 /** Find a sale by raw id OR human sale_number (mirrors salesCorrection.findSaleDetail). */
@@ -27,7 +37,7 @@ export async function findSaleForPickup(storeId: string, query: string) {
   const sales = ((await db.getAllAsync("SELECT * FROM sales")) as any[]) ?? [];
   const sale = sales.find((s: any) => {
     const sid = String(s.store_id ?? storeId);
-    if (sid !== String(storeId) && sid !== "demo-store-id" && String(storeId) !== "demo-store-id") return false;
+    if (sid !== String(storeId) && sid !== FALLBACK_STORE_ID && String(storeId) !== FALLBACK_STORE_ID) return false;
     return String(s.id ?? "").toLowerCase() === q || String(s.sale_number ?? s.id ?? "").toLowerCase() === q;
   });
   if (!sale) return null;
@@ -66,6 +76,7 @@ export async function recordPickup(opts: {
     }
     const next = Math.round((toNum(it.quantity_delivered ?? it.quantity) + want) * 100) / 100;
     await db.runAsync("UPDATE sale_items SET quantity_delivered = ? WHERE id = ?", [next, it.id]);
+    await pushSaleItem(db, it.id);
     await db.runAsync("INSERT INTO sale_pickups (id, store_id, sale_id, sale_item_id, quantity, picked_up_by, created_at) VALUES (?,?,?,?,?,?,?)", [
       uid("pkp"), opts.storeId, opts.saleId, it.id, want, opts.cashierId ?? null, now,
     ]);
@@ -102,6 +113,7 @@ export async function setTakenTotal(opts: {
     const next = Math.round(want * 100) / 100;
     if (Math.abs(next - prev) < 0.000000001) continue; // unchanged
     await db.runAsync("UPDATE sale_items SET quantity_delivered = ? WHERE id = ?", [next, it.id]);
+    await pushSaleItem(db, it.id);
     const delta = Math.round((next - prev) * 100) / 100;
     await db.runAsync("INSERT INTO sale_pickups (id, store_id, sale_id, sale_item_id, quantity, picked_up_by, created_at) VALUES (?,?,?,?,?,?,?)", [
       uid("pkp"), opts.storeId, opts.saleId, it.id, delta, opts.cashierId ?? null, now,

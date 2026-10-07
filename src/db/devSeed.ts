@@ -1,3 +1,5 @@
+import { FALLBACK_STORE_ID } from "./ids";
+
 /**
  * Dev mock catalog seed — single source: packages/mock-catalog
  * (mirrored at ../data/catalog.*.json by `npm run generate` — never hand-edit).
@@ -19,7 +21,7 @@ const COSTS: Cost[] = [];
 
 export const DEV_SEED_KEY = "seed_catalog_v1";
 const LEGACY_SEED_KEY = "seed_v1";
-const DEV_STORE = "demo-store-id";
+const DEV_STORE = FALLBACK_STORE_ID;
 
 type Cat = { id: string; name: string; icon: string; color: string; sort_order: number; parents: string[] };
 type Sup = { id: string; name: string; phone: string | null; address: string | null; payment_terms: string | null; bank_info: string | null; notes: string | null };

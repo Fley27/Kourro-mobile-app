@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { SafeAreaView, Text, View, Pressable, TextInput, Alert, Modal, Animated, Easing, BackHandler, KeyboardAvoidingView, Platform, ScrollView, AppState, Dimensions, Image, StatusBar } from "react-native";
-import { SafeAreaProvider } from "react-native-safe-area-context";
-import * as ScreenOrientation from "expo-screen-orientation";
+import { Text, View, Pressable, TextInput, Alert, Modal, Animated, Easing, BackHandler, ScrollView, AppState, Image, StatusBar, Platform } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useFonts } from "expo-font";
 import {
   Inter_300Light,
@@ -23,19 +22,28 @@ import type { BusinessType } from "./src/users";
 import SecurityCenter from "./src/screens/home/SecurityCenter";
 import StoreScreen from "./src/screens/home/StoreScreen";
 import TeamScreen, { type Employee } from "./src/screens/home/TeamScreen";
-import { BottomNav, Tab } from "./src/components/BottomNav";
+import { BottomNav, Tab, visibleTabsFor } from "./src/components/BottomNav";
+import { MenuSidebar } from "./src/components/MenuSidebar";
+import { IS_TABLET_DEVICE, SIDEBAR_RAIL, MENU_W_EXPANDED, SidebarWidthProvider } from "./src/responsive";
+import { type MoreEntry } from "./src/menu/entries";
+import { defaultMenuCollapsed, loadMenuCollapsed, saveMenuCollapsed } from "./src/menu/sidebarState";
 import { TabsFab } from "./src/components/TabsFab";
 import { tabsUI } from "./src/tabsUI";
+import { notifUI, type NotifRoute } from "./src/notifRoute";
+import { initNotifRouting } from "./src/notifications";
 import { OrdersFab } from "./src/components/OrdersFab";
 import { ordersUI } from "./src/ordersUI";
 import { ht } from "./src/i18n";
-import { USERS, getUserById, type Role, type User } from "./src/users";
-import { palette, radius, shadow } from "./src/theme";
+import { USERS, getUserById, USER_IDS, type Role, type User } from "./src/users";
+import { FALLBACK_STORE_ID, STORE_IDS } from "./src/db/ids";
+import { blackPalette as palette, radius, shadow } from "./src/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuthState } from "./src/auth/authStore";
+import type { Proformat } from "./src/promos/types";
 import LoginScreen from "./src/screens/LoginScreen";
 import { fmtG } from "./src/format";
 import { GlobalUploadTransition, uploadSuccess, uploadError } from "./src/components/UploadTransition";
+import { KeyboardSafeView } from "./src/components/KeyboardSafe";
 import { DarkBackButton } from "./src/components/BackButton";
 
 export type { Role, User };
@@ -44,15 +52,15 @@ export type StoreItem = { id: string; name: string; location: string; code: stri
 
 
 
-const STORE_ID = "demo-store-id";
+const STORE_ID = FALLBACK_STORE_ID;
 // Yellow apricot — shift-gate banner background (text on it stays white).
 const APRICOT = "#f2a63c";
 // NOTE: device id is NOT a Math.random() const (RAM-only, changes every
 // rebundle). It is loaded once from SecureStore (disk) into state below.
 
 // employees <-> SQLite mapping (team roster persistence)
-const empStoreId = (store?: string) => store === "Dèlma" ? "st-delma" : store === "Petyonvil" ? "st-petyonvil" : STORE_ID;
-const empStoreName = (sid?: string) => sid === "st-delma" ? "Dèlma" : sid === "st-petyonvil" ? "Petyonvil" : "Petyonvil";
+const empStoreId = (store?: string) => store === "Dèlma" ? STORE_IDS.delmas : store === "Petyonvil" ? STORE_IDS.petionVille : STORE_ID;
+const empStoreName = (sid?: string) => sid === STORE_IDS.delmas || sid === "st-delma" ? "Dèlma" : "Petyonvil";
 const parseSalary = (s: any) => { const n = parseInt(String(s).replace(/[^0-9]/g, ""), 10); return isNaN(n) ? 0 : n; };
 function empFromRow(r: any): any {
   const base = USERS.find(u => u.id === r.id);
@@ -74,7 +82,7 @@ function empFromRow(r: any): any {
   } as any;
 }
 
-export default function App() {
+function AppShell() {
   const [fontsLoaded, fontError] = useFonts({
     Inter_300Light,
     Inter_400Regular,
@@ -100,27 +108,30 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("pos");
   // Bumping remounts MoreScreen, back to the hub (the Retounen button is gone).
   const [moreKey, setMoreKey] = useState(0);
-  // Tablets are portrait-only: lock orientation so the
-  // tablet layouts are always shown. Phones stay freely rotatable.
-  // NOTE: classification must be rotation-independent (Platform.isPad /
-  // smallest screen side). A width-based check would misclassify a phone
-  // held in landscape as a tablet and lock it sideways permanently.
-  const [isTabletDevice] = useState(() => {
-    if (Platform.OS === "ios") return !!Platform.isPad;
-    const s = Dimensions.get("screen");
-    return Math.min(s.width, s.height) >= 600;
-  });
+  // Tablet: which tool body is open — controlled into MoreScreen so the
+  // MenuSidebar drives it (null = the body area's empty state). The phone
+  // keeps MoreScreen's INTERNAL selection so re-pressing Plis still resets
+  // to the hub via the moreKey remount above.
+  const [moreSel, setMoreSel] = useState<MoreEntry | null>(null);
+  // Tablet menu collapse — instant toggle (no width animation: the sidebar's
+  // width IS useResponsive().width's sidebar term, so both must flip in the
+  // same render pass), persisted in _meta (src/menu/sidebarState.ts).
+  const [menuCollapsed, setMenuCollapsed] = useState(() => IS_TABLET_DEVICE && defaultMenuCollapsed());
+  // Hydrate the stored collapse choice once; the smart default above covers
+  // first run (wide windows start expanded, narrow ones collapsed).
   useEffect(() => {
-    (async () => {
-      try {
-        if (isTabletDevice) {
-          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT);
-        } else {
-          await ScreenOrientation.unlockAsync();
-        }
-      } catch {}
-    })();
-  }, [isTabletDevice]);  const [showShift, setShowShift] = useState(false);
+    if (!IS_TABLET_DEVICE) return;
+    let alive = true;
+    loadMenuCollapsed().then(v => { if (alive) setMenuCollapsed(v); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  // Orientation is build-time only: app.json's orientation "default" bakes
+  // iPhone portrait + all four iPad orientations into Info.plist (and lets
+  // Android rotate). We never touch expo-screen-orientation at runtime —
+  // tablets get their two-pane layouts in BOTH orientations (device class
+  // lives in src/responsive.ts, rotation-independent), and phones keep the
+  // portrait mask from the plist.
+  const [showShift, setShowShift] = useState(false);
   // Bumped by the Shift header's Open Shift button; ShiftScreen reacts by
   // opening the supervisor's own-shift entry (or jumping to their own view).
   const [shiftSignal, setShiftSignal] = useState(0);
@@ -137,6 +148,8 @@ export default function App() {
   const [selectedCreditCustomer, setSelectedCreditCustomer] = useState<any | null>(null);
   // Add Sale from Customers: customer to preselect in POS on tab switch.
   const [posAttachCustomer, setPosAttachCustomer] = useState<any | null>(null);
+  // Proformat → POS: lines to load into the cart (frozen prices) on tab switch.
+  const [posSeed, setPosSeed] = useState<{ proformat: Proformat; customerId: string | null } | null>(null);
   const auth = useAuthState();
   // Stable device id from HARD memory (SecureStore/Keychain). Survives
   // rebundles + restarts; used for suspended-sales + sync attribution.
@@ -148,6 +161,41 @@ export default function App() {
         setDeviceId(await getOrCreateDeviceId());
       } catch {}
     })();
+  }, []);
+  // Background sync — ONE loop for every screen instead of a per-screen call:
+  // push this device's outbox, pull everyone else's changes, then emit
+  // salesEvents so mounted lists reload themselves. Starts once we know both
+  // the device id and who is signed in; stops on sign-out.
+  useEffect(() => {
+    if (deviceId === "device-pending" || !auth.user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const autoSync = await import("./src/sync/autoSync");
+        if (cancelled) return;
+        autoSync.configureSync(STORE_ID, deviceId);
+        autoSync.startAutoSync();
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+      import("./src/sync/autoSync").then(m => m.stopAutoSync()).catch(() => {});
+    };
+  }, [auth.user?.id, deviceId]);
+  // Re-hydrate the roster / store lists whenever new rows land in SQLite — a
+  // pull from another register (autoSync emits after a pull) or our own write.
+  // Without this App-level data froze at boot, so a screen could never reflect
+  // another device's changes.
+  const [syncTick, setSyncTick] = useState(0);
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    (async () => {
+      try {
+        const { salesEvents } = await import("./src/salesEvents");
+        unsub = salesEvents.subscribe(() => setSyncTick(t => t + 1));
+      } catch {}
+    })();
+    return () => { unsub?.(); };
   }, []);
   // Boot diagnostics: which storage backend is live + how many sales are on
   // disk. Check Metro logs after a rebundle — backend must stay "sqlite"
@@ -177,7 +225,7 @@ export default function App() {
   // Derive from the persisted session (SecureStore), not a RAM-only useState
   // default — otherwise shift lookups use a stale "cashier-1" after login.
   const currentUser = auth.user ?? USERS[0];
-  const currentUserId = currentUser?.id ?? "cashier-1";
+  const currentUserId = currentUser?.id ?? USER_IDS.cashier;
   const role = currentUser.role;
   const [activeShift, setActiveShift] = useState<any | null>(null);
   // A cashier sells once their shift entry exists for today — pending
@@ -335,12 +383,21 @@ export default function App() {
     setTimeout(() => tabsUI.requestOpen(() => {}), 60);
   }, []);
 
+  // Shared by the phone's bottom bar and the tablet sidebar's TAB rows:
+  // leaving Shift/Team stacks, re-pressing Plis bumps More back to its hub.
+  const onNavChange = useCallback((t: Tab) => {
+    setShowShift(false);
+    setShowTeam(false);
+    if (t === "more" && tab === "more") setMoreKey(k => k + 1);
+    setTab(t);
+  }, [tab]);
+
   // --- Global store context (Apple-like Account Center) — persisted to SQLite (except users) ---
   const [stores, setStores] = useState<StoreItem[]>(() => [
-    { id: "st-petyonvil", name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", createdAt: new Date().toISOString() },
-    { id: "st-delma", name: "Delmas", location: "Dèlma", code: "DL-9034", createdAt: new Date().toISOString() },
+    { id: STORE_IDS.petionVille, name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", createdAt: new Date().toISOString() },
+    { id: STORE_IDS.delmas, name: "Delmas", location: "Dèlma", code: "DL-9034", createdAt: new Date().toISOString() },
   ]);
-  const [activeStoreId, setActiveStoreId] = useState<string>("st-petyonvil");
+  const [activeStoreId, setActiveStoreId] = useState<string>(STORE_IDS.petionVille);
   const [appDisabled, setAppDisabled] = useState(false);
   const [storesHydrated, setStoresHydrated] = useState(false);
   // Business type (owner-only setting, inherited by all location stores).
@@ -389,8 +446,8 @@ export default function App() {
         } else {
           // first launch — seed SQLite with initial stores
           const initial = [
-            { id: "st-petyonvil", name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", createdAt: new Date().toISOString() },
-            { id: "st-delma", name: "Delmas", location: "Dèlma", code: "DL-9034", createdAt: new Date().toISOString() },
+            { id: STORE_IDS.petionVille, name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", createdAt: new Date().toISOString() },
+            { id: STORE_IDS.delmas, name: "Delmas", location: "Dèlma", code: "DL-9034", createdAt: new Date().toISOString() },
           ];
           for (const s of initial) {
             await db.runAsync(
@@ -407,7 +464,7 @@ export default function App() {
       } catch {}
       setStoresHydrated(true);
     })();
-  }, []);
+  }, [syncTick]);
   // Persist stores on change (for testing: verify sqlite survives restart)
   useEffect(() => {
     if (!storesHydrated) return;
@@ -457,9 +514,9 @@ export default function App() {
       lastAction: u.role === "cashier" ? "Vente #VTE-1021 • il y a 12 min" : u.role === "manager" ? "Ajustement stock • il y a 1 h" : "Clôture caisse • hier",
       kpi: u.role === "cashier" ? "22 ventes • G 1 540/panier" : "18 tâches • 98% précision",
       salary: u.role === "owner" ? "G 45 000" : u.role === "admin" ? "G 32 000" : u.role === "manager" ? "G 25 000" : "G 12 000",
-      address: u.id === "owner-1" ? "Pétion-Ville, Rue Panaméricaine 12" : u.id === "admin-1" ? "Delmas 33, Impasse Lafleur" : u.id === "manager-1" ? "Carrefour, Bizoton 45" : "Kenscoff, Route de Furcy",
+      address: u.id === USER_IDS.owner ? "Pétion-Ville, Rue Panaméricaine 12" : u.id === USER_IDS.admin ? "Delmas 33, Impasse Lafleur" : u.id === USER_IDS.manager ? "Carrefour, Bizoton 45" : "Kenscoff, Route de Furcy",
       isOnline: u.role === "owner" || u.role === "admin" ? true : Math.random() > 0.4,
-      emergency: u.id === "owner-1" ? { name: "Marie Owner", address: "Pétion-Ville, Rue Clerveaux 8", phone: "+509 3100 0001" } : u.id === "admin-1" ? { name: "Jean Admin", address: "Delmas 31, Rue Tirlemont", phone: "+509 3100 0002" } : u.id === "manager-1" ? { name: "Sophie Manager", address: "Carrefour, Mahotière 12", phone: "+509 3100 0003" } : { name: "Luc Cashier", address: "Pétion-Ville, Laboule 10", phone: "+509 3100 0004" },
+      emergency: u.id === USER_IDS.owner ? { name: "Marie Owner", address: "Pétion-Ville, Rue Clerveaux 8", phone: "+509 3100 0001" } : u.id === USER_IDS.admin ? { name: "Jean Admin", address: "Delmas 31, Rue Tirlemont", phone: "+509 3100 0002" } : u.id === USER_IDS.manager ? { name: "Sophie Manager", address: "Carrefour, Mahotière 12", phone: "+509 3100 0003" } : { name: "Luc Cashier", address: "Pétion-Ville, Laboule 10", phone: "+509 3100 0004" },
       active: true,
       password: `${u.id}-pass`,
     }) as any)
@@ -475,7 +532,7 @@ export default function App() {
         setUserStoreIds(await loadUserStoreIds(await getDb(), currentUser));
       } catch {}
     })();
-  }, [currentUser?.id]);
+  }, [currentUser?.id, syncTick]);
   // Hydrate the team roster from SQLite (persistent across restarts); seed once if empty
   useEffect(() => {
     if (!storesHydrated) return;
@@ -500,7 +557,7 @@ export default function App() {
       } catch {}
       setEmployeesHydrated(true);
     })();
-  }, [storesHydrated]);
+  }, [storesHydrated, syncTick]);
   // Persist any roster change (add / edit / toggle) so it survives app restarts
   useEffect(() => {
     if (!employeesHydrated) return;
@@ -720,18 +777,90 @@ export default function App() {
     }
   }, [role, currentUserId, loginUserId]);
 
+  // --- Notification deep-link (src/notifRoute.ts) ---
+  // A tapped notification names the record that triggered it. Peel off any
+  // overlay stacked on top, switch to the screen that record lives on, then
+  // hand the route to notifUI — which parks it until that screen mounts (or
+  // hands it straight over if it's already on screen).
+  const applyNotifRoute = useCallback((r: NotifRoute) => {
+    setShowAccountCenter(false);
+    setShowSecurity(false);
+    setShowStore(false);
+    setShowTeam(false);
+    setShowInventory(false);
+    if (r.screen === "order") { setShowShift(false); setTab("orders"); }
+    else if (r.screen === "sale") { setShowShift(false); setTab("transactions"); }
+    else openShiftDeliberate();
+    notifUI.request(r);
+  }, [openShiftDeliberate]);
+
+  // A cold-start tap lands while the session is still hydrating. Applying it
+  // there would be pointless: the per-role landing effect above owns the tab
+  // until auth settles. Hold the route instead of racing it.
+  const authStatusRef = useRef(auth.status);
+  authStatusRef.current = auth.status;
+  const pendingNotifRoute = useRef<NotifRoute | null>(null);
+  const onNotifRoute = useCallback((r: NotifRoute) => {
+    if (authStatusRef.current !== "signedin") { pendingNotifRoute.current = r; return; }
+    applyNotifRoute(r);
+  }, [applyNotifRoute]);
+  useEffect(() => initNotifRouting(onNotifRoute), [onNotifRoute]);
+  // Declared after the role-landing effect on purpose: in the commit that
+  // resolves auth both run, and this one goes last — so the route's tab wins.
+  useEffect(() => {
+    if (auth.status !== "signedin") return;
+    const r = pendingNotifRoute.current;
+    if (!r) return;
+    pendingNotifRoute.current = null;
+    applyNotifRoute(r);
+  }, [auth.status, applyNotifRoute]);
+
   const isCashierRole = role === "cashier";
   // Nav per role — owner/admin/manager/cashier get Kay, Vant, Tranzaksyon,
   // Plis. Kliyan + Kòmand live in Plis (and associates keep them as tabs).
   // Kitchen devices never see the board.
   // Associates work the floor: Kliyan + Kòmand + Plis (Katalòg / Logout live
-  // in Plis) — no checkout, no reports.
-  const visibleTabs: Tab[] = role === "associate"
-    ? ["customers", "orders", "more"]
-    : (["owner", "admin", "manager", "cashier"] as string[]).includes(role)
-      ? ["home", "pos", "transactions", "more"]
-      : ["home", "pos", "customers", "transactions", "more"];
+  // in Plis) — no checkout, no reports. One definition for both navs now
+  // (src/components/BottomNav.tsx) — the tablet sidebar reuses it for row
+  // gating so the rail and the menu can't disagree about access.
+  const visibleTabs: Tab[] = visibleTabsFor(role);
   const canManageStore = role === "admin" || role === "owner";
+
+  // ── MenuSidebar wiring (tablet only) ─────────────────────────────────────
+  // Collapse toggle — persist inside the updater so the flip never races a
+  // save of the previous value (fire-and-forget write, like everywhere else).
+  const toggleMenu = useCallback(() => {
+    setMenuCollapsed(v => {
+      const next = !v;
+      saveMenuCollapsed(next);
+      return next;
+    });
+  }, []);
+  // Tool row → that body inside MoreScreen. Overlays that mask the tab area
+  // close first (Store too: the rail stays visible above it, so a tap here
+  // must actually change what's on screen).
+  const onMenuTool = useCallback((id: MoreEntry) => {
+    setShowStore(false);
+    setShowShift(false);
+    setShowTeam(false);
+    setMoreSel(id);
+    setTab("more");
+  }, []);
+  // Tab row (Dashboard / Vant / Tranzaksyon / Kliyan / Kòmand) — same
+  // semantics as the phone nav, plus unmasking Store.
+  const onMenuTab = useCallback((t: Tab) => {
+    setShowStore(false);
+    onNavChange(t);
+  }, [onNavChange]);
+  // One logout flow for the Plis list and the sidebar footer.
+  const logoutFlow = async () => {
+    try {
+      const { getDb } = await import("./src/db");
+      const { clearCartDraft } = await import("./src/sales/cartDraft");
+      await clearCartDraft(await getDb(), STORE_ID, currentUser?.id ?? null);
+    } catch {}
+    auth.signOut();
+  };
 
   // Selling is hard-gated behind an open shift for every role. A pending
   // (unconfirmed) opening still unlocks selling — only a missing shift blocks.
@@ -790,10 +919,39 @@ export default function App() {
   }
 
   return (
-    // Root insets are captured here (works everywhere, incl. inside native
-    // Modals where view-level SafeAreaView padding can come back zero).
-    <SafeAreaProvider>
-    <View style={{ flex: 1, backgroundColor: "#000" }}>
+    // SafeAreaProvider wraps the whole app (App → AppShell) so insets are
+    // available everywhere, including inside native Modals: useSafeAreaInsets()
+    // and SafeScreen read React context, which flows through a Modal, whereas
+    // react-native-safe-area-context's native SafeAreaView walks the Modal's
+    // *native* superview chain, finds no provider there and pads zero.
+    // SidebarWidthProvider rides the same way: it carries the menu's current
+    // width so every useResponsive() consumer reflows the instant the menu
+    // toggles (context flows through Modals too).
+    <SidebarWidthProvider value={menuCollapsed ? SIDEBAR_RAIL : MENU_W_EXPANDED}>
+    <View style={{ flex: 1, backgroundColor: "#000", flexDirection: IS_TABLET_DEVICE ? "row" : "column" }}>
+      {/* Tablets navigate from the permanent menu in the left rail; the bottom
+          bar never renders. */}
+      {IS_TABLET_DEVICE && !shiftFull && (
+        <MenuSidebar
+          role={role}
+          currentUserId={currentUserId}
+          userName={currentUser.name}
+          storeName={activeStore?.name ?? "Pétion-Ville"}
+          businessType={businessType}
+          inventoryVersion={inventoryVersion}
+          activeTab={tab}
+          moreSelection={moreSel}
+          collapsed={menuCollapsed}
+          onToggle={toggleMenu}
+          onTab={onMenuTab}
+          onTool={onMenuTool}
+          onPosOpen={onTabFABOpen}
+          onOpenStore={() => setShowStore(true)}
+          onOpenTeam={() => setShowTeam(true)}
+          onOpenShift={() => openShiftDeliberate()}
+          onLogout={logoutFlow}
+        />
+      )}
     <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
       {/* Cashier shift gate — the Shift screen owns the whole lifecycle now */}
@@ -841,7 +999,7 @@ export default function App() {
             {/* Profile header */}
             <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingBottom: 14, borderBottomWidth: 0.5, borderColor: palette.separator }}>
               <View style={{ position: "relative" }}>
-                <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: palette.accentGold, shadowColor: palette.accentGold, shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } }}>
+                <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: "#1c1c1e", alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: palette.accentGold, shadowColor: palette.accentGold, shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 3 } }}>
                   <Text style={{ fontFamily: "Inter_700Bold", color: "#fff", fontSize: 19, letterSpacing: 0.5 }}>{currentUser.name.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase()}</Text>
                 </View>
                 <View style={{ position: "absolute", right: 1, bottom: 1, width: 13, height: 13, borderRadius: 7, backgroundColor: palette.successDot, borderWidth: 2.5, borderColor: palette.surface }} />
@@ -904,6 +1062,11 @@ export default function App() {
         </Pressable>
       </Modal>
 
+      {/* Root keyboard lift: iOS only — Android rides softwareKeyboardLayoutMode
+          "pan" (window-level, also covers Modal windows). iOS Modals are separate
+          windows and carry their own KeyboardSafeView inside. Nested KAVs below
+          are overlap-based, so screens with their own KAV never double-lift. */}
+      <KeyboardSafeView enabled={Platform.OS === "ios"}>
       <View style={{ flex: 1, backgroundColor: palette.bg }}>
         {showAccountCenter ? (
           <View style={{ flex: 1 }}>
@@ -1053,7 +1216,7 @@ export default function App() {
               Tout aktivite sou magazen <Text style={{ fontWeight: "700", color: palette.ink }}>{activeStore?.name}</Text> te sispann apre yon bès sekirite. Kontakte Konsole Sipò pou rektifye.
             </Text>
             <Pressable onPress={() => setShowSecurity(true)} style={{ marginTop: 18, backgroundColor: palette.ink2, paddingHorizontal: 22, paddingVertical: 13, borderRadius: radius.md, ...shadow.soft }}>
-              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>Konsole Sipò</Text>
+              <Text style={{ color: "#000", fontFamily: "Inter_700Bold" }}>Konsole Sipò</Text>
             </Pressable>
           </View>
         ) : (
@@ -1092,6 +1255,8 @@ export default function App() {
                   onTabsChanged={() => setTabDataVersion(v => v + 1)}
                   attachCustomer={posAttachCustomer}
                   onAttachCustomerConsumed={() => setPosAttachCustomer(null)}
+                  seed={posSeed}
+                  onSeedConsumed={() => setPosSeed(null)}
                   canSell={canSell}
                 />
               )
@@ -1129,37 +1294,47 @@ export default function App() {
                 onOpenStore={() => setShowStore(true)}
                 onOpenTeam={() => setShowTeam(true)}
                 onOpenShift={() => openShiftDeliberate()}
-                onLogout={async () => {
-                  try {
-                    const { getDb } = await import("./src/db");
-                    const { clearCartDraft } = await import("./src/sales/cartDraft");
-                    await clearCartDraft(await getDb(), STORE_ID, currentUser?.id ?? null);
-                  } catch {}
-                  auth.signOut();
-                }}
+                onLogout={logoutFlow}
                 userStoreIds={userStoreIds}
                 stores={stores}
                 deviceId={deviceId}
+                onLoadIntoCart={(pfo, customerId) => { setPosSeed({ proformat: pfo, customerId }); setTab("pos"); }}
+                /* Tablet: the MenuSidebar owns the selection (bodies only — the
+                   hub never renders there). Phone passes nothing so the hub stays
+                   uncontrolled and the moreKey remount still resets it. */
+                {...(IS_TABLET_DEVICE ? { selection: moreSel, onSelectionChange: setMoreSel } : {})}
               />
             )}
           </>
         )}
       </View>
+      </KeyboardSafeView>
 
-      {/* Round draggable tabs FAB — root level, floats above header, nav and screens */}
-      {!shiftFull && <TabsFab onOpen={onTabFABOpen} />}
+      {/* Round draggable tabs FAB — root level, floats above header, nav and screens.
+          Tablets keep the same job as a badge on the sidebar's Vant item. */}
+      {!shiftFull && !IS_TABLET_DEVICE && <TabsFab onOpen={onTabFABOpen} />}
       {/* Orders shortcut FAB — only cashier/manager/admin/owner with an open
-          shift; shows the not-yet-paid count and jumps to Kòmand. */}
-      {!shiftFull && canSell && (["cashier", "manager", "admin", "owner"] as string[]).includes(role) && (
+          shift; shows the not-yet-paid count and jumps to Kòmand. Tablets
+          carry the same count as the sidebar's Kòmand badge. */}
+      {!shiftFull && !IS_TABLET_DEVICE && canSell && (["cashier", "manager", "admin", "owner"] as string[]).includes(role) && (
         <OrdersFab onOpen={() => setTab("orders")} />
       )}
     </SafeAreaView>
       {/* Bottom nav sits outside the safe area so the bar lands flush on the screen edge.
-          Shift keeps it visible (dark background + visible menu) — switching tabs exits Shift. */}
-      {!showAccountCenter && !showSecurity && !showStore && !showInventory && !shiftFull && <BottomNav active={tab} visibleTabs={visibleTabs} onChange={(t) => { setShowShift(false); setShowTeam(false); if (t === "more" && tab === "more") setMoreKey(k => k + 1); setTab(t); }} />}
+          Shift keeps it visible (dark background + visible menu) — switching tabs exits Shift.
+          Tablets never show it — MenuSidebar (left rail) owns navigation there. */}
+      {!IS_TABLET_DEVICE && !showAccountCenter && !showSecurity && !showStore && !showInventory && !shiftFull && <BottomNav active={tab} visibleTabs={visibleTabs} onChange={onNavChange} />}
       {/* Shared post-save/edit overlay — replaces result Alerts app-wide */}
       <GlobalUploadTransition />
     </View>
+    </SidebarWidthProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppShell />
     </SafeAreaProvider>
   );
 }

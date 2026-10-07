@@ -1,6 +1,7 @@
 import React from "react";
 import { View, Text, TextInput, Pressable, FlatList } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { SkeletonListRow } from "../components/Skeleton";
 
 // Dark reference design (same as CustomersPhone): black list, pill search +
 // filter, name + contact rows with hairline separators. Phone only.
@@ -8,6 +9,8 @@ import { Ionicons } from "@expo/vector-icons";
 export interface SuppliersPhoneProps {
   suppliers: any[];
   displaySuppliers: any[];
+  /** First DB load — show skeleton rows instead of the "Pa gen founisè" flash. */
+  loading?: boolean;
   search: string;
   setSearch: (v: string) => void;
   showBatchOnly: boolean;
@@ -27,7 +30,7 @@ function initials(name: string) {
 }
 
 export function SuppliersPhone(props: SuppliersPhoneProps) {
-  const { displaySuppliers, search, setSearch, showBatchOnly, setShowBatchOnly, selectedId, setSelectedId, onAdd, padH } = props;
+  const { displaySuppliers, search, setSearch, showBatchOnly, setShowBatchOnly, selectedId, setSelectedId, onAdd, padH, loading } = props;
   const sorted = [...displaySuppliers].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
 
   return (
@@ -99,10 +102,16 @@ export function SuppliersPhone(props: SuppliersPhoneProps) {
           );
         }}
         ListEmptyComponent={
-          <View style={{ padding: 32, alignItems: "center" }}>
-            <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>Pa gen founisè</Text>
-            <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 4 }}>Eseye yon lòt rechèch</Text>
-          </View>
+          loading ? (
+            <View>
+              {[0, 1, 2, 3, 4].map(i => <SkeletonListRow key={i} tone="dark" padH={padH} />)}
+            </View>
+          ) : (
+            <View style={{ padding: 32, alignItems: "center" }}>
+              <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>Pa gen founisè</Text>
+              <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 4 }}>Eseye yon lòt rechèch</Text>
+            </View>
+          )
         }
       />
     </View>

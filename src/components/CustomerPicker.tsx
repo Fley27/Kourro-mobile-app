@@ -11,6 +11,7 @@ import { getDb } from "../db";
 import CustomerForm, { EMPTY_CUSTOMER_FORM, type CustomerFormData } from "./CustomerForm";
 import { insertCustomerRecord } from "../sales/customers";
 import { uploadSuccess, uploadError } from "./UploadTransition";
+import { KeyboardSafeScrollView } from "./KeyboardSafe";
 
 function initialsOf(name: string): string {
   const parts = String(name ?? "").trim().split(/\s+/).filter(Boolean);
@@ -123,7 +124,7 @@ export function CustomerPicker({ storeId, customers, debts, onPick, onBack, onAd
               <Ionicons name="filter" size={20} color={debtOnly ? "#000" : "#fff"} />
             </Pressable>
           </View>
-          <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+          <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
             {results.length === 0 ? (
               <View style={{ padding: 32, alignItems: "center" }}>
                 <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>{debtOnly ? "Pa gen kliyan ki gen dèt" : "Pa gen kliyan"}</Text>
@@ -146,16 +147,16 @@ export function CustomerPicker({ storeId, customers, debts, onPick, onBack, onAd
               ))
             )}
             <View style={{ height: 12 }} />
-          </ScrollView>
+          </KeyboardSafeScrollView>
         </>
       ) : (
-        <ScrollView style={{ marginTop: 14, flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        <KeyboardSafeScrollView style={{ marginTop: 14, flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
           <CustomerForm
             key={`picker-cust-${formKey}`}
             onState={(data, valid) => { formRef.current = { data, valid }; setFormValid(valid); }}
           />
           <View style={{ height: 16 }} />
-        </ScrollView>
+        </KeyboardSafeScrollView>
       )}
     </View>
   );

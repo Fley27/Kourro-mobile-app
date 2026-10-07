@@ -13,6 +13,8 @@ import type { FlowCtx } from "./types";
 import { canManageCatalog, slugifyName, uniqueId } from "./types";
 import { VariantFormFields } from "./StepForms";
 import { uploadError } from "../../components/UploadTransition";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { mintId } from "../../db/ids";
 
 type Staged = { key: string; itemId: string; name: string };
 
@@ -120,7 +122,7 @@ export default function VariantsStep({
   function stageAdd() {
     if (!openValid || busy) { setTouched(true); if (openError) Alert.alert("Enkonplè", openError); return; }
     setStaged(prev => [...prev, {
-      key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      key: mintId(),
       itemId, name: name.trim(),
     }]);
     setName("");
@@ -238,7 +240,7 @@ export default function VariantsStep({
   }
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {productName ? <Text style={{ fontSize: 12, color: "#8e8e93" }}>{productName} · variant = fason yo vann</Text> : null}
       {items.map(it => {
         const vs = itemVariants(it.id);
@@ -340,6 +342,6 @@ export default function VariantsStep({
         ) : null}
       </View>
       )}
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

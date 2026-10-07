@@ -1,3 +1,7 @@
+// MUST be first: Hermes has no WebCrypto and uuid (mintId) needs
+// crypto.getRandomValues — this installs it before ./App (→ db/ids → uuid).
+import './src/polyfills/webcrypto';
+
 import { registerRootComponent } from 'expo';
 
 import App from './App';

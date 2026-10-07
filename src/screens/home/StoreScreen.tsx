@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
 import { View, Text, Pressable, Modal, TextInput, Alert, ScrollView, KeyboardAvoidingView, Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb } from "../../db";
 import { monoStyle } from "../../format";
 import { getUserById } from "../../users";
 import { notifyLocal } from "../../notifications";
-import { palette, radius, shadow } from "../../theme";
+import { blackPalette as palette, radius, shadow } from "../../theme";
 import { findSaleDetail, changeSalePaymentMethod, describeChange, salePaymentLabel, formatMoney, type SaleDetail } from "../../salesCorrection";
 import { saleLineLabel } from "../../labels";
 import { useResponsive, centerBox, sheetBox } from "../../responsive";
@@ -13,6 +14,8 @@ import { useResponsive, centerBox, sheetBox } from "../../responsive";
 import PickupToggleCard from "../../pickup-staging/PickupToggleCard";
 import PickupRedeemEntry from "../../pickup-staging/PickupRedeemEntry";
 import { uploadSuccess, uploadError } from "../../components/UploadTransition";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { FALLBACK_STORE_ID, STORE_IDS } from "../../db/ids";
 
 export type StoreItem = { id: string; name: string; location: string; code: string; createdAt: string; disabled?: boolean; breachFlagged?: boolean }; 
 
@@ -20,8 +23,8 @@ type Props = {
   role: string;
   activeStore?: StoreItem;
   // Operational store id used for ALL shift / cash DB writes + reads.
-  // Must match the storeId passed to ShiftReportScreen / POSScreen ("demo-store-id").
-  // activeStore.id ("st-petyonvil", ...) is display-only — never use it for writes,
+  // Must match the storeId passed to ShiftReportScreen / POSScreen (FALLBACK_STORE_ID).
+  // activeStore.id (STORE_IDS.petionVille, ...) is display-only — never use it for writes,
   // otherwise the shift becomes invisible to the shift report (opening = 0).
   storeId?: string;
   storeCount?: number;
@@ -47,6 +50,7 @@ export default function StoreScreen({
   onGoSales,
   currentUser,
 }: Props) {
+  const insets = useSafeAreaInsets();
   const responsive = useResponsive();
   const { width, isTablet, padH } = responsive;
   const name = activeStore?.name ?? "Magazen";
@@ -56,10 +60,10 @@ export default function StoreScreen({
   const blocked = !!activeStore?.disabled;
   const isSupervisor = role === "owner" || role === "admin" || role === "manager";
 
-  // Operational store id — MUST match ShiftScreen/POSScreen ("demo-store-id").
+  // Operational store id — MUST match ShiftScreen/POSScreen (FALLBACK_STORE_ID).
   // activeStore.id is display-only (st-petyonvil/st-delma); using it for writes
   // orphans shifts + cash_movements so the report finds opening = 0.
-  const storeId = storeIdProp ?? "demo-store-id";
+  const storeId = storeIdProp ?? FALLBACK_STORE_ID;
 
   // Sales Options — sale lookup & payment method correction
   const [showSalesOptions, setShowSalesOptions] = useState(false);
@@ -100,7 +104,9 @@ export default function StoreScreen({
       const db = await getDb();
       const res = await changeSalePaymentMethod(saleDetail, pendingChange, { db, storeId, storeName: name, currentUser });
       try { const { salesEvents } = await import("../../salesEvents"); salesEvents.emit(); } catch {}
-      notifyLocal("Koreksyon Vant ✓", `Vant ${res.sale.sale_number} chanje soti ${salePaymentLabel(res.previous)} → ${salePaymentLabel(res.target)} — analytics ak rapò mete ajou.`);
+      const changedSaleId = String(res.sale?.id ?? saleDetail.sale?.id ?? "");
+      notifyLocal("Koreksyon Vant ✓", `Vant ${res.sale.sale_number} chanje soti ${salePaymentLabel(res.previous)} → ${salePaymentLabel(res.target)} — analytics ak rapò mete ajou.`,
+        changedSaleId ? { screen: "sale", id: changedSaleId } : undefined);
       uploadSuccess(
         "Koreksyon anrejistre ✓",
         `Vant ${res.sale.sale_number}\nSoti ${salePaymentLabel(res.previous)} → ${salePaymentLabel(res.target)}\nTOTAL: ${formatMoney(Number(res.sale.total ?? 0))}\nResi: ${res.receiptNumber}\n\nAnalytics ak rapò jounen an mete ajou otomatikman.`
@@ -117,7 +123,7 @@ export default function StoreScreen({
   }
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: palette.bg, flexGrow: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24, alignItems: "center" }} showsVerticalScrollIndicator={false}>
+    <KeyboardSafeScrollView style={{ flex: 1, backgroundColor: palette.bg, flexGrow: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24, alignItems: "center" }} showsVerticalScrollIndicator={false}>
       <View style={{ width: "100%", gap: 12 }}>
       {blocked && (
         <View style={{ backgroundColor: palette.dangerBg, borderWidth: 1, borderColor: palette.dangerBd, borderRadius: radius.md, padding: 14, flexDirection: "row", alignItems: "center", gap: 10 }}>
@@ -134,7 +140,7 @@ export default function StoreScreen({
       {/* Active store summary card */}
       <View style={{ backgroundColor: palette.surface, borderRadius: radius.lg, padding: 16, borderWidth: 0.5, borderColor: palette.hairline, ...shadow.card }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-          <View style={{ width: 48, height: 48, borderRadius: radius.md, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center" }}>
+          <View style={{ width: 48, height: 48, borderRadius: radius.md, backgroundColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="storefront-outline" size={22} color="#fff" />
           </View>
           <View style={{ flex: 1 }}>
@@ -213,7 +219,7 @@ export default function StoreScreen({
           onPress={onOpenAccountCenter}
           style={{ backgroundColor: palette.surface, borderRadius: radius.lg, padding: 14, flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 0.5, borderColor: palette.hairline, ...shadow.card }}
         >
-          <View style={{ width: 42, height: 42, borderRadius: radius.md, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center" }}>
+          <View style={{ width: 42, height: 42, borderRadius: radius.md, backgroundColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="business-outline" size={20} color="#fff" />
           </View>
           <View style={{ flex: 1 }}>
@@ -239,7 +245,7 @@ export default function StoreScreen({
             </View>
             {setAppDisabled && (
               <Pressable onPress={() => setAppDisabled(v => !v)} style={{ backgroundColor: appDisabled ? palette.danger : palette.ink2, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 7, ...shadow.soft }}>
-                <Text style={{ fontSize: 12, fontWeight: "600", color: "#fff", letterSpacing: 0.2 }}>{appDisabled ? "Aktive" : "Dezaktive"}</Text>
+                <Text style={{ fontSize: 12, fontWeight: "600", color: appDisabled ? "#fff" : "#000", letterSpacing: 0.2 }}>{appDisabled ? "Aktive" : "Dezaktive"}</Text>
               </Pressable>
             )}
           </View>
@@ -264,9 +270,9 @@ export default function StoreScreen({
       {/* Sales Options — search, view & correct a sale */}
       <Modal visible={showSalesOptions} transparent animationType="slide" onRequestClose={() => setShowSalesOptions(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "rgba(22,19,12,0.45)", justifyContent: "flex-end" }}>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
-              <View style={{ backgroundColor: palette.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, padding: 18, maxHeight: "94%", borderTopWidth: 0.5, borderColor: palette.hairline, ...shadow.elevated }}>
+          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
+              <View style={{ backgroundColor: palette.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, padding: 18, paddingBottom: 18 + insets.bottom, maxHeight: "94%", borderTopWidth: 0.5, borderColor: palette.hairline, ...shadow.elevated }}>
             <View style={{ width: 36, height: 4, backgroundColor: palette.separator, borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
               <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: palette.blueBg, alignItems: "center", justifyContent: "center" }}>
@@ -295,7 +301,7 @@ export default function StoreScreen({
                 />
               </View>
               <Pressable onPress={handleSaleSearch} disabled={searchingSale} style={{ backgroundColor: palette.ink2, borderRadius: radius.sm, paddingHorizontal: 16, paddingVertical: 13, ...shadow.soft }}>
-                <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13 }}>{searchingSale ? "…" : "Chèche"}</Text>
+                <Text style={{ color: "#000", fontFamily: "Inter_700Bold", fontWeight: "700", fontSize: 13 }}>{searchingSale ? "…" : "Chèche"}</Text>
               </Pressable>
             </View>
 
@@ -421,17 +427,17 @@ export default function StoreScreen({
                     <Text style={{ fontFamily: "Inter_700Bold", fontWeight: "700", color: palette.ink }}>Anile</Text>
                   </Pressable>
                   <Pressable onPress={handleApplyChange} disabled={applyingChange} style={{ flex: 1, padding: 13, backgroundColor: palette.ink2, borderRadius: radius.md, alignItems: "center", ...shadow.soft }}>
-                    <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontWeight: "700" }}>{applyingChange ? "Aplike…" : "Konfime ✓"}</Text>
+                    <Text style={{ color: "#000", fontFamily: "Inter_700Bold", fontWeight: "700" }}>{applyingChange ? "Aplike…" : "Konfime ✓"}</Text>
                   </Pressable>
                 </View>
               </View>
             )}
               </View>
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
       </View>
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

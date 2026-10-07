@@ -12,6 +12,7 @@
 // Why one writer: the lock rules are the feature. Splitting writes across
 // screens is how "waiting is freely editable" quietly stops being true.
 import { getDb, insertOutbox } from "../db";
+import { notifyLocal } from "../notifications";
 import {
   canCancelLine,
   canDecideChange,
@@ -49,6 +50,7 @@ import type {
   RoundLineInput,
   StoreResult,
 } from "./types";
+import { mintId } from "../db/ids";
 
 // ── Phase 5 seams ──────────────────────────────────────────────────────────
 // Outbox writes were held back while middleware rejected unknown tables
@@ -81,7 +83,7 @@ async function outbox(table: string, operation: "create" | "update" | "delete", 
 
 // ── small helpers ──────────────────────────────────────────────────────────
 const nowISO = () => new Date().toISOString();
-const uid = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const uid = (_p: string) => mintId();
 const lamport = () => Date.now();
 
 type Row = Record<string, any>;
@@ -423,6 +425,7 @@ async function notifyPaymentPool(db: any, order: Order, actor: Actor): Promise<v
     const pool = employees.filter(e => ids.includes(e.id) && payableRoles.has(String(e.role ?? ""))).slice(0, 8);
     const label = orderCodeLabel(order);
     const ts = nowISO();
+    let notified = 0;
     for (const p of pool) {
       const rep = (await db.getAllAsync(
         "SELECT 1 AS x FROM daily_reports WHERE user_id = ? AND report_date = ? AND status = 'submitted' LIMIT 1",
@@ -432,10 +435,18 @@ async function notifyPaymentPool(db: any, order: Order, actor: Actor): Promise<v
       try {
         await db.runAsync(
           "INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [`notif-${Date.now()}-${p.id}-${Math.random().toString(36).slice(2, 5)}`, p.id, "order_ready_to_pay", order.id,
+          [mintId(), p.id, "order_ready_to_pay", order.id,
             `${actor.name || "Yon moun"} pare pou peye: ${label} — ou ka pran peye a.`, "pending", ts],
         );
+        notified++;
       } catch {}
+    }
+    // The rows above have no in-app reader — this push is the only way the
+    // pool hears about it, and the only route a tap can follow to that order.
+    if (notified > 0) {
+      notifyLocal(`${label} pare pou peye`,
+        `${actor.name || "Yon moun"} mete ${label} nan eta peye a — ou ka pran peye kounye a.`,
+        { screen: "order", id: String(order.id) });
     }
   } catch {}
 }

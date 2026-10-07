@@ -1,12 +1,12 @@
 import React, { useState } from "react";
-import { View, Text, FlatList, Pressable, ScrollView, Animated } from "react-native";
+import { View, Text, Pressable, ScrollView, Animated } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { palette, radius, shadow, typography, topIconBtn } from "../theme";
+import { blackPalette as palette, radius, shadow, topIconBtn } from "../theme";
 import { ht } from "../i18n";
 import { fmtG } from "../format";
 import { useResponsive } from "../responsive";
-import { ProductsEmpty, CartLinesList, CartEmptyCard, SuspendRow, CartTotalBar, type SaleRow, type CartItem, type SearchMode, type PendingState, type PriceLine, type CartView, type CustomerFlow } from "./POSShared";
-import { TabletSearchCard, TabletPendingHero, TabletProductCard, tabletCatFor } from "../picker/tablet";
+import { CartLinesList, CartEmptyCard, SuspendRow, CartTotalBar, type SaleRow, type CartItem, type SearchMode, type PendingState, type PriceLine, type CartView, type CustomerFlow } from "./POSShared";
+import { TabletProductPane } from "../picker/tablet";
 import { ProfileMenu, tenderLabel } from "../components/CustomerProfile";
 import { CartMenuView, CartCustomersView, NewCustomerView, EditCustomerView, CustomerDetailBody, CustomerProfileBody, TxnDetailBody } from "./cartViews";
 
@@ -20,8 +20,13 @@ export interface POSTabletProps {
   pendingLine: PriceLine | null;
   pendingMaxQ: number;
   rows: SaleRow[];
+  catNames: Record<string, string>;
+  /** useSaleCatalog first-load flag — skeleton until the catalog lands. */
+  catalogLoaded: boolean;
   cart: CartItem[];
   subtotal: number;
+  /** Applied coupon discount — CartTotalBar shows total minus this. */
+  discount?: number;
   resumedTabId: string | null;
   resumedTabLabel: string;
   visibleTabsCount: number;
@@ -37,7 +42,6 @@ export interface POSTabletProps {
   onCommitPending: () => void;
   onCancelPending: () => void;
   onProductPress: (row: SaleRow) => void;
-  getBaseCost?: (productId: string) => number;
   onClearCart: () => void;
   onSuspend: () => void;
   onUpdateResumedTab: () => void;
@@ -50,15 +54,17 @@ export interface POSTabletProps {
   onEditQtyBlur: () => void;
   onPay: () => void;
   onOpenCartMenu?: () => void;
+  appliedCoupon?: { code: string } | null;
+  onRemoveCoupon?: () => void;
   customerFlow: CustomerFlow;
 }
 
 export function POSTablet(props: POSTabletProps) {
   const responsive = useResponsive();
-  const { width, isTablet, isLargeTablet, padH } = responsive;
+  const { padH } = responsive;
   const {
     search, searchMode, entrance, payPulse, pending, pendingInput, pendingLine, pendingMaxQ,
-    rows, cart, subtotal, resumedTabId, resumedTabLabel, visibleTabsCount,
+    rows, catNames, catalogLoaded, cart, subtotal, discount = 0, resumedTabId, resumedTabLabel, visibleTabsCount,
     editingQtyId, editingQtyVal,
     onSearchChange, onSearchModeChange, onBarcodeSubmit, onOpenScanner,
     onAdjustPending, onPendingCustom, onPendingBlurClear, onCommitPending, onCancelPending,
@@ -66,14 +72,13 @@ export function POSTablet(props: POSTabletProps) {
     onClearCart, onSuspend, onUpdateResumedTab, onOpenTabs,
     onDecQty, onIncQty, onRemoveLine, onEditQtyStart, onEditQtyChange, onEditQtyBlur,
     onPay,
-    onOpenCartMenu, customerFlow,
+    onOpenCartMenu, appliedCoupon, onRemoveCoupon, customerFlow,
   } = props;
   const flowView: CartView = customerFlow.view;
 
   const qtyTotal = cart.reduce((s, it) => s + it.qty, 0);
-  const [cat, setCat] = useState("all");
   const [showCartMenu, setShowCartMenu] = useState(false);
-  const visibleRows = cat === "all" ? rows : rows.filter(r => tabletCatFor(r.product) === cat);
+  const inCartQtyFor = (row: SaleRow) => cart.filter(c => c.key === row.key).reduce((s, c) => s + c.qty, 0);
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
@@ -81,7 +86,7 @@ export function POSTablet(props: POSTabletProps) {
       <View style={{ width: "100%", paddingHorizontal: padH, paddingTop: 16, paddingBottom: 4 }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={{ ...typography.eyebrow, fontSize: 11 }}>VANT • POS TABLET</Text>
+            <Text style={{ fontFamily: "Inter_700Bold", fontSize: 11, letterSpacing: 1.1, textTransform: "uppercase", color: "#8e8e93" }}>VANT • POS TABLET</Text>
             <Text style={{ fontFamily: "Inter_700Bold", fontSize: 26, fontWeight: "700", letterSpacing: -0.4, color: "#fff", marginTop: 4 }}>
               Kès <Text style={{ fontStyle: "italic", fontWeight: "300", color: palette.accentGold }}>vit & presi</Text>
             </Text>
@@ -91,11 +96,11 @@ export function POSTablet(props: POSTabletProps) {
             <View style={{ backgroundColor: palette.surface, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 7 }}>
               <Text style={{ fontSize: 11, fontWeight: "700", color: palette.muted }}>{visibleTabsCount} tab</Text>
             </View>
-            <Pressable onPress={onOpenTabs} accessibilityLabel="Ouvri Tabs" style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: palette.ink, borderWidth: 0.5, borderColor: "rgba(255,255,255,0.08)", borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12 }}>
+            <Pressable onPress={onOpenTabs} accessibilityLabel="Ouvri Tabs" style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: palette.ink, borderWidth: 0.5, borderColor: "rgba(0,0,0,0.12)", borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12 }}>
               <View style={{ minWidth: 20, height: 20, borderRadius: 999, backgroundColor: palette.accentGold, alignItems: "center", justifyContent: "center", paddingHorizontal: 5 }}>
                 <Text style={{ fontSize: 11, fontWeight: "800", color: "white" }}>{visibleTabsCount}</Text>
               </View>
-              <Text style={{ color: "white", fontWeight: "800", fontSize: 12 }}>ATANN</Text>
+              <Text style={{ color: "#000", fontWeight: "800", fontSize: 12 }}>ATANN</Text>
             </Pressable>
           </View>
         </View>
@@ -103,63 +108,31 @@ export function POSTablet(props: POSTabletProps) {
 
       {/* Two-pane: products left, cart right */}
       <View style={{ width: "100%", flex: 1, flexDirection: "row", gap: 12, paddingHorizontal: padH, paddingBottom: 12, paddingTop: 8 }}>
-        <View style={{ flex: 3, minWidth: 0, gap: 12 }}>
-          {/* Search card — mirrors web search card: white radius-20 card, field + mode + category tinted rows */}
-          <TabletSearchCard
-            entrance={entrance}
-            search={search}
-            searchMode={searchMode}
-            cat={cat}
-            onSearchChange={onSearchChange}
-            onSearchModeChange={onSearchModeChange}
-            onBarcodeSubmit={onBarcodeSubmit}
-            onOpenScanner={onOpenScanner}
-            onCatChange={setCat}
-            visibleCount={visibleRows.length}
-            totalCount={rows.length}
-          />
-
-          {pending && (
-            <TabletPendingHero
-              pending={pending}
-              pendingInput={pendingInput}
-              pendingLine={pendingLine}
-              pendingMaxQ={pendingMaxQ}
-              onAdjust={onAdjustPending}
-              onCustom={onPendingCustom}
-              onBlurClear={onPendingBlurClear}
-              onCommit={onCommitPending}
-              onCancel={onCancelPending}
-            />
-          )}
-          <FlatList
-            style={{ flex: 1 }}
-            data={visibleRows}
-            keyExtractor={i => i.key}
-            numColumns={isLargeTablet ? 3 : 2}
-            columnWrapperStyle={{ gap: 10 }}
-            contentContainerStyle={{ gap: 10, paddingTop: 2, paddingBottom: 12 }}
-            ListHeaderComponent={
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 2 }}>
-                <Text style={{ color: "#fff", fontSize: 15, fontWeight: "800" }}>Varyant disponib</Text>
-                <Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>{visibleRows.length} rezilta</Text>
-              </View>
-            }
-            renderItem={({ item }) => {
-              const inCartQty = cart.filter(c => c.key === item.key).reduce((s, c) => s + c.qty, 0);
-              return (
-                <TabletProductCard
-                  row={item}
-                  inCartQty={inCartQty}
-                  pendingActive={!!pending && pending.product.id === item.product.id && pending.unitId === item.unitId && pending.variant === item.variant}
-                  onPress={() => onProductPress(item)}
-                  getBaseCost={props.getBaseCost}
-                />
-              );
-            }}
-            ListEmptyComponent={<ProductsEmpty />}
-          />
-        </View>
+        {/* Products pane — shared with the proforma builder (picker/tablet). */}
+        <TabletProductPane
+          entrance={entrance}
+          search={search}
+          searchMode={searchMode}
+          rows={rows}
+          catNames={catNames}
+          catalogLoaded={catalogLoaded}
+          pending={pending}
+          pendingInput={pendingInput}
+          pendingLine={pendingLine}
+          pendingMaxQ={pendingMaxQ}
+          onSearchChange={onSearchChange}
+          onSearchModeChange={onSearchModeChange}
+          onBarcodeSubmit={onBarcodeSubmit}
+          onOpenScanner={onOpenScanner}
+          onAdjustPending={onAdjustPending}
+          onPendingCustom={onPendingCustom}
+          onPendingBlurClear={onPendingBlurClear}
+          onCommitPending={onCommitPending}
+          onCancelPending={onCancelPending}
+          onProductPress={onProductPress}
+          onDecQty={onDecQty}
+          inCartQtyFor={inCartQtyFor}
+        />
 
         {/* Right sticky cart card — mirrors web .pos-cart: head + body + grouped foot */}
         <View style={{ flex: 2, minWidth: 300, backgroundColor: "#000", borderRadius: radius.lg, borderWidth: 0.5, borderColor: "#262626", ...shadow.card, padding: 14 }}>
@@ -235,6 +208,13 @@ export function POSTablet(props: POSTabletProps) {
               <Ionicons name="person-add-outline" size={16} color="#fff" />
               <Text style={{ flex: 1, color: "#fff", fontWeight: "800", fontSize: 12 }}>Add Customer</Text>
               <Ionicons name="chevron-forward" size={15} color="rgba(255,255,255,0.7)" />
+            </Pressable>
+          ) : null}
+          {flowView === "cart" && appliedCoupon ? (
+            <Pressable onPress={() => onRemoveCoupon?.()} accessibilityLabel="Retire koupon" style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 8, height: 52, paddingHorizontal: 14, borderRadius: 12, backgroundColor: "rgba(52,199,89,0.10)", borderWidth: 1, borderColor: "#34c759" }}>
+              <Ionicons name="pricetag" size={16} color="#34c759" />
+              <Text style={{ flex: 1, color: "#fff", fontWeight: "800", fontSize: 13 }}>{appliedCoupon.code} • −{fmtG(discount)}</Text>
+              <Ionicons name="close-circle" size={20} color="#8e8e93" />
             </Pressable>
           ) : null}
           {flowView === "cart" ? (
@@ -356,6 +336,7 @@ export function POSTablet(props: POSTabletProps) {
               <CartTotalBar
                 payPulse={payPulse}
                 subtotal={subtotal}
+                discount={discount}
                 onPay={onPay}
               />
               <Text style={{ fontSize: 10, color: "#8e8e93", textAlign: "center" }}>

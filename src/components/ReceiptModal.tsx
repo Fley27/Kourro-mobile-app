@@ -1,5 +1,6 @@
 import React from "react";
 import { Modal, View, Text, Pressable, ScrollView, Share, Alert, Linking, useWindowDimensions } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Sharing from "expo-sharing";
 import { fmtG, fmt, monoStyle } from "../format";
@@ -15,6 +16,7 @@ import { CustomerPicker } from "./CustomerPicker";
 import { EMPTY_CUSTOMER_FORM, fullNameOf, type CustomerFormData } from "./CustomerForm";
 import { insertCustomerRecord } from "../sales/customers";
 import { uploadSuccess, uploadError } from "./UploadTransition";
+import { FALLBACK_STORE_ID } from "../db/ids";
 
 function statusLine(r: ReceiptData): { label: string; tint: string } | null {
   if (r.kind === "order_bill") {
@@ -59,7 +61,8 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
   locked?: boolean;
 }) {
   // STAGING-PICKUP: dormant when flag OFF. Delete block to remove.
-  const stagingOn = usePickupEnabled(staging?.storeId ?? "demo-store-id");
+  const insets = useSafeAreaInsets();
+  const stagingOn = usePickupEnabled(staging?.storeId ?? FALLBACK_STORE_ID);
   const online = useOnline();
   const [showPickup, setShowPickup] = React.useState(false);
   const [savedEmail, setSavedEmail] = React.useState<string | null>(null);
@@ -80,6 +83,8 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
   const isSale = (r?.kind ?? "sale") === "sale";
   // A Fakti is a standalone bill — no sale-linked customer menu on it.
   const isBill = r?.kind === "order_bill";
+  // A proformat is a quote — receipt-only view (no sale menu, no decline).
+  const isPfo = r?.kind === "proformat";
   const [menuVisible, setMenuVisible] = React.useState(false);
   const [menuView, setMenuView] = React.useState<"main" | "add">("main");
   const [custDetail, setCustDetail] = React.useState<any | null>(null);
@@ -154,7 +159,10 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
     onClose();
   }
 
-  if (!visible || !receipts || !r) return null;
+  if (!visible || !receipts || !r) {
+    if (visible) console.log("[receipt] blocked", { visible, hasReceipts: !!receipts, hasCustomer: !!r, hasAlt: !!altPair });
+    return null;
+  }
   const pair = (altPair ?? receipts) as { customer: ReceiptData; store: ReceiptData };
   const st = statusLine(r);
 
@@ -421,7 +429,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
     try {
       const db = await getDb();
       const { addCustomerNote } = await import("../sales/customers");
-      const row = await addCustomerNote(db, staging?.storeId ?? "demo-store-id", custDetail.id, text, staging?.cashierId ?? null);
+      const row = await addCustomerNote(db, staging?.storeId ?? FALLBACK_STORE_ID, custDetail.id, text, staging?.cashierId ?? null);
       setMenuNotes(prev => [row, ...prev]);
       setProfNoteInput("");
     } catch (e: any) {
@@ -492,7 +500,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
 
   async function saveCustomer() {    const { data, valid } = formRef.current;
     if (!valid) return Alert.alert("Enkonplè", "Ranpli tout chan obligatwa (*) anvan ou anrejistre.");
-    const store = staging?.storeId ?? "demo-store-id";
+    const store = staging?.storeId ?? FALLBACK_STORE_ID;
     setSavingCust(true);
     try {
       const db = await getDb();
@@ -559,9 +567,9 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
 
   return (
     <Modal visible animationType="slide" onRequestClose={handleClose}>
-      <View style={{ flex: 1, backgroundColor: "#16db65", paddingTop: 52 }}>
+      <View style={{ flex: 1, backgroundColor: "#16db65", paddingTop: insets.top + 8 }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 18, paddingBottom: 6 }}>
-          {locked || isBill ? <View style={{ width: 38 }} /> : (
+          {locked || isBill || isPfo ? <View style={{ width: 38 }} /> : (
           <Pressable onPress={openMenu} accessibilityLabel="Plis opsyon" style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: palette.surface, borderWidth: 0.5, borderColor: palette.hairline, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="ellipsis-horizontal" size={18} color={palette.ink} />
           </Pressable>
@@ -574,7 +582,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1, justifyContent: "center", paddingHorizontal: 18, paddingBottom: 16, paddingTop: 10, gap: 18 }}>
           {/* Hero — paid amount, centered */}
           <View style={{ alignItems: "center", paddingVertical: 10 }}>
-            <Text style={{ fontFamily: fonts.bold, fontSize: 11, color: palette.muted2, letterSpacing: 1.2 }}>{isBill ? "FAKTI" : "TOTAL"}</Text>
+            <Text style={{ fontFamily: fonts.bold, fontSize: 11, color: palette.muted2, letterSpacing: 1.2 }}>{isBill ? "FAKTI" : isPfo ? "PROFORMAT" : "TOTAL"}</Text>
             <Text style={[monoStyle, { fontFamily: fonts.bold, fontSize: 44, color: palette.ink, letterSpacing: -1.5, marginTop: 4 }]}>{fmtG(r.total)}</Text>
             {st ? <Text style={{ fontFamily: fonts.bold, fontSize: 14, color: st.tint, marginTop: 6 }}>{st.label}</Text> : null}
             {Number(r.change ?? 0) > 0 ? (
@@ -592,7 +600,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         </ScrollView>
 
         {/* Bottom action bar — thumb reach, one hand, all centered */}
-        <View style={{ paddingHorizontal: 18, paddingTop: 10, paddingBottom: 34, gap: 10, borderTopWidth: 0.5, borderTopColor: palette.hairline, backgroundColor: "#16db65", alignItems: "stretch" }}>
+        <View style={{ paddingHorizontal: 18, paddingTop: 10, paddingBottom: 34 + insets.bottom, gap: 10, borderTopWidth: 0.5, borderTopColor: palette.hairline, backgroundColor: "#16db65", alignItems: "stretch" }}>
           {/* STAGING-PICKUP: partial pickup option, right above the question. Delete block to remove. */}
           {isSale && stagingOn && staging?.storeId && !locked ? (
             <Pressable onPress={() => setShowPickup(true)} style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, backgroundColor: palette.ink2, borderRadius: radius.pill, paddingVertical: 17, borderWidth: 0.5, borderColor: "rgba(47,125,91,0.4)" }}>
@@ -620,7 +628,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         {menuVisible ? (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "flex-end", zIndex: 50, elevation: 8 }}>
             <Pressable onPress={() => { setMenuVisible(false); setMenuView("main"); }} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(22,19,12,0.5)" }} />
-            <View style={{ backgroundColor: "#16db65", borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 34, gap: 12, maxHeight: "88%" }}>
+            <View style={{ backgroundColor: "#16db65", borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, paddingHorizontal: 18, paddingTop: 10, paddingBottom: 34 + insets.bottom, gap: 12, maxHeight: "88%" }}>
               <View style={{ width: 36, height: 4, backgroundColor: palette.hairlineStrong, borderRadius: 2, alignSelf: "center", marginBottom: 2 }} />
               {menuView === "main" ? (
                 <>
@@ -690,7 +698,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         {showCustPicker ? (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "flex-end", zIndex: 60, elevation: 9 }}>
             <Pressable onPress={closeCustPicker} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(22,19,12,0.5)" }} />
-            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
+            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28 + insets.bottom, height: pickerH }}>
               {profCustomer ? (
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -710,7 +718,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
                 <View style={{ flex: 1 }}>
                   <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 10 }} />
                   <CustomerPicker
-                    storeId={staging?.storeId ?? "demo-store-id"}
+                    storeId={staging?.storeId ?? FALLBACK_STORE_ID}
                     customers={menuCustomers}
                     debts={menuDebts}
                     onPick={openPickedProfile}
@@ -726,7 +734,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         {showProfModal && (custDetail || customer) ? (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "flex-end", zIndex: 70, elevation: 10 }}>
             <Pressable onPress={closeProfModal} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(22,19,12,0.5)" }} />
-            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
+            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28 + insets.bottom, height: pickerH }}>
               {profMode === "view" ? (
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -782,7 +790,7 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
         {txnView ? (
           <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, justifyContent: "flex-end", zIndex: 80, elevation: 10 }}>
             <Pressable onPress={() => setTxnView(null)} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(22,19,12,0.5)" }} />
-            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, height: pickerH }}>
+            <View style={{ backgroundColor: "#000", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28 + insets.bottom, height: pickerH }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                 <Pressable onPress={() => setTxnView(null)} accessibilityLabel="Retounen" style={{ width: 34, height: 34, borderRadius: 12, backgroundColor: "#efe7d2", alignItems: "center", justifyContent: "center" }}>
                   <Ionicons name="chevron-back" size={19} color="#16130c" />

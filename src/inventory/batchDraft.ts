@@ -49,6 +49,10 @@ export type BatchDraft = {
   finalizedBatchIds: string[];
   /** Item held back by Split, waiting for Add Another with the cheaper supplier. */
   splitTarget: { itemId: string; productId: string; supplierId: string } | null;
+  /** Step-3 transport (G), spread over the lines by weight at save. */
+  transport?: string;
+  /** Review-sheet delivery date (ISO). Blank/invalid → resume keeps today. */
+  date?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -160,6 +164,7 @@ export async function saveBatchDraft(db: any, draft: BatchDraft): Promise<void> 
   });
   // Any live draft means the reminder should keep firing.
   try { await notifyDraftReminder(true); } catch {}
+  notifyBatchDraftsChanged();
 }
 
 export async function deleteBatchDraft(db: any, id: string): Promise<void> {
@@ -167,6 +172,25 @@ export async function deleteBatchDraft(db: any, id: string): Promise<void> {
   const left = await listBatchDrafts(db);
   if (!left.length) {
     try { await notifyDraftReminder(false); } catch {}
+  }
+  notifyBatchDraftsChanged();
+}
+
+// --- change notification -------------------------------------------------
+// A draft can land after the wizard has already unmounted (leave-save is
+// fire-and-forget), so the Brouyon list subscribes instead of polling: every
+// save/delete pings the listener and the list re-reads `_meta`.
+type DraftsListener = () => void;
+const draftsListeners = new Set<DraftsListener>();
+
+export function subscribeBatchDrafts(cb: DraftsListener): () => void {
+  draftsListeners.add(cb);
+  return () => { draftsListeners.delete(cb); };
+}
+
+function notifyBatchDraftsChanged(): void {
+  for (const cb of draftsListeners) {
+    try { cb(); } catch {}
   }
 }
 

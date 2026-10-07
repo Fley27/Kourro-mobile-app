@@ -7,6 +7,7 @@ import {
   StyleSheet,
   useWindowDimensions,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { TABLET_MIN } from "../responsive";
 
 /**
@@ -27,6 +28,8 @@ export function KeyboardAwareSheet({
 }) {
   const { width } = useWindowDimensions();
   const isTablet = width >= TABLET_MIN;
+  // Sheet rides above the home-indicator / Android gesture zone.
+  const insets = useSafeAreaInsets();
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === "ios" ? "padding" : "height"}
@@ -39,7 +42,7 @@ export function KeyboardAwareSheet({
           keyboardDismissMode="interactive"
           showsVerticalScrollIndicator={false}
           bounces={false}
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom }]}
         >
           <View
             style={[

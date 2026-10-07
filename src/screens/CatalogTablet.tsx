@@ -1,7 +1,7 @@
 import React from "react";
 import { View, Text, FlatList, Pressable, TextInput, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { palette, radius, shadow, topIconBtn } from "../theme";
+import { blackPalette as palette, radius, shadow, topIconBtn } from "../theme";
 import { fmtG, monoStyle } from "../format";
 import { useResponsive } from "../responsive";
 import type { Role } from "../users";
@@ -11,12 +11,16 @@ import {
   SearchHeader, CategoryStrip, StockStatusPill, statusForProduct, isService, isAvailable, categoryDisplayIcon, ProductCard,
 } from "./CatalogShared";
 import { currentVariantPrice, type CatalogModel } from "../catalogModel";
+import { SkeletonProductCard } from "../components/Skeleton";
 import type { StepKey } from "./catalogFlow/CatalogFlowModal";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export interface CatalogTabletProps {
   role: Role;
   products: Product[];
   categories: Category[];
+  /** First DB load — skeleton cards instead of the "Pa gen pwodwi" flash. */
+  loading?: boolean;
   q: string; setQ: React.Dispatch<React.SetStateAction<string>>;
   onOpenFilter: () => void; filterOn: boolean; draftCount: number;
   cat: string; setCat: React.Dispatch<React.SetStateAction<string>>;
@@ -72,7 +76,7 @@ function MetricTile({ label, value, valueColor }: { label: string; value: string
 export function CatalogTablet(props: CatalogTabletProps) {
   const { width, padH } = useResponsive();
   const {
-    role, products, categories,
+    role, products, categories, loading,
     q, setQ, onOpenFilter, filterOn, draftCount, cat, setCat,
     filtered,
     canEdit, canAddMore, canReduce, canDelete, canViewCost, canToggleAvail, onToggleAvail, displayPriceOf, defaultUnitOf, getProductCats, getProductCategoriesDisplay,
@@ -118,7 +122,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
     const supName = (id: string) => supplierList.find(s => s.id === id)?.name ?? "—";
     const itemName = (id: string) => v2.items.find(i => i.id === id)?.name ?? "?";
     return (
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 24 }}>
+      <KeyboardSafeScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 24 }}>
         {/* Inspector header: initial tile, name + status pill, sku line */}
         <View style={{ backgroundColor: "#1C1C1E", borderRadius: radius.md, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 14, ...shadow.soft }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
@@ -272,7 +276,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
           <Pressable onPress={() => onOpenProduct(p.id)} style={{ marginTop: 8, paddingVertical: 12, borderRadius: radius.sm, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6 }}><Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>Wè detay konplè</Text><Ionicons name="chevron-forward" size={14} color="#8e8e93" /></Pressable>
           <Pressable onPress={() => setInfoProduct(null)} style={{ marginTop: 8, paddingVertical: 12, backgroundColor: "#fff", borderRadius: radius.sm, alignItems: "center" }}><Text style={{ color: "#000", fontWeight: "700", fontSize: 13 }}>Fèmen</Text></Pressable>
         </View>
-      </ScrollView>
+      </KeyboardSafeScrollView>
     );
   };
 
@@ -344,7 +348,18 @@ export function CatalogTablet(props: CatalogTabletProps) {
                   onPress={() => { setInfoProduct(item); setShowNameEdit(false); setNameInput(item.name); }}
                 />
               )}
-              ListEmptyComponent={<View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>Pa gen pwodwi nan kategori sa</Text><Text style={{ color: "#8e8e93", fontSize: 11, marginTop: 4 }}>Eseye yon lòt chèche oswa kategori</Text></View>}
+              ListEmptyComponent={
+                loading ? (
+                  <View style={{ gap: 12 }}>
+                    <SkeletonProductCard />
+                    <SkeletonProductCard />
+                    <SkeletonProductCard />
+                    <SkeletonProductCard />
+                  </View>
+                ) : (
+                  <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>Pa gen pwodwi nan kategori sa</Text><Text style={{ color: "#8e8e93", fontSize: 11, marginTop: 4 }}>Eseye yon lòt chèche oswa kategori</Text></View>
+                )
+              }
             />
           </>
 

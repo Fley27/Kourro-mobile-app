@@ -18,6 +18,7 @@ import { CustomerProfileHeader, ModalScreen } from "./CustomerProfile";
 import { DarkDropdown, PhoneField, CountryDialPicker, countryName, deptName, flagOf } from "./CustomerForm";
 import COUNTRIES from "../data/countries.json";
 import DEPARTMENTS from "../data/haitiDepartments.json";
+import { KeyboardSafeScrollView } from "./KeyboardSafe";
 
 const INK = "#fff";
 const MUTED = "#8e8e93";
@@ -243,7 +244,7 @@ export function EditSupplierContent({ resetKey, visible, initial, onState }: {
     setV(p => ({ ...p, bank_accounts: p.bank_accounts.filter((_, j) => j !== i) }));
 
   return (
-    <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       <Field placeholder="Non founisè *" value={v.name} onChange={set("name")} />
 
       <PhoneField
@@ -374,7 +375,7 @@ export function EditSupplierContent({ resetKey, visible, initial, onState }: {
         onPick={iso => set("phone_country")(iso)}
         title="Area code"
       />
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }
 

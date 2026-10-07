@@ -13,17 +13,14 @@
 //
 // Unfinished runs become device-local drafts (src/inventory/batchDraft.ts);
 // they never reach the shared database.
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  View, Text, Pressable, TextInput, Alert, ScrollView,
-  KeyboardAvoidingView, Platform, Modal, Keyboard, SafeAreaView, BackHandler,
-} from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { View, Text, Pressable, TextInput, Alert, ScrollView, KeyboardAvoidingView, Platform, Modal, Keyboard, BackHandler } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox, recomputeItemCosts } from "../../db";
 import type { Role } from "../../users";
 import { fmtG, fmt, monoStyle } from "../../format";
 import { radius, shadow } from "../../theme";
-import { sheetBox } from "../../responsive";
+import { sheetBox, TABLET_MIN } from "../../responsive";
 import {
   loadPricing, getUnitsForProduct, getDefaultUnit, getDisplayPrice, type PricingMaps, type ProductUnit,
 } from "../../pricing";
@@ -43,6 +40,9 @@ import {
 import { MoneyInput } from "../../components/maskedInput";
 import { itemCostsFor } from "../../analytics/metrics";
 import { formatCheckoutRow } from "../../labels";
+import { SafeScreen } from "../../components/SafeScreen";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { mintId } from "../../db/ids";
 
 type Category = { id: string; name: string; icon: string; color: string };
 type Product = {
@@ -108,6 +108,11 @@ export default function BatchWizard(props: BatchWizardProps) {
     isTablet, width, padH, resumeDraftId, closeRef, onSaved, onClose,
   } = props;
 
+  // Checkout-parity two-pane (sticky cart right) only when the content area
+  // can carry both panes; a narrow split-screen window keeps the phone-style
+  // floating pill + cart sheet instead of a 176pt product column.
+  const paneMode = isTablet && width >= TABLET_MIN;
+
   const [step, setStep] = useState<BatchDraftStep>(1);
   const [bubbles, setBubbles] = useState<InvBubble[]>([]);
   const [supplierId, setSupplierId] = useState("");
@@ -145,9 +150,15 @@ export default function BatchWizard(props: BatchWizardProps) {
 
   const [busy, setBusy] = useState(false);
 
-  const [draftId, setDraftId] = useState<string>(`draft-${Date.now().toString(36)}`);
+  const [draftId, setDraftId] = useState<string>(mintId());
   const [sessionRef, setSessionRef] = useState("");
   const [sessionBatchIds, setSessionBatchIds] = useState<string[]>([]);
+  // Draft guards: hydration must finish before any autosave can write (or a
+  // fresh write would race the resume read and wipe the stored draft), and a
+  // delivered batch must never be re-created as a draft by the leave-save
+  // that runs when the wizard unmounts after handleSave.
+  const [draftReady, setDraftReady] = useState(!resumeDraftId);
+  const finishedRef = useRef(false);
 
   const [keyboardH, setKeyboardH] = useState(0);
   useEffect(() => {
@@ -168,26 +179,34 @@ export default function BatchWizard(props: BatchWizardProps) {
   // --- session + draft boot ------------------------------------------------
   useEffect(() => {
     (async () => {
-      const db = await getDb();
-      // The session belongs to THIS run only: batches parked in _meta by an
-      // earlier run (saved but never submitted) are deliberately not restored
-      // here, so the review panel and Soumèt only ever cover what this wizard
-      // run actually saved. Resuming a draft continues its own run below.
-      if (!resumeDraftId) return;
       try {
-        const d = await loadBatchDraft(db, resumeDraftId);
-        if (d) {
-          setDraftId(d.id);
-          setStep(d.step);
-          setSupplierId(d.supplierId);
-          setBubbles((d.bubbles ?? []) as InvBubble[]);
-          setDecisions(d.decisions ?? {});
-          setDraftPrices(d.prices ?? {});
-          setDraftBundles(d.bundles ?? []);
-          if (d.sessionRef) setSessionRef(d.sessionRef);
-          if (d.finalizedBatchIds?.length) setSessionBatchIds(d.finalizedBatchIds);
+        const db = await getDb();
+        // The session belongs to THIS run only: batches parked in _meta by an
+        // earlier run (saved but never submitted) are deliberately not restored
+        // here, so the review panel and Soumèt only ever cover what this wizard
+        // run actually saved. Resuming a draft continues its own run below.
+        if (resumeDraftId) {
+          try {
+            const d = await loadBatchDraft(db, resumeDraftId);
+            if (d) {
+              setDraftId(d.id);
+              setStep(d.step);
+              setSupplierId(d.supplierId);
+              setBubbles((d.bubbles ?? []) as InvBubble[]);
+              setDecisions(d.decisions ?? {});
+              setDraftPrices(d.prices ?? {});
+              setDraftBundles(d.bundles ?? []);
+              if (d.sessionRef) setSessionRef(d.sessionRef);
+              if (d.finalizedBatchIds?.length) setSessionBatchIds(d.finalizedBatchIds);
+              if (typeof d.transport === "string") setTransport(d.transport);
+              if (d.date && isFinite(Date.parse(d.date))) setDate(new Date(d.date));
+            }
+          } catch {}
         }
-      } catch {}
+      } finally {
+        // Hydration is over — autosave/leave-save may write from here on.
+        setDraftReady(true);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resumeDraftId]);
@@ -216,30 +235,46 @@ export default function BatchWizard(props: BatchWizardProps) {
   }, [supplierId]);
 
   // --- draft persistence ---------------------------------------------------
+  function hasContent() {
+    return bubbles.length > 0 || !!supplierId;
+  }
+
   async function persistDraft(next?: Partial<{ step: BatchDraftStep; supplierId: string; bubbles: InvBubble[] }>) {
     try {
       const db = await getDb();
+      // Steps 3/4 build their own working state only when they run, so a
+      // leave from step 1/2 (fresh run or right after a resume) has empty
+      // priceGroups/bundleStates. Falling back to the hydrated copies keeps
+      // stored prices/bundles from being overwritten with {} on every save.
+      const prices = priceGroups.length
+        ? Object.fromEntries(priceGroups.flatMap(g => g.rows.map(r => [r.variantId, r.value])))
+        : draftPrices;
+      const bundles = Object.keys(bundleStates).length
+        ? Object.entries(bundleStates).map(([variantId, s]) => ({
+            variantId, minQuantity: s.min, price: s.price, active: s.on,
+          }))
+        : draftBundles;
       await saveBatchDraft(db, {
         id: draftId,
         step: next?.step ?? step,
         supplierId: next?.supplierId ?? supplierId,
         bubbles: (next?.bubbles ?? bubbles) as DraftBubble[],
-        prices: Object.fromEntries(priceGroups.flatMap(g => g.rows.map(r => [r.variantId, r.value]))),
-        bundles: Object.entries(bundleStates).map(([variantId, s]) => ({
-          variantId, minQuantity: s.min, price: s.price, active: s.on,
-        })),
+        prices,
+        bundles,
         decisions, sessionRef, finalizedBatchIds: sessionBatchIds,
         splitTarget: null,
+        transport,
+        date: date.toISOString(),
         createdAt: "", updatedAt: new Date().toISOString(),
       });
     } catch {}
   }
 
   function requestClose() {
-    const hasContent = bubbles.length > 0 || !!supplierId;
+    const content = hasContent();
     (async () => {
       try {
-        if (hasContent) await persistDraft();
+        if (content) await persistDraft();
         else await deleteBatchDraft(await getDb(), draftId);
       } catch {}
       onClose();
@@ -252,6 +287,31 @@ export default function BatchWizard(props: BatchWizardProps) {
     closeRef.current = requestClose;
     return () => { if (closeRef.current === requestClose) closeRef.current = null; };
   });
+
+  // Autosave — every wizard edit, debounced. Mirrors the POS cart draft
+  // (POSScreen.tsx): whatever was typed is already on disk if the app is
+  // backgrounded or killed, so leaving the screen can never lose it.
+  // draftReady gates it past the async resume read; an empty run writes
+  // nothing (no phantom draft from a bare "+").
+  useEffect(() => {
+    if (!draftReady || finishedRef.current || !hasContent()) return;
+    const t = setTimeout(() => { void persistDraft(); }, 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, supplierId, bubbles, priceGroups, bundleStates, decisions, transport, date, draftReady]);
+
+  // Leave-save — runs when the wizard unmounts for ANY reason (tablet sidebar
+  // tool/tab tap, phone bottom nav, Plis remount, back, logout, deep-link).
+  // The ref is reassigned every render, so this cleanup always sees the live
+  // state; it deliberately does not call onClose (the tree is going away).
+  // Fast Refresh also runs this cleanup — harmless: same draft id, and an
+  // empty run is skipped by hasContent.
+  const leaveSaveRef = useRef<() => void>(() => {});
+  leaveSaveRef.current = () => {
+    if (!draftReady || finishedRef.current || !hasContent()) return;
+    void persistDraft();
+  };
+  useEffect(() => () => leaveSaveRef.current(), []);
 
   function goStep(next: BatchDraftStep) {
     setError("");
@@ -873,6 +933,9 @@ export default function BatchWizard(props: BatchWizardProps) {
       setSessionBatchIds(allIds);
 
       await deleteBatchDraft(db, draftId);
+      // The delivery is on disk — the leave-save that fires when this wizard
+      // unmounts must not re-create the draft we just deleted.
+      finishedRef.current = true;
       try { await loadPricing(db); } catch {}
 
       const splitNames = [...new Set(splitToSave.map(s => supName(s.supplier)))].join(", ");
@@ -974,7 +1037,7 @@ export default function BatchWizard(props: BatchWizardProps) {
     return (
       <View style={{ flex: 1 }}>
         {stepHeader(1, "Founisè", "Chwazi moun k ap vann ou a", { label: "Kontinye", onPress: () => { if (!supplierId) { setError("Chwazi founisè a."); return; } goStep(2); }, disabled: !supplierId })}
-        <ScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 14, gap: 10, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+        <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 14, gap: 10, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
           {error ? errBox(error) : null}
           <View style={{ backgroundColor: inv.card, borderRadius: 20, borderWidth: 0.5, borderColor: inv.border, padding: 14 }}>
             <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Founisè *</Text>
@@ -1039,7 +1102,7 @@ export default function BatchWizard(props: BatchWizardProps) {
               </View>
             ))}
           </View>
-        </ScrollView>
+        </KeyboardSafeScrollView>
       </View>
     );
   }
@@ -1060,7 +1123,7 @@ export default function BatchWizard(props: BatchWizardProps) {
             <Ionicons name="filter" size={20} color={lowOnly ? "#000" : "#fff"} />
           </Pressable>
         </View>
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 4, gap: 10, paddingBottom: bubbles.length ? 110 : 40, ...(isTablet && { flexDirection: "row" as const, flexWrap: "wrap" as const }) }} showsVerticalScrollIndicator={false}>
+        <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 4, gap: 10, paddingBottom: !paneMode && bubbles.length ? 110 : 24 }} showsVerticalScrollIndicator={false}>
           {error ? errBox(error) : null}
           {supplierId && supplierProducts && (
             <Text style={{ fontSize: fs(11), color: inv.sub }}>Ap montre pwodwi {supName(supplierId)} ka founi.</Text>
@@ -1077,14 +1140,14 @@ export default function BatchWizard(props: BatchWizardProps) {
                 onPress={() => { if (canInventory) openAddSheet(p); }}
               />
             );
-            return isTablet
-              ? <View key={p.id} style={{ flexBasis: "48%" as any, flexGrow: 1 }}>{card}</View>
-              : <View key={p.id}>{card}</View>;
+            /* One product per row at every width — the tablet's 2-up card grid
+               crowded the pane once the sticky cart panel took the right side. */
+            return <View key={p.id}>{card}</View>;
           })}
           {products.length === 0 && <EmptyState icon="cube-outline" title="Katalòg vid" sub="Kreye pwodwi anvan" />}
           {products.length > 0 && visibleProducts().length === 0 && <EmptyState icon="search-outline" title="Pa gen rezilta" sub="Chanje rechèch la oswa founisè a" />}
-        </ScrollView>
-        {bubbles.length > 0 && (
+        </KeyboardSafeScrollView>
+        {bubbles.length > 0 && !paneMode && (
           <View style={{ position: "absolute", bottom: 16, left: 14, right: 14, alignItems: "center" }}>
             <Pressable onPress={() => setShowCart(true)} style={{ width: "100%", maxWidth: isTablet ? 560 : 390, backgroundColor: paperPill.bg, borderRadius: radius.pill, paddingVertical: 11, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", ...shadow.soft }}>
               <View style={{ width: 36, height: 36, borderRadius: radius.pill, backgroundColor: paperPill.chip, alignItems: "center", justifyContent: "center" }}>
@@ -1113,7 +1176,7 @@ export default function BatchWizard(props: BatchWizardProps) {
     return (
       <View style={{ flex: 1 }}>
         {stepHeader(3, "Pri vann", `${byProduct.length} pwodwi · pri dat efè`, { label: "Bout", onPress: () => { const e = priceError(); if (e) { setError(e); return; } goStep(4); } }, { label: "Pwodwi", onPress: () => goStep(2) })}
-        <ScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 12, gap: 10, paddingBottom: 24 + (Platform.OS === "android" ? keyboardH : 0) }} showsVerticalScrollIndicator={false}>
+        <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 12, gap: 10, paddingBottom: 24 + (Platform.OS === "android" ? keyboardH : 0) }} showsVerticalScrollIndicator={false}>
           {error ? errBox(error) : null}
           <Text style={{ fontSize: fs(11), color: inv.sub }}>
             Kase chan = nouvo pri dat {todayStr(date)} (istwa konsève). Kite vid = kenbe pri aktyèl la.
@@ -1149,7 +1212,7 @@ export default function BatchWizard(props: BatchWizardProps) {
             </View>
           ))}
           {!priceGroups.length && <EmptyState icon="pricetag-outline" title="Pa gen pri pou mete" sub="Tounen nan etap 2 epi ajoute pwodwi." />}
-        </ScrollView>
+        </KeyboardSafeScrollView>
       </View>
     );
   }
@@ -1192,7 +1255,7 @@ export default function BatchWizard(props: BatchWizardProps) {
     return (
       <View style={{ flex: 1 }}>
         {stepHeader(4, "Bout", `${groups.length} pwodwi · ${itemVars.length} variant · opsyonèl`, { label: "Revizyon", onPress: () => { const e = bundleError(); if (e) { setError(e); return; } openReview(); } }, { label: "Pri vann", onPress: () => goStep(3) })}
-        <ScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 12, gap: 10, paddingBottom: 24 + (Platform.OS === "android" ? keyboardH : 0) }} showsVerticalScrollIndicator={false}>
+        <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }} contentContainerStyle={{ padding: padH, paddingTop: 12, gap: 10, paddingBottom: 24 + (Platform.OS === "android" ? keyboardH : 0) }} showsVerticalScrollIndicator={false}>
           {error ? errBox(error) : null}
           <Text style={{ fontSize: fs(11), color: inv.sub }}>
             Bout = pri an gwo lè kliyan pran anpil. Sòti l si ou pa bezwen l — istwa li rete.
@@ -1240,7 +1303,7 @@ export default function BatchWizard(props: BatchWizardProps) {
             </View>
           ))}
           {!itemVars.length && <EmptyState icon="albums-outline" title="Pa gen variant" sub="Tounen nan etap 2 epi ajoute pwodwi." />}
-        </ScrollView>
+        </KeyboardSafeScrollView>
       </View>
     );
   }
@@ -1250,7 +1313,7 @@ export default function BatchWizard(props: BatchWizardProps) {
     return (
       <Modal visible={!!selectedProduct} transparent animationType="slide" onRequestClose={closeAddSheet}>
         <KeyboardAvoidingView enabled={Platform.OS === "ios"} behavior="padding" keyboardVerticalOffset={0} style={{ flex: 1 }}>
-          <SafeAreaView style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <SafeScreen style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
             <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", flex: 1, backgroundColor: inv.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: inv.border, overflow: "hidden" }}>
               <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 14, borderBottomWidth: 0.5, borderColor: inv.hairline }}>
                 <View style={{ width: 36, height: 4, backgroundColor: inv.borderStrong, borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
@@ -1267,7 +1330,7 @@ export default function BatchWizard(props: BatchWizardProps) {
                   </Pressable>
                 </View>
               </View>
-              <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16 }}>
+              <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16 }}>
                 {selectedProduct && invUnits(selectedProduct.id).length > 1 && (
                   <View style={{ flexDirection: "row", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
                     {invUnits(selectedProduct.id).map(u => {
@@ -1314,7 +1377,7 @@ export default function BatchWizard(props: BatchWizardProps) {
                   );
                 })()}
                 <Text style={{ fontSize: fs(10), color: inv.faint, marginTop: 8, textAlign: "center" }}>Pri vann yo mete nan etap 3.</Text>
-              </ScrollView>
+              </KeyboardSafeScrollView>
               <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: (Platform.OS === "android" ? keyboardH : 0) + 20, borderTopWidth: 0.5, borderColor: inv.hairline, gap: 10 }}>
                 {error ? <View>{errBox(error)}</View> : null}
                 <View style={{ flexDirection: "row", gap: 8 }}>
@@ -1334,9 +1397,102 @@ export default function BatchWizard(props: BatchWizardProps) {
                 </View>
               </View>
             </View>
-          </SafeAreaView>
+          </SafeScreen>
         </KeyboardAvoidingView>
       </Modal>
+    );
+  }
+
+  // Shared cart contents — the phone cart sheet and the tablet sticky panel
+  // both render this (checkout's CartLineRow design: dark card · name + ✕ ·
+  // PRI / QTÉ / SOU-TOTAL columns).
+  function renderCartBody() {
+    return (
+      <>
+        {bubbles.map((b, idx) => (
+          <Pressable key={idx} onPress={() => openEditSheet(idx, b)} style={{ backgroundColor: "#141414", borderRadius: 18, padding: 14, borderWidth: 1, borderColor: "#2b2b2b" }}>
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <Text style={{ flex: 1, fontWeight: "700", fontSize: fs(15), color: "#fff" }} numberOfLines={1}>{b.name}</Text>
+              <Pressable onPress={() => setBubbles(prev => prev.filter((_, i) => i !== idx))} hitSlop={8} style={{ width: 30, height: 30, borderRadius: 8, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
+                <Text style={{ color: "#f87171", fontWeight: "900", fontSize: fs(13) }}>✕</Text>
+              </Pressable>
+            </View>
+            <View style={{ flexDirection: "row", marginTop: 12, alignItems: "flex-start" }}>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: fs(10), fontWeight: "700", letterSpacing: 1, color: "#8e8e93" }}>PRI</Text>
+                <Text style={{ marginTop: 3, ...monoStyle, fontWeight: "800", fontSize: fs(16), color: "#fff" }}>{fmt(b.costPrice, 2)}</Text>
+                <Text style={{ fontSize: fs(10), color: "#8e8e93", fontWeight: "600" }}>G / {b.unitName ?? b.unit ?? "pcs"}</Text>
+              </View>
+              <View style={{ alignItems: "center", marginHorizontal: 6 }}>
+                <Text style={{ fontSize: fs(10), fontWeight: "700", letterSpacing: 1, color: "#8e8e93" }}>QTÉ</Text>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 5 }}>
+                  <Pressable onPress={() => decBubble(idx)} style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+                    <Text style={{ fontWeight: "900", fontSize: fs(16), color: "#fff" }}>−</Text>
+                  </Pressable>
+                  <Pressable onPress={() => openEditSheet(idx, b)} style={{ width: 52, height: 34, borderRadius: 8, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+                    <Text style={{ fontWeight: "900", ...monoStyle, fontSize: fs(15), color: "#fff" }}>{b.qty}</Text>
+                  </Pressable>
+                  <Pressable onPress={() => incBubble(idx)} style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: "#2f80ed", alignItems: "center", justifyContent: "center" }}>
+                    <Text style={{ color: "white", fontWeight: "900", fontSize: fs(16) }}>+</Text>
+                  </Pressable>
+                </View>
+              </View>
+              <View style={{ flex: 1, alignItems: "flex-end" }}>
+                <Text style={{ fontSize: fs(10), fontWeight: "700", letterSpacing: 1, color: "#8e8e93" }}>SOU-TOTAL</Text>
+                <Text style={{ marginTop: 3, ...monoStyle, fontWeight: "900", fontSize: fs(15), color: "#fff" }}>{fmtG(b.qty * b.costPrice)}</Text>
+              </View>
+            </View>
+            {Number(b.factor) > 1 ? (
+              <Text style={{ fontSize: fs(10), color: "#8e8e93", marginTop: 8 }}>{fmt(b.qty * Number(b.factor))} inite baz</Text>
+            ) : null}
+          </Pressable>
+        ))}
+        {!bubbles.length ? (
+          <View style={{ backgroundColor: inv.card, borderWidth: 1, borderColor: inv.border, borderRadius: 18, padding: 20, alignItems: "center" }}>
+            <Text style={{ color: inv.sub, fontWeight: "600", fontSize: fs(12) }}>Pwodwi vid</Text>
+            <Text style={{ color: inv.faint, fontSize: fs(11), marginTop: 4, textAlign: "center" }}>Tape yon pwodwi sou lis la pou ajoute l.</Text>
+          </View>
+        ) : null}
+      </>
+    );
+  }
+
+  function renderCartTotalCard() {
+    return (
+      <View style={{ backgroundColor: "#141414", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 18, padding: 14 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <Text style={{ fontSize: fs(16), fontWeight: "800", color: "#fff" }}>Total acha</Text>
+          <Text style={{ fontSize: fs(17), fontWeight: "900", color: "#2f80ed", ...monoStyle }}>{fmtG(itemsCost())}</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Tablet two-pane right column — checkout's sticky cart card (POSTablet).
+  // Persistent on every wizard step; the floating pill and cart sheet take
+  // over only when paneMode is off.
+  function renderCartPanel() {
+    return (
+      <View style={{ flex: 2, minWidth: 300, marginTop: 12, backgroundColor: "#000", borderRadius: radius.lg, borderWidth: 0.5, borderColor: "#262626", ...shadow.card, padding: 14 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: inv.tile, borderWidth: 0.5, borderColor: inv.borderStrong, alignItems: "center", justifyContent: "center" }}>
+            <Ionicons name="chatbubble-ellipses-outline" size={17} color="#fff" />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontWeight: "800", fontSize: fs(14), color: inv.text }}>Atik nan livrezon</Text>
+            <Text style={{ fontSize: fs(10), color: inv.sub }}>{bubbles.length} pwodwi · {fmtG(itemsCost())}</Text>
+          </View>
+          {bubbles.length > 0 ? (
+            <Pressable onPress={() => setBubbles([])} style={{ backgroundColor: inv.redBg, borderWidth: 1, borderColor: inv.redBd, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6 }}>
+              <Text style={{ color: inv.red, fontWeight: "800", fontSize: fs(11) }}>Vide</Text>
+            </Pressable>
+          ) : null}
+        </View>
+        <KeyboardSafeScrollView style={{ flex: 1, marginTop: 12 }} contentContainerStyle={{ gap: 8, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
+          {renderCartBody()}
+        </KeyboardSafeScrollView>
+        <View style={{ marginTop: 4 }}>{renderCartTotalCard()}</View>
+      </View>
     );
   }
 
@@ -1344,7 +1500,7 @@ export default function BatchWizard(props: BatchWizardProps) {
     return (
       <Modal visible={showCart} transparent animationType="slide" onRequestClose={() => setShowCart(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0} style={{ flex: 1 }}>
-          <SafeAreaView style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <SafeScreen style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
             <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", flex: 1, backgroundColor: inv.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: inv.border, overflow: "hidden" }}>
               <View style={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 10, borderBottomWidth: 0.5, borderColor: inv.hairline }}>
                 <View style={{ width: 36, height: 4, backgroundColor: inv.borderStrong, borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
@@ -1361,67 +1517,15 @@ export default function BatchWizard(props: BatchWizardProps) {
                   </Pressable>
                 </View>
               </View>
-              {/* Same row design as checkout's CartLineRow (POSShared): dark
-                  card · name + ✕ · PRI / QTÉ / SOU-TOTAL columns. */}
-              <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
-                {bubbles.map((b, idx) => (
-                  <Pressable key={idx} onPress={() => openEditSheet(idx, b)} style={{ backgroundColor: "#141414", borderRadius: 18, padding: 14, borderWidth: 1, borderColor: "#2b2b2b" }}>
-                    <View style={{ flexDirection: "row", alignItems: "center" }}>
-                      <Text style={{ flex: 1, fontWeight: "700", fontSize: fs(15), color: "#fff" }} numberOfLines={1}>{b.name}</Text>
-                      <Pressable onPress={() => setBubbles(prev => prev.filter((_, i) => i !== idx))} hitSlop={8} style={{ width: 30, height: 30, borderRadius: 8, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
-                        <Text style={{ color: "#f87171", fontWeight: "900", fontSize: fs(13) }}>✕</Text>
-                      </Pressable>
-                    </View>
-                    <View style={{ flexDirection: "row", marginTop: 12, alignItems: "flex-start" }}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ fontSize: fs(10), fontWeight: "700", letterSpacing: 1, color: "#8e8e93" }}>PRI</Text>
-                        <Text style={{ marginTop: 3, ...monoStyle, fontWeight: "800", fontSize: fs(16), color: "#fff" }}>{fmt(b.costPrice, 2)}</Text>
-                        <Text style={{ fontSize: fs(10), color: "#8e8e93", fontWeight: "600" }}>G / {b.unitName ?? b.unit ?? "pcs"}</Text>
-                      </View>
-                      <View style={{ alignItems: "center", marginHorizontal: 6 }}>
-                        <Text style={{ fontSize: fs(10), fontWeight: "700", letterSpacing: 1, color: "#8e8e93" }}>QTÉ</Text>
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 5 }}>
-                          <Pressable onPress={() => decBubble(idx)} style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
-                            <Text style={{ fontWeight: "900", fontSize: fs(16), color: "#fff" }}>−</Text>
-                          </Pressable>
-                          <Pressable onPress={() => openEditSheet(idx, b)} style={{ width: 52, height: 34, borderRadius: 8, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
-                            <Text style={{ fontWeight: "900", ...monoStyle, fontSize: fs(15), color: "#fff" }}>{b.qty}</Text>
-                          </Pressable>
-                          <Pressable onPress={() => incBubble(idx)} style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: "#2f80ed", alignItems: "center", justifyContent: "center" }}>
-                            <Text style={{ color: "white", fontWeight: "900", fontSize: fs(16) }}>+</Text>
-                          </Pressable>
-                        </View>
-                      </View>
-                      <View style={{ flex: 1, alignItems: "flex-end" }}>
-                        <Text style={{ fontSize: fs(10), fontWeight: "700", letterSpacing: 1, color: "#8e8e93" }}>SOU-TOTAL</Text>
-                        <Text style={{ marginTop: 3, ...monoStyle, fontWeight: "900", fontSize: fs(15), color: "#fff" }}>{fmtG(b.qty * b.costPrice)}</Text>
-                      </View>
-                    </View>
-                    {Number(b.factor) > 1 ? (
-                      <Text style={{ fontSize: fs(10), color: "#8e8e93", marginTop: 8 }}>{fmt(b.qty * Number(b.factor))} inite baz</Text>
-                    ) : null}
-                  </Pressable>
-                ))}
-                {!bubbles.length ? (
-                  <View style={{ backgroundColor: inv.card, borderWidth: 1, borderColor: inv.border, borderRadius: 18, padding: 20, alignItems: "center" }}>
-                    <Text style={{ color: inv.sub, fontWeight: "600", fontSize: fs(12) }}>Pwodwi vid</Text>
-                    <Text style={{ color: inv.faint, fontSize: fs(11), marginTop: 4, textAlign: "center" }}>Fèmen epi ajoute atik sou lis la.</Text>
-                  </View>
-                ) : null}
-              </ScrollView>
-              {/* Foot — same #141414 card the checkout cart foot uses; only the
-                  total stays pinned at every list length (close via ✕, then the
-                  header's "Pri vann" advances). */}
+              {/* Lines + total shared with the tablet cart panel. */}
+              <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
+                {renderCartBody()}
+              </KeyboardSafeScrollView>
               <View style={{ padding: 12, borderTopWidth: 0.5, borderColor: inv.hairline }}>
-                <View style={{ backgroundColor: "#141414", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 18, padding: 14 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                    <Text style={{ fontSize: fs(16), fontWeight: "800", color: "#fff" }}>Total acha</Text>
-                    <Text style={{ fontSize: fs(17), fontWeight: "900", color: "#2f80ed", ...monoStyle }}>{fmtG(itemsCost())}</Text>
-                  </View>
-                </View>
+                {renderCartTotalCard()}
               </View>
             </View>
-          </SafeAreaView>
+          </SafeScreen>
         </KeyboardAvoidingView>
       </Modal>
     );
@@ -1439,7 +1543,7 @@ export default function BatchWizard(props: BatchWizardProps) {
     return (
       <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 }}>
         <KeyboardAvoidingView enabled={Platform.OS === "ios"} behavior="padding" keyboardVerticalOffset={0} style={{ flex: 1 }}>
-          <SafeAreaView style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <SafeScreen style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
             <View style={{ ...sheetBox(isTablet, width, 680), width: "100%", flex: 1, backgroundColor: inv.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: inv.border, overflow: "hidden" }}>
               <View style={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: 14, borderBottomWidth: 0.5, borderColor: inv.hairline }}>
                 <View style={{ width: 36, height: 4, backgroundColor: inv.borderStrong, borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
@@ -1453,7 +1557,7 @@ export default function BatchWizard(props: BatchWizardProps) {
                   </View>
                 </View>
               </View>
-              <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16 }}>
+              <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 14, paddingBottom: 16 }}>
 
                 {error ? <View style={{ marginTop: 10 }}>{errBox(error)}</View> : null}
 
@@ -1527,7 +1631,7 @@ export default function BatchWizard(props: BatchWizardProps) {
                   <Text style={{ fontSize: fs(10), color: inv.faint }}>Frè transpò antre nan etap Transpò a epi li distribye otomatikman sou chak atik.</Text>
                 </View>
 
-              </ScrollView>
+              </KeyboardSafeScrollView>
               <View style={{ flexDirection: "row", gap: 8, padding: 16, paddingBottom: (Platform.OS === "android" ? keyboardH : 0) + 20, borderTopWidth: 0.5, borderColor: inv.hairline }}>
                 <Pressable onPress={() => { setShowReview(false); setError(""); }} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, alignItems: "center", borderWidth: 1, borderColor: inv.borderStrong }}>
                     <Text style={{ fontWeight: "700", color: "#fff", fontSize: fs(14) }}>Retounen</Text>
@@ -1539,7 +1643,7 @@ export default function BatchWizard(props: BatchWizardProps) {
                   </Pressable>
                 </View>
               </View>
-          </SafeAreaView>
+          </SafeScreen>
         </KeyboardAvoidingView>
       </View>
     );
@@ -1547,14 +1651,30 @@ export default function BatchWizard(props: BatchWizardProps) {
 
   if (!canInventory) return null;
 
-  return (
-    <View style={{ flex: 1 }}>
+  const steps = (
+    <>
       {step === 1 && renderStep1()}
       {step === 2 && renderStep2()}
       {step === 3 && renderStep3()}
       {step === 4 && renderStep4()}
+    </>
+  );
+
+  return (
+    <View style={{ flex: 1 }}>
+      {paneMode ? (
+        /* Two-pane — mirrors checkout's tablet layout: step content left,
+           sticky cart card right, on every step. paddingRight keeps the
+           right gutter while each step's own padH spacing stays intact. */
+        <View style={{ flex: 1, flexDirection: "row", gap: 12, paddingRight: padH, paddingBottom: 12 }}>
+          <View style={{ flex: 3, minWidth: 0 }}>{steps}</View>
+          {renderCartPanel()}
+        </View>
+      ) : (
+        steps
+      )}
       {renderAddSheet()}
-      {renderCartSheet()}
+      {!paneMode && renderCartSheet()}
       {renderReviewSheet()}
       <UploadTransition visible={upBusy} phase={upPhase} title={upTitle} detail={upMsg} />
     </View>

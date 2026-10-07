@@ -3,9 +3,11 @@ import { radius } from "../theme";
 import { View, Text, Pressable, TextInput, Alert, ScrollView, KeyboardAvoidingView, Platform, Modal } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb } from "../db";
+import { useSalesEvents } from "../salesEvents";
 import type { Role } from "../users";
 import { fmtG, fmt } from "../format";
 import { useResponsive, sheetBox } from "../responsive";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { loadPricing, type PricingMaps } from "../pricing";
 import {
   loadCatalogModel, currentBaseCost, receiveV2Batch,
@@ -15,11 +17,12 @@ import BatchWizard, { type WizardSaved } from "./inventory/BatchWizard";
 import { normName } from "./CatalogShared";
 import { inv, fs } from "./inventory/inventoryTheme";
 import {
-  listBatchDrafts, deleteBatchDraft, purgeExpiredBatchDrafts,
+  listBatchDrafts, deleteBatchDraft, purgeExpiredBatchDrafts, subscribeBatchDrafts,
   type BatchDraftSummary,
 } from "../inventory/batchDraft";
 import { uploadError } from "../components/UploadTransition";
 import { MoneyInput } from "../components/maskedInput";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 type Category = { id: string; name: string; icon: string; color: string };
 type Product = { id: string; name: string; sku?: string; barcode?: string; category_id?: string; stock_quantity: number; low_stock_threshold: number; cost_price: number; selling_price?: number; unit?: string };
@@ -63,6 +66,8 @@ type DeliverGroup = {
 
 export default function InventoryScreen({ role = "cashier", currentUser, onClose, onSaved }: { role?: Role; currentUser?: any; onClose: () => void; onSaved?: () => void }) {
   const { width, isTablet, padH } = useResponsive();
+  const paneW = Math.min(430, Math.max(330, Math.round(width * 0.36)));
+  const insets = useSafeAreaInsets();
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [productCategories, setProductCategories] = useState<{ product_id: string; category_id: string }[]>([]);
@@ -137,7 +142,20 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
       } catch { setDrafts([]); }
     } catch {}
   }
+  async function refreshDrafts() {
+    try {
+      const db = await getDb();
+      await purgeExpiredBatchDrafts(db);
+      setDrafts(await listBatchDrafts(db));
+    } catch {}
+  }
   useEffect(() => { load(); }, []);
+  // A draft can land AFTER the wizard already unmounted (the leave-save is
+  // fire-and-forget), so the Brouyon tag/count can't rely on the mount read
+  // alone: any save or delete re-reads `_meta` and repaints the list.
+  useEffect(() => subscribeBatchDrafts(() => { void refreshDrafts(); }), []);
+  // Live: refreshed after any pull that brought stock/batch rows.
+  useSalesEvents(() => { load().catch(() => {}); });
 
   const supName = (id: string) => suppliers.find(s => s.id === id)?.name ?? "?";
 
@@ -534,9 +552,126 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
     { k: "draft" as const, label: "Brouyon", count: statusCounts.draft },
   ];
 
+  const deliverDetail = (
+    <View style={{ flex: 1, backgroundColor: "#000", paddingBottom: isTablet ? 0 : insets.bottom }}>
+          <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: isTablet ? 16 : insets.top + 12, paddingBottom: 12, gap: 10 }}>
+            <View style={{ flex: 1 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Text style={{ fontWeight: "800", fontSize: fs(18), color: paper, flex: 1 }} numberOfLines={1}>
+                  {activeGroup?.ref || activeGroup?.supplierName}
+                </Text>
+                {activeGroup ? statusPill(activeGroup.status) : null}
+              </View>
+              <Text style={{ fontSize: fs(12), color: paperSub, marginTop: 2 }} numberOfLines={1}>
+                {activeGroup?.ref ? `${activeGroup.supplierName} · ` : ""}{activeGroup ? fmtDateHt(activeGroup.date) : ""} · {activeGroup?.lines.length ?? 0} pwodui
+              </Text>
+            </View>
+            <Pressable onPress={() => detailBusy ? Alert.alert("Ap travay", "Yon aksyon ap trete — tann li fini anvan ou fèmen.") : setDeliverKey(null)} style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}>
+              <Ionicons name="close" size={30} color="#fff" />
+            </Pressable>
+          </View>
+          <View style={{ height: 1, backgroundColor: cardDiv }} />
+          <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+            {(activeGroup?.lines ?? []).map(l => {
+              const st = String(l.batch.status ?? "pending");
+              const isPend = st === "pending";
+              return (
+                <View key={String(l.batch.id)} style={{ backgroundColor: cardBg, borderRadius: 16, borderWidth: 1, borderColor: cardBd, padding: 12, gap: 8, opacity: isPend ? 1 : 0.75 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontWeight: "800", fontSize: fs(15), color: paper }} numberOfLines={1}>{l.productName}</Text>
+                      <Text style={{ fontSize: fs(12), color: paperSub, marginTop: 2 }} numberOfLines={1}>
+                        {fmt(Number(l.batch.quantity) || 0)} {l.itemName} · {fmtG(Math.round(Number(l.batch.total_paid) || 0))}
+                      </Text>
+                      {(l.batch as any).reason ? <Text style={{ fontSize: fs(11), color: paperSub, marginTop: 2 }} numberOfLines={2}>Nòt: {(l.batch as any).reason}</Text> : null}
+                    </View>
+                    {statusPill(st)}
+                  </View>
+                  {isPend && canAdminOwner ? (
+                    <View style={{ flexDirection: "row", gap: 8 }}>
+                      <Pressable onPress={() => handleReceiveLine(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
+                        <Text style={{ fontWeight: "800", fontSize: fs(13), color: "#000" }}>{detailBusy ? "Ap trete…" : "Rive ✓"}</Text>
+                      </Pressable>
+                      <Pressable onPress={() => openLineEdit(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.borderStrong, alignItems: "center" }}>
+                        <Text style={{ fontWeight: "700", fontSize: fs(13), color: "#fff" }}>Modifye</Text>
+                      </Pressable>
+                      <Pressable onPress={() => openLineDeny(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.redBd, alignItems: "center" }}>
+                        <Text style={{ fontWeight: "700", fontSize: fs(13), color: inv.red }}>Refize</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })}
+          </KeyboardSafeScrollView>
+          {/* Per-line edit/refuse sheet — inline overlay, NOT a second Modal:
+              a Modal stacked over the detail Modal doesn't present reliably,
+              so the sheet lives inside the detail window and always appears. */}
+          {lineModal ? (
+          <View style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+            <Pressable onPress={() => setLineModal(null)} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0 }} />
+            <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0} style={{ width: "100%" }}>
+            <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: inv.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: inv.border, padding: 16, paddingBottom: 28 + insets.bottom }}>
+              <View style={{ width: 36, height: 4, backgroundColor: inv.borderStrong, borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
+              <Text style={{ fontWeight: "800", fontSize: fs(15), color: inv.text }} numberOfLines={1}>{lineModal?.line.productName}</Text>
+              <Text style={{ fontSize: fs(11), color: inv.sub, marginTop: 2 }} numberOfLines={1}>
+                {lineModal ? `${fmt(Number(lineModal.line.batch.quantity) || 0)} ${lineModal.line.itemName} · ${fmtG(Math.round(Number(lineModal.line.batch.total_paid) || 0))}` : ""}
+              </Text>
+              {lineModal?.mode === "edit" ? (
+                <View style={{ gap: 10, marginTop: 12 }}>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Kantite *</Text>
+                      <TextInput value={eQty} onChangeText={v => setEQty(v.replace(/[^0-9.]/g, ""))} keyboardType="numeric" placeholder="0" placeholderTextColor={inv.faint}
+                        style={{ height: 56, borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, marginTop: 6, fontWeight: "800", fontSize: fs(15), color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Total peye (G) *</Text>
+                      <MoneyInput value={eTotal} onChangeText={v => setETotal(v)} keyboardType="numeric" placeholder="0" placeholderTextColor={inv.faint}
+                        style={{ height: 56, borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, marginTop: 6, fontWeight: "800", fontSize: fs(15), color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
+                    </View>
+                  </View>
+                  <View>
+                    <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Nòt (opsyonèl)</Text>
+                    <TextInput value={eNote} onChangeText={setENote} placeholder="Eg. 2 katon domaje" placeholderTextColor={inv.faint}
+                      style={{ borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 12, marginTop: 6, fontSize: fs(14), color: "#fff", backgroundColor: "transparent", minHeight: 48 }} />
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <Pressable onPress={() => setLineModal(null)} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, alignItems: "center", borderWidth: 1, borderColor: inv.borderStrong }}>
+                      <Text style={{ fontWeight: "700", color: "#fff", fontSize: fs(14) }}>Anile</Text>
+                    </Pressable>
+                    <Pressable onPress={saveLineEdit} disabled={detailBusy} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#fff", borderRadius: 12, alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
+                      <Text style={{ color: "#000", fontWeight: "800", fontSize: fs(14) }}>Mete ajou</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : (
+                <View style={{ gap: 10, marginTop: 12 }}>
+                  <View>
+                    <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Rezon refi a *</Text>
+                    <TextInput value={eReason} onChangeText={setEReason} placeholder="Eg. machandiz gate" placeholderTextColor={inv.faint}
+                      style={{ borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 12, marginTop: 6, fontSize: fs(14), color: "#fff", backgroundColor: "transparent", minHeight: 48 }} />
+                  </View>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <Pressable onPress={() => setLineModal(null)} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, alignItems: "center", borderWidth: 1, borderColor: inv.borderStrong }}>
+                      <Text style={{ fontWeight: "700", color: "#fff", fontSize: fs(14) }}>Anile</Text>
+                    </Pressable>
+                    <Pressable onPress={confirmLineDeny} disabled={detailBusy} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#c0392b", borderRadius: 12, alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
+                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: fs(14) }}>Konfime refi</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
+            </View>
+            </KeyboardAvoidingView>
+          </View>
+          ) : null}
+    </View>
+  );
+
   return (
-    <View style={{ flex: 1, backgroundColor: "#000", alignItems: isTablet ? "center" : undefined }}>
-      <View style={{ width: "100%", flex: 1 }}>
+    <View style={{ flex: 1, backgroundColor: "#000", flexDirection: isTablet && !creating ? "row" : "column" }}>
+      <View style={{ width: isTablet && !creating ? paneW : undefined, flex: isTablet && !creating ? undefined : 1, borderRightWidth: isTablet && !creating ? 1 : 0, borderRightColor: "#1c1c1f" }}>
       {/* Title + add (Customers header language). Hidden while the wizard runs
           so the add-inventory flow owns the full screen height — its own
           header carries the close button, on the left. */}
@@ -616,13 +751,13 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
           onClose={closeWizard}
         />
       ) : statusTag === "draft" ? (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 40, paddingTop: 12 }} showsVerticalScrollIndicator={false}>
+        <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 40, paddingTop: 12 }} showsVerticalScrollIndicator={false}>
           {drafts.length === 0
             ? emptyState("document-text-outline", "Pa gen brouyon", "Livrezon ki pa fini konsève isit la 14 jou pou ou ka kontinye l pi ta.")
             : drafts.map(d => renderDraftCard(d))}
-        </ScrollView>
+        </KeyboardSafeScrollView>
       ) : (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 40, paddingTop: 12 }} showsVerticalScrollIndicator={false}>
+        <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 40, paddingTop: 12 }} showsVerticalScrollIndicator={false}>
           {shownGroups.length === 0
             ? deliveryQuery
               ? emptyState("search-outline", "Pa gen rezilta", "Chanje rechèch la.")
@@ -632,128 +767,28 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
                   ? emptyState("checkmark-circle-outline", "Poko gen livrezon rive", "Livrezon ki rive ap parèt isit la.")
                   : emptyState("close-circle-outline", "Poko gen refi", "Batch ki refize ap parèt isit la.")
             : shownGroups.map(g => renderGroupCard(g, { receive: true }))}
-        </ScrollView>
+        </KeyboardSafeScrollView>
       )}
 
-      {/* Batch detail (Verifye) — full height. Per-line verify + receive,
-          Admin/Owner only; received lines land in stock immediately. */}
-      <Modal visible={!!activeGroup} transparent animationType="slide" onRequestClose={() => !detailBusy && setDeliverKey(null)}>
-        <View style={{ flex: 1, backgroundColor: "#000" }}>
-          <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 60, paddingBottom: 12, gap: 10 }}>
-            <View style={{ flex: 1 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Text style={{ fontWeight: "800", fontSize: fs(18), color: paper, flex: 1 }} numberOfLines={1}>
-                  {activeGroup?.ref || activeGroup?.supplierName}
-                </Text>
-                {activeGroup ? statusPill(activeGroup.status) : null}
-              </View>
-              <Text style={{ fontSize: fs(12), color: paperSub, marginTop: 2 }} numberOfLines={1}>
-                {activeGroup?.ref ? `${activeGroup.supplierName} · ` : ""}{activeGroup ? fmtDateHt(activeGroup.date) : ""} · {activeGroup?.lines.length ?? 0} pwodui
-              </Text>
-            </View>
-            <Pressable onPress={() => detailBusy ? Alert.alert("Ap travay", "Yon aksyon ap trete — tann li fini anvan ou fèmen.") : setDeliverKey(null)} style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}>
-              <Ionicons name="close" size={30} color="#fff" />
-            </Pressable>
-          </View>
-          <View style={{ height: 1, backgroundColor: cardDiv }} />
-          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
-            {(activeGroup?.lines ?? []).map(l => {
-              const st = String(l.batch.status ?? "pending");
-              const isPend = st === "pending";
-              return (
-                <View key={String(l.batch.id)} style={{ backgroundColor: cardBg, borderRadius: 16, borderWidth: 1, borderColor: cardBd, padding: 12, gap: 8, opacity: isPend ? 1 : 0.75 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontWeight: "800", fontSize: fs(15), color: paper }} numberOfLines={1}>{l.productName}</Text>
-                      <Text style={{ fontSize: fs(12), color: paperSub, marginTop: 2 }} numberOfLines={1}>
-                        {fmt(Number(l.batch.quantity) || 0)} {l.itemName} · {fmtG(Math.round(Number(l.batch.total_paid) || 0))}
-                      </Text>
-                      {(l.batch as any).reason ? <Text style={{ fontSize: fs(11), color: paperSub, marginTop: 2 }} numberOfLines={2}>Nòt: {(l.batch as any).reason}</Text> : null}
-                    </View>
-                    {statusPill(st)}
-                  </View>
-                  {isPend && canAdminOwner ? (
-                    <View style={{ flexDirection: "row", gap: 8 }}>
-                      <Pressable onPress={() => handleReceiveLine(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
-                        <Text style={{ fontWeight: "800", fontSize: fs(13), color: "#000" }}>{detailBusy ? "Ap trete…" : "Rive ✓"}</Text>
-                      </Pressable>
-                      <Pressable onPress={() => openLineEdit(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.borderStrong, alignItems: "center" }}>
-                        <Text style={{ fontWeight: "700", fontSize: fs(13), color: "#fff" }}>Modifye</Text>
-                      </Pressable>
-                      <Pressable onPress={() => openLineDeny(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.redBd, alignItems: "center" }}>
-                        <Text style={{ fontWeight: "700", fontSize: fs(13), color: inv.red }}>Refize</Text>
-                      </Pressable>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })}
-          </ScrollView>
-          {/* Per-line edit/refuse sheet — inline overlay, NOT a second Modal:
-              a Modal stacked over the detail Modal doesn't present reliably,
-              so the sheet lives inside the detail window and always appears. */}
-          {lineModal ? (
-          <View style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-            <Pressable onPress={() => setLineModal(null)} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0 }} />
-            <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0} style={{ width: "100%" }}>
-            <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: inv.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: inv.border, padding: 16, paddingBottom: 28 }}>
-              <View style={{ width: 36, height: 4, backgroundColor: inv.borderStrong, borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
-              <Text style={{ fontWeight: "800", fontSize: fs(15), color: inv.text }} numberOfLines={1}>{lineModal?.line.productName}</Text>
-              <Text style={{ fontSize: fs(11), color: inv.sub, marginTop: 2 }} numberOfLines={1}>
-                {lineModal ? `${fmt(Number(lineModal.line.batch.quantity) || 0)} ${lineModal.line.itemName} · ${fmtG(Math.round(Number(lineModal.line.batch.total_paid) || 0))}` : ""}
-              </Text>
-              {lineModal?.mode === "edit" ? (
-                <View style={{ gap: 10, marginTop: 12 }}>
-                  <View style={{ flexDirection: "row", gap: 8 }}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Kantite *</Text>
-                      <TextInput value={eQty} onChangeText={v => setEQty(v.replace(/[^0-9.]/g, ""))} keyboardType="numeric" placeholder="0" placeholderTextColor={inv.faint}
-                        style={{ height: 56, borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, marginTop: 6, fontWeight: "800", fontSize: fs(15), color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Total peye (G) *</Text>
-                      <MoneyInput value={eTotal} onChangeText={v => setETotal(v)} keyboardType="numeric" placeholder="0" placeholderTextColor={inv.faint}
-                        style={{ height: 56, borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, marginTop: 6, fontWeight: "800", fontSize: fs(15), color: "#fff", backgroundColor: "transparent", textAlign: "center" }} />
-                    </View>
-                  </View>
-                  <View>
-                    <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Nòt (opsyonèl)</Text>
-                    <TextInput value={eNote} onChangeText={setENote} placeholder="Eg. 2 katon domaje" placeholderTextColor={inv.faint}
-                      style={{ borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 12, marginTop: 6, fontSize: fs(14), color: "#fff", backgroundColor: "transparent", minHeight: 48 }} />
-                  </View>
-                  <View style={{ flexDirection: "row", gap: 8 }}>
-                    <Pressable onPress={() => setLineModal(null)} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, alignItems: "center", borderWidth: 1, borderColor: inv.borderStrong }}>
-                      <Text style={{ fontWeight: "700", color: "#fff", fontSize: fs(14) }}>Anile</Text>
-                    </Pressable>
-                    <Pressable onPress={saveLineEdit} disabled={detailBusy} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#fff", borderRadius: 12, alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
-                      <Text style={{ color: "#000", fontWeight: "800", fontSize: fs(14) }}>Mete ajou</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              ) : (
-                <View style={{ gap: 10, marginTop: 12 }}>
-                  <View>
-                    <Text style={{ fontWeight: "700", fontSize: fs(12), color: inv.text }}>Rezon refi a *</Text>
-                    <TextInput value={eReason} onChangeText={setEReason} placeholder="Eg. machandiz gate" placeholderTextColor={inv.faint}
-                      style={{ borderWidth: 1, borderColor: inv.borderStrong, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 12, marginTop: 6, fontSize: fs(14), color: "#fff", backgroundColor: "transparent", minHeight: 48 }} />
-                  </View>
-                  <View style={{ flexDirection: "row", gap: 8 }}>
-                    <Pressable onPress={() => setLineModal(null)} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, alignItems: "center", borderWidth: 1, borderColor: inv.borderStrong }}>
-                      <Text style={{ fontWeight: "700", color: "#fff", fontSize: fs(14) }}>Anile</Text>
-                    </Pressable>
-                    <Pressable onPress={confirmLineDeny} disabled={detailBusy} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#c0392b", borderRadius: 12, alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
-                      <Text style={{ color: "#fff", fontWeight: "800", fontSize: fs(14) }}>Konfime refi</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              )}
-            </View>
-            </KeyboardAvoidingView>
-          </View>
-          ) : null}
-        </View>
+      {/* Batch detail (Verifye) — inline right pane on tablet, full-screen
+          Modal on phone. Per-line verify + receive; received lines land in stock. */}
+      <Modal visible={!!activeGroup && !isTablet} transparent animationType="slide" onRequestClose={() => !detailBusy && setDeliverKey(null)}>
+        {deliverDetail}
       </Modal>
       </View>
+      {isTablet && !creating ? (
+        <View style={{ flex: 1, backgroundColor: "#000" }}>
+          {activeGroup ? deliverDetail : (
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+              <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(47,128,237,0.12)", borderWidth: 1, borderColor: "rgba(47,128,237,0.3)", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="cube-outline" size={28} color="#2f80ed" />
+              </View>
+              <Text style={{ color: "#fff", fontWeight: "800", fontSize: 16, marginTop: 14, textAlign: "center" }}>Chwazi yon livrezon</Text>
+              <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 6, textAlign: "center", lineHeight: 19 }}>Tape yon kat livrezon pou wè detay li isit la.</Text>
+            </View>
+          )}
+        </View>
+      ) : null}
     </View>
   );
 }

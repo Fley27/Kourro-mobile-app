@@ -323,6 +323,8 @@ CREATE TABLE IF NOT EXISTS customers (
   credit_limit_source TEXT,
   is_high_risk INTEGER DEFAULT 0,
   open_debt_count INTEGER DEFAULT 0,
+  -- Auto-created by phone resolution (proformat/coupon) until staff confirms.
+  is_prospect INTEGER DEFAULT 0,
   lamport_clock INTEGER DEFAULT 0, updated_at TEXT, is_deleted INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
 );
 
@@ -363,6 +365,8 @@ CREATE TABLE IF NOT EXISTS sales (
   -- next shift. Dated/counted on the actual day, cash handed to the manager
   -- (standby_hands) and carried into the next shift's report.
   standby INTEGER DEFAULT 0,
+  -- Sale seeded from (or redeemed a coupon issued from) a proformat.
+  proformat_id TEXT,
   created_at TEXT,
   lamport_clock INTEGER DEFAULT 0, updated_at TEXT, is_deleted INTEGER DEFAULT 0, dirty INTEGER DEFAULT 0
 );
@@ -963,4 +967,132 @@ CREATE TABLE IF NOT EXISTS open_order_events (
   updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_open_order_events_order ON open_order_events(order_id, created_at);
+
+-- ========== PROMOTIONS: proformat / discount / coupon ==========
+-- A proformat is an immutable price-check record: snapshot of items with
+-- their prices AND their cost basis (cost powers the profit-scope math when
+-- a coupon is later issued from it). Customer is always a resolved customers
+-- row (phone resolution), never loose name/phone text.
+CREATE TABLE IF NOT EXISTS proformats (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  receipt_number TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  items TEXT NOT NULL,
+  subtotal REAL NOT NULL DEFAULT 0,
+  total REAL NOT NULL DEFAULT 0,
+  created_by TEXT,
+  created_by_name TEXT,
+  created_by_role TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proformats_receipt ON proformats(receipt_number);
+CREATE INDEX IF NOT EXISTS idx_proformats_store_created ON proformats(store_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_proformats_customer ON proformats(customer_id);
+
+-- The bare reusable rate: a percentage and nothing else — no condition, no
+-- product link, no expiry. Uncapped, may exceed 100 for deep clearance.
+CREATE TABLE IF NOT EXISTS discounts (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  percentage REAL NOT NULL,
+  created_by TEXT,
+  created_by_name TEXT,
+  created_by_role TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+
+-- Single-use activation layer. proformat_id is optional: a coupon may come
+-- from a proformat (flat goud frozen at issuance from its profit scope) or be
+-- issued directly to a customer (amount computed at redemption). min is the
+-- general purchase gate {products?, min_amount?, min_items?}; cap is the hard
+-- ceiling on the calculated discount.
+CREATE TABLE IF NOT EXISTS coupons (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  discount_id TEXT NOT NULL,
+  discount_percentage REAL NOT NULL,
+  proformat_id TEXT,
+  customer_id TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'unconditional',
+  min TEXT,
+  cap REAL,
+  expires_at TEXT,
+  status TEXT NOT NULL DEFAULT 'unused',
+  flat_amount_goud INTEGER,
+  message TEXT,
+  created_by TEXT,
+  created_by_name TEXT,
+  created_by_role TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_coupons_code ON coupons(code);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_coupons_performat_discount ON coupons(store_id, proformat_id, discount_id);
+CREATE INDEX IF NOT EXISTS idx_coupons_store_status ON coupons(store_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_coupons_customer ON coupons(customer_id);
+
+-- Redemption log — append-only, one row per redemption with WHO redeemed and
+-- WHICH sale it applied to. Authoritative sale<->coupon linkage lives here
+-- (1:N by design) so broadcast/multi-person coupons need no schema rework.
+-- Deferred: broadcast creation, redemption limits, multi-person distribution.
+CREATE TABLE IF NOT EXISTS coupon_redemptions (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  coupon_id TEXT NOT NULL,
+  sale_id TEXT,
+  sale_number TEXT,
+  redeemed_by TEXT,
+  redeemed_by_name TEXT,
+  redeemed_by_role TEXT,
+  amount_applied REAL NOT NULL DEFAULT 0,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_coupon_redemptions_coupon ON coupon_redemptions(coupon_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_coupon_redemptions_sale ON coupon_redemptions(sale_id);
+
+-- Append-only promotion audit: discount creation, coupon issuance, redemption
+-- (with the sale it applied to), proformat creation, expiry flips.
+CREATE TABLE IF NOT EXISTS promo_audit (
+  id TEXT PRIMARY KEY,
+  store_id TEXT,
+  action TEXT NOT NULL,
+  entity_type TEXT,
+  entity_id TEXT,
+  proformat_id TEXT,
+  discount_id TEXT,
+  coupon_id TEXT,
+  sale_id TEXT,
+  actor_id TEXT,
+  actor_name TEXT,
+  actor_role TEXT,
+  snapshot TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_promo_audit_store_created ON promo_audit(store_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_promo_audit_entity ON promo_audit(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
 `;

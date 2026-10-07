@@ -28,8 +28,9 @@ import { Text } from "../components/InterText";
 import { Ionicons } from "@expo/vector-icons";
 import { fmt, fmtG, monoStyle } from "../format";
 import { getDb } from "../db";
-import { SyncManager } from "../sync/syncManager";
+import { syncNow } from "../sync/autoSync";
 import { useResponsive } from "../responsive";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LineChart } from "../components/charts";
 import { loadAnalyticsData, type AnalyticsData } from "../analytics/load";
 import { notifyWeeklyDeficitReview } from "../notifications";
@@ -70,6 +71,9 @@ import {
   type EmployeeStats,
   type QueueRow,
 } from "../businessGuard";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { FALLBACK_STORE_ID } from "../db/ids";
+import { mintId } from "../db/ids";
 
 const BG = "rgba(0,0,0,0.96)";
 const CARD = "rgba(255,255,255,0.05)";
@@ -270,7 +274,7 @@ function Empty({ text }: { text: string }) {
 
 export default function BusinessGuardScreen({
   role = "owner",
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   storeName,
   currentUser,
   userStoreIds = [],
@@ -286,6 +290,7 @@ export default function BusinessGuardScreen({
   onBack?: () => void;
 }) {
   const { padH } = useResponsive();
+  const insets = useSafeAreaInsets();
   const { width: winW } = useWindowDimensions();
   const [data, setData] = useState<Loaded | null>(null);
   const [tab, setTab] = useState<TabKey>("queue");
@@ -393,7 +398,7 @@ export default function BusinessGuardScreen({
     setRefreshing(true);
     try {
       if (withCloud) {
-        try { await new SyncManager(storeId, deviceId).fullSync({ quiet: true }); } catch {}
+        try { await syncNow({ quiet: true, storeId, deviceId }); } catch {}
         if (!mounted.current) return;
       }
       await load();
@@ -733,7 +738,7 @@ export default function BusinessGuardScreen({
       } catch {}
       try {
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [`notif-${Date.now()}-${rep.userId}`, rep.userId, "report_confirmed", rep.id,
+          [mintId(), rep.userId, "report_confirmed", rep.id,
             `Rapò ${rep.reportDate} konfime pa ${currentUser?.name ?? role}. Chanjman ou fèmen — ou ka dekonekte.`, "pending", ts]);
       } catch {}
       setConfirmId(null);
@@ -814,7 +819,7 @@ export default function BusinessGuardScreen({
 
   return (
     <>
-      <ScrollView
+      <KeyboardSafeScrollView
         style={{ flex: 1, backgroundColor: BG }}
         contentContainerStyle={{ padding: padH, paddingTop: 8, paddingBottom: 40 }}
         showsVerticalScrollIndicator={false}
@@ -879,7 +884,7 @@ export default function BusinessGuardScreen({
         {tab === "staff" ? (
           <StaffTab staffList={staffList} onSelect={setStaffId} flagPct={data.flagPct} actorRole={String(role)} actorId={String(currentUser?.id ?? "")} />
         ) : null}
-      </ScrollView>
+      </KeyboardSafeScrollView>
 
       {/* Employee profile — a full-height modal over the tabs. */}
       <Modal
@@ -888,8 +893,8 @@ export default function BusinessGuardScreen({
         animationType="slide"
         onRequestClose={() => setStaffId(null)}
       >
-        <View style={{ flex: 1, backgroundColor: BG, paddingTop: 52 }}>
-          <ScrollView contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 44 }} showsVerticalScrollIndicator={false}>
+        <View style={{ flex: 1, backgroundColor: BG, paddingTop: insets.top + 8, paddingBottom: insets.bottom }}>
+          <KeyboardSafeScrollView contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 44 }} showsVerticalScrollIndicator={false}>
             {staffMember ? (
               <StaffProfile
                 back={() => setStaffId(null)}
@@ -903,7 +908,7 @@ export default function BusinessGuardScreen({
                 canDecideFor={targetRole => canLogDeficitFor(String(role), targetRole)}
               />
             ) : null}
-          </ScrollView>
+          </KeyboardSafeScrollView>
         </View>
       </Modal>
     </>

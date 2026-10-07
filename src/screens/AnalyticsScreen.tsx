@@ -23,7 +23,7 @@ import Svg, { Circle, Defs, Line, LinearGradient, Path, Polyline, Rect, Stop, Te
 import { fmtG, monoStyle } from "../format";
 import { fonts } from "../theme";
 import { getDb } from "../db";
-import { SyncManager } from "../sync/syncManager";
+import { syncNow } from "../sync/autoSync";
 import { useResponsive } from "../responsive";
 import { RANGES } from "./home/types";
 import type { RangeKey } from "./home/types";
@@ -50,6 +50,7 @@ import {
   type MetricRow,
 } from "../analytics/metrics";
 import { formatCheckoutRow } from "../labels";
+import { FALLBACK_STORE_ID } from "../db/ids";
 
 // ── Reference-mock palette ─────────────────────────────────────────────
 const BG = "rgba(0,0,0,0.96)"; // black + translucent screen canvas
@@ -422,7 +423,7 @@ function profitWindow(
 
 export default function AnalyticsScreen({
   role = "owner",
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   storeName,
   currentUser,
   userStoreIds = [],
@@ -437,7 +438,7 @@ export default function AnalyticsScreen({
   deviceId?: string;
   onBack?: () => void;
 }) {
-  const { padH } = useResponsive();
+  const { padH, width, isTablet } = useResponsive();
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [range, setRange] = useState<RangeKey>("today");
   // Reporting level for profit + volume (variant is the base figure).
@@ -472,7 +473,7 @@ export default function AnalyticsScreen({
     setRefreshing(true);
     try {
       if (withCloud) {
-        try { await new SyncManager(storeId, deviceId).fullSync({ quiet: true }); } catch {}
+        try { await syncNow({ quiet: true, storeId, deviceId }); } catch {}
         if (!mounted.current) return;
       }
       await load();
@@ -677,6 +678,218 @@ export default function AnalyticsScreen({
   const { profit, volumeRows, contribution, marginRows, excluded } = m;
   const noCost = profit.coverage.pct === 0;
 
+  // ── Layout blocks — one definition, two compositions: phone stacks every
+  // block in a single column; tablet pairs sections into columns and adds a
+  // KPI grid next to the hero (charts measure themselves, so they reflow). ──
+  const rangeRow = (
+    <View style={{ flexDirection: "row", backgroundColor: SEG_BG, borderRadius: 999, padding: 4 }}>
+      {RANGES.map(r => {
+        const active = range === r.key;
+        return (
+          <Pressable
+            key={r.key}
+            onPress={() => setRange(r.key)}
+            style={{ flex: 1, height: 38, borderRadius: 999, alignItems: "center", justifyContent: "center", backgroundColor: active ? GREEN : "transparent" }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: active ? "800" : "600", color: active ? "#0a0a0a" : TXT2 }} numberOfLines={1}>
+              {SHORT_RANGE[r.key]}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+
+  const reportByRow = (
+    <View style={{ flexDirection: "row", backgroundColor: SEG_BG, borderRadius: 999, padding: 3, alignSelf: "flex-start" }}>
+      {DIMS.map(([k, label]) => {
+        const active = dim === k;
+        return (
+          <Pressable
+            key={k}
+            onPress={() => setDim(k)}
+            style={{ paddingHorizontal: 18, paddingVertical: 8, borderRadius: 999, backgroundColor: active ? SEG_ACTIVE : "transparent" }}
+          >
+            <Text style={{ fontSize: 12.5, fontWeight: active ? "700" : "600", color: active ? TXT : TXT2 }}>{label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+
+  const heroCard = (
+    <View style={{ backgroundColor: CARD, borderRadius: 20, borderWidth: 0.5, borderColor: CARD_BD, padding: 20 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+        <Text style={{ flex: 1, fontSize: 16, fontWeight: "600", color: "#d9d9d9" }}>Gross profit</Text>
+        {!noCost && deltaPct !== null && DELTA_LABEL[range] ? (
+          <View
+            style={{
+              backgroundColor: deltaPct > 0 ? GREEN_BG : deltaPct < 0 ? RED_BG : "rgba(255,255,255,0.08)",
+              borderRadius: 999,
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+            }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: "700", color: deltaPct > 0 ? GREEN : deltaPct < 0 ? RED : TXT2 }}>
+              {deltaPct > 0 ? "+" : ""}{deltaPct.toFixed(1)}% {DELTA_LABEL[range]}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+      <Text
+        style={{ fontSize: 40, fontWeight: "800", color: TXT, letterSpacing: -1, marginTop: 8 }}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+      >
+        {noCost ? "—" : fmtG(Math.round(profit.profit))}
+      </Text>
+      <Text style={{ fontSize: 12.5, color: TXT2, marginTop: 8 }}>
+        {noCost
+          ? `Revenue ${fmtG(Math.round(profit.revenue))}  ·  Cost —`
+          : Math.round(profit.coveredRevenue) === Math.round(profit.revenue)
+            ? `Revenue ${fmtG(Math.round(profit.revenue))}  ·  Cost ${fmtG(Math.round(profit.cost))}`
+            : `Costed ${fmtG(Math.round(profit.coveredRevenue))}  ·  Cost ${fmtG(Math.round(profit.cost))}`}
+      </Text>
+      {profit.coverage.pct < 100 ? (
+        <Text style={{ fontSize: 11, color: AMBER, marginTop: 6 }}>
+          {noCost
+            ? "No purchase-cost data — add purchase costs to see real profit."
+            : `Cost data on ${Math.round(profit.coverage.pct)}% of lines — ${fmtG(Math.round(profit.revenue - profit.coveredRevenue))} revenue without cost excluded.`}
+        </Text>
+      ) : null}
+      <Sparkline values={spark} />
+      {noCost ? <Text style={{ fontSize: 10.5, color: TXT3, marginTop: 4 }}>These lines count as revenue only — no cost data.</Text> : null}
+    </View>
+  );
+
+  // Tablet-only KPI column: the figures the hero compresses into one
+  // sub-line, split out so the wide screen earns its extra pixels.
+  const marginPct = noCost || !(profit.revenue > 0) ? null : (profit.profit / profit.revenue) * 100;
+  const KPITile = ({ label, value, tone }: { label: string; value: string; tone?: string }) => (
+    <View style={{ flex: 1, backgroundColor: CARD, borderRadius: 16, borderWidth: 0.5, borderColor: CARD_BD, padding: 16 }}>
+      <Text style={{ fontSize: 10.5, color: TXT2, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase" }}>{label}</Text>
+      <Text style={{ fontSize: 24, fontWeight: "800", color: tone ?? TXT, letterSpacing: -0.6, marginTop: 8 }} numberOfLines={1} adjustsFontSizeToFit>
+        {value}
+      </Text>
+    </View>
+  );
+  const kpiGrid = (
+    <>
+      <View style={{ flexDirection: "row", gap: 14 }}>
+        <KPITile label="Revenue" value={fmtG(Math.round(profit.revenue))} />
+        <KPITile label="Cost" value={noCost ? "—" : fmtG(Math.round(profit.cost))} />
+      </View>
+      <View style={{ flexDirection: "row", gap: 14 }}>
+        <KPITile
+          label="Margin"
+          value={marginPct === null ? "—" : `${marginPct.toFixed(0)}%`}
+          tone={marginPct === null ? undefined : marginPct >= 40 ? GREEN : marginPct >= 0 ? AMBER : RED}
+        />
+        <KPITile label="Sales" value={String(m.sales.length)} />
+      </View>
+    </>
+  );
+
+  const profitSection = (
+    <View>
+      <SectionHead title={`Profit by ${DIM_ONE[dim]}`} subtitle="What actually makes money" badge="Top 5" />
+      {contribution.length === 0 ? (
+        <Empty text={volumeRows.length === 0 ? "No sales in this period." : `No ${DIM_MANY[dim]} have purchase-cost data.`} />
+      ) : (
+        contribution.slice(0, 5).map((p, i) => {
+          const leader = Math.max(...contribution.map(c => Math.max(0, c.profit)));
+          const w = leader > 0 && p.profit > 0 ? Math.max(4, (p.profit / leader) * 100) : 0;
+          const col = p.profit >= 0 && p.margin >= 0 ? GREEN : RED;
+          return (
+            <View
+              key={p.id}
+              style={{ paddingTop: 14, paddingBottom: 14, borderTopWidth: i ? 0.5 : 0, borderTopColor: LINE, marginTop: i ? 0 : 12 }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ width: 30, fontSize: 13, fontWeight: "600", color: TXT3, ...monoStyle }}>
+                  {String(i + 1).padStart(2, "0")}
+                </Text>
+                <Text style={{ flex: 1, fontSize: 16, fontWeight: "700", color: TXT }} numberOfLines={1}>{p.name}</Text>
+                <Text style={{ fontSize: 16, fontWeight: "800", color: p.profit >= 0 ? TXT : RED, ...monoStyle }}>
+                  {fmtG(Math.round(p.profit))}
+                </Text>
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 10, paddingLeft: 30 }}>
+                <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: TRACK, overflow: "hidden" }}>
+                  <View style={{ width: `${w}%` as any, height: 6, borderRadius: 3, backgroundColor: col }} />
+                </View>
+                <Text style={{ fontSize: 12.5, fontWeight: "700", color: col, minWidth: 78, textAlign: "right" }}>
+                  {p.margin.toFixed(0)}% margin
+                </Text>
+              </View>
+            </View>
+          );
+        })
+      )}
+      {excluded > 0 ? (
+        <Text style={{ fontSize: 11, color: AMBER, marginTop: 12 }}>
+          {excluded} {DIM_MANY[dim]} hidden — no purchase-cost data.
+        </Text>
+      ) : null}
+    </View>
+  );
+
+  const marginSection = (
+    <View>
+      <SectionHead title={`Margin by ${DIM_ONE[dim]}`} subtitle="Where the business holds the line" />
+      {marginRows.length === 0 ? (
+        <Empty text={volumeRows.length === 0 ? "No sales in this period." : "No purchase-cost data to show margins."} />
+      ) : (
+        marginRows.map((r, i) => {
+          const col = r.margin >= 40 ? GREEN : r.margin >= 0 ? AMBER : RED;
+          const partial = r.coverage.pct < 100;
+          return (
+            <View key={r.id} style={{ paddingTop: 12, paddingBottom: 12, borderTopWidth: i ? 0.5 : 0, borderTopColor: LINE }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <Text style={{ flex: 1, fontSize: 15, fontWeight: "600", color: TXT }} numberOfLines={1}>{r.name}</Text>
+                {partial ? (
+                  <Text style={{ fontSize: 10.5, color: AMBER, ...monoStyle }}>cost {Math.round(r.coverage.pct)}%</Text>
+                ) : null}
+                <Text style={{ fontSize: 15, fontWeight: "800", color: TXT, ...monoStyle }}>{r.margin.toFixed(0)}%</Text>
+              </View>
+              <View style={{ height: 8, borderRadius: 4, backgroundColor: TRACK, marginTop: 10, overflow: "hidden" }}>
+                <View style={{ width: `${Math.max(2, Math.min(100, r.margin))}%` as any, height: 8, borderRadius: 4, backgroundColor: col }} />
+              </View>
+            </View>
+          );
+        })
+      )}
+      {excluded > 0 ? (
+        <Text style={{ fontSize: 11, color: AMBER, marginTop: 12 }}>
+          {excluded} {DIM_MANY[dim]} hidden — no purchase-cost data.
+        </Text>
+      ) : null}
+    </View>
+  );
+
+  const unitsSection = (
+    <View>
+      <SectionHead title={`Units sold by ${DIM_ONE[dim]}`} subtitle="Volume ≠ profit" badge={rangeLabel} />
+      {volumeRows.length === 0 ? (
+        <Empty text="No sales in this period." />
+      ) : (
+        <UnitsChart rows={volumeRows.slice(0, isTablet ? 8 : 6).map(p => ({ name: p.name, qty: p.qty, margin: p.margin, coverage: p.coverage.pct }))} />
+      )}
+    </View>
+  );
+
+  const costSection = (
+    <View>
+      <SectionHead title="Cost trends" subtitle="Each unit's own history — never blended" />
+      {costSeries.length === 0 ? (
+        <Empty text={costTrendEmpty} />
+      ) : (
+        <CostChart series={costSeries} />
+      )}
+    </View>
+  );
+
+
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: BG }}
@@ -711,186 +924,70 @@ export default function AnalyticsScreen({
         </View>
       </View>
 
-      {/* Range — segmented pills, green active */}
-      <View style={{ marginTop: 18, flexDirection: "row", backgroundColor: SEG_BG, borderRadius: 999, padding: 4 }}>
-        {RANGES.map(r => {
-          const active = range === r.key;
-          return (
-            <Pressable
-              key={r.key}
-              onPress={() => setRange(r.key)}
-              style={{ flex: 1, height: 38, borderRadius: 999, alignItems: "center", justifyContent: "center", backgroundColor: active ? GREEN : "transparent" }}
-            >
-              <Text style={{ fontSize: 12, fontWeight: active ? "800" : "600", color: active ? "#0a0a0a" : TXT2 }} numberOfLines={1}>
-                {SHORT_RANGE[r.key]}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      {/* Report-by — the level BOTH chains roll through: variant (base),
-          product (Σ its variants), category (Σ its products). */}
-      <Text style={{ ...EYEBROW, marginTop: 18 }}>Report by</Text>
-      <View style={{ marginTop: 8, flexDirection: "row", backgroundColor: SEG_BG, borderRadius: 999, padding: 3, alignSelf: "flex-start" }}>
-        {DIMS.map(([k, label]) => {
-          const active = dim === k;
-          return (
-            <Pressable
-              key={k}
-              onPress={() => setDim(k)}
-              style={{ paddingHorizontal: 18, paddingVertical: 8, borderRadius: 999, backgroundColor: active ? SEG_ACTIVE : "transparent" }}
-            >
-              <Text style={{ fontSize: 12.5, fontWeight: active ? "700" : "600", color: active ? TXT : TXT2 }}>{label}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      {/* 1 — gross profit hero: delta pill, big value, revenue·COGS, sparkline */}
-      <View style={{ marginTop: 18, backgroundColor: CARD, borderRadius: 20, borderWidth: 0.5, borderColor: CARD_BD, padding: 20 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-          <Text style={{ flex: 1, fontSize: 16, fontWeight: "600", color: "#d9d9d9" }}>Gross profit</Text>
-          {!noCost && deltaPct !== null && DELTA_LABEL[range] ? (
-            <View
-              style={{
-                backgroundColor: deltaPct > 0 ? GREEN_BG : deltaPct < 0 ? RED_BG : "rgba(255,255,255,0.08)",
-                borderRadius: 999,
-                paddingHorizontal: 10,
-                paddingVertical: 5,
-              }}
-            >
-              <Text style={{ fontSize: 12, fontWeight: "700", color: deltaPct > 0 ? GREEN : deltaPct < 0 ? RED : TXT2 }}>
-                {deltaPct > 0 ? "+" : ""}{deltaPct.toFixed(1)}% {DELTA_LABEL[range]}
-              </Text>
-            </View>
-          ) : null}
+      {/* Range — segmented pills, green active. Tablet: range + Report-by share
+          one row to buy back vertical space; phone keeps the stacked flow. */}
+      {isTablet ? (
+        <View style={{ marginTop: 18, flexDirection: "row", alignItems: "flex-end", gap: 24 }}>
+          <View style={{ flex: 1 }}>{rangeRow}</View>
+          <View>
+            <Text style={{ ...EYEBROW, marginBottom: 8 }}>Report by</Text>
+            {reportByRow}
+          </View>
         </View>
-        <Text
-          style={{ fontSize: 40, fontWeight: "800", color: TXT, letterSpacing: -1, marginTop: 8 }}
-          numberOfLines={1}
-          adjustsFontSizeToFit
-        >
-          {noCost ? "—" : fmtG(Math.round(profit.profit))}
-        </Text>
-        <Text style={{ fontSize: 12.5, color: TXT2, marginTop: 8 }}>
-          {noCost
-            ? `Revenue ${fmtG(Math.round(profit.revenue))}  ·  Cost —`
-            : Math.round(profit.coveredRevenue) === Math.round(profit.revenue)
-              ? `Revenue ${fmtG(Math.round(profit.revenue))}  ·  Cost ${fmtG(Math.round(profit.cost))}`
-              : `Costed ${fmtG(Math.round(profit.coveredRevenue))}  ·  Cost ${fmtG(Math.round(profit.cost))}`}
-        </Text>
-        {profit.coverage.pct < 100 ? (
-          <Text style={{ fontSize: 11, color: AMBER, marginTop: 6 }}>
-            {noCost
-              ? "No purchase-cost data — add purchase costs to see real profit."
-              : `Cost data on ${Math.round(profit.coverage.pct)}% of lines — ${fmtG(Math.round(profit.revenue - profit.coveredRevenue))} revenue without cost excluded.`}
-          </Text>
-        ) : null}
-        <Sparkline values={spark} />
-        {noCost ? <Text style={{ fontSize: 10.5, color: TXT3, marginTop: 4 }}>These lines count as revenue only — no cost data.</Text> : null}
-      </View>
+      ) : (
+        <>
+          <View style={{ marginTop: 18 }}>{rangeRow}</View>
+          {/* Report-by — the level BOTH chains roll through: variant (base),
+              product (Σ its variants), category (Σ its products). */}
+          <Text style={{ ...EYEBROW, marginTop: 18 }}>Report by</Text>
+          <View style={{ marginTop: 8 }}>{reportByRow}</View>
+        </>
+      )}
 
-      {/* 2 — profit contribution at the selected level, TOP 5 (cost-covered) */}
-      <View style={{ marginTop: 30 }}>
-        <SectionHead title={`Profit by ${DIM_ONE[dim]}`} subtitle="What actually makes money" badge="Top 5" />
-        {contribution.length === 0 ? (
-          <Empty text={volumeRows.length === 0 ? "No sales in this period." : `No ${DIM_MANY[dim]} have purchase-cost data.`} />
-        ) : (
-          contribution.slice(0, 5).map((p, i) => {
-            const leader = Math.max(...contribution.map(c => Math.max(0, c.profit)));
-            const w = leader > 0 && p.profit > 0 ? Math.max(4, (p.profit / leader) * 100) : 0;
-            const col = p.profit >= 0 && p.margin >= 0 ? GREEN : RED;
-            return (
-              <View
-                key={p.id}
-                style={{ paddingTop: 14, paddingBottom: 14, borderTopWidth: i ? 0.5 : 0, borderTopColor: LINE, marginTop: i ? 0 : 12 }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center" }}>
-                  <Text style={{ width: 30, fontSize: 13, fontWeight: "600", color: TXT3, ...monoStyle }}>
-                    {String(i + 1).padStart(2, "0")}
-                  </Text>
-                  <Text style={{ flex: 1, fontSize: 16, fontWeight: "700", color: TXT }} numberOfLines={1}>{p.name}</Text>
-                  <Text style={{ fontSize: 16, fontWeight: "800", color: p.profit >= 0 ? TXT : RED, ...monoStyle }}>
-                    {fmtG(Math.round(p.profit))}
-                  </Text>
-                </View>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginTop: 10, paddingLeft: 30 }}>
-                  <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: TRACK, overflow: "hidden" }}>
-                    <View style={{ width: `${w}%` as any, height: 6, borderRadius: 3, backgroundColor: col }} />
-                  </View>
-                  <Text style={{ fontSize: 12.5, fontWeight: "700", color: col, minWidth: 78, textAlign: "right" }}>
-                    {p.margin.toFixed(0)}% margin
-                  </Text>
-                </View>
-              </View>
-            );
-          })
-        )}
-        {excluded > 0 ? (
-          <Text style={{ fontSize: 11, color: AMBER, marginTop: 12 }}>
-            {excluded} {DIM_MANY[dim]} hidden — no purchase-cost data.
-          </Text>
-        ) : null}
-      </View>
+      {/* 1 — gross profit hero: delta pill, big value, revenue·COGS, sparkline.
+          Tablet: hero (3/5) sits beside a KPI column (2/5) — revenue, cost,
+          margin % and sales count broken out of the hero's sub-line. */}
+      {isTablet ? (
+        <View style={{ marginTop: 18, flexDirection: "row", gap: 14 }}>
+          <View style={{ flex: 3 }}>{heroCard}</View>
+          <View style={{ flex: 2, gap: 14 }}>{kpiGrid}</View>
+        </View>
+      ) : (
+        <View style={{ marginTop: 18 }}>{heroCard}</View>
+      )}
 
-      <Divider />
-
-      {/* 3 — margin at the selected level (cost-covered rows only) */}
-      <View>
-        <SectionHead title={`Margin by ${DIM_ONE[dim]}`} subtitle="Where the business holds the line" />
-        {marginRows.length === 0 ? (
-          <Empty text={volumeRows.length === 0 ? "No sales in this period." : "No purchase-cost data to show margins."} />
-        ) : (
-          marginRows.map((r, i) => {
-            const col = r.margin >= 40 ? GREEN : r.margin >= 0 ? AMBER : RED;
-            const partial = r.coverage.pct < 100;
-            return (
-              <View key={r.id} style={{ paddingTop: 12, paddingBottom: 12, borderTopWidth: i ? 0.5 : 0, borderTopColor: LINE }}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                  <Text style={{ flex: 1, fontSize: 15, fontWeight: "600", color: TXT }} numberOfLines={1}>{r.name}</Text>
-                  {partial ? (
-                    <Text style={{ fontSize: 10.5, color: AMBER, ...monoStyle }}>cost {Math.round(r.coverage.pct)}%</Text>
-                  ) : null}
-                  <Text style={{ fontSize: 15, fontWeight: "800", color: TXT, ...monoStyle }}>{r.margin.toFixed(0)}%</Text>
-                </View>
-                <View style={{ height: 8, borderRadius: 4, backgroundColor: TRACK, marginTop: 10, overflow: "hidden" }}>
-                  <View style={{ width: `${Math.max(2, Math.min(100, r.margin))}%` as any, height: 8, borderRadius: 4, backgroundColor: col }} />
-                </View>
-              </View>
-            );
-          })
-        )}
-        {excluded > 0 ? (
-          <Text style={{ fontSize: 11, color: AMBER, marginTop: 12 }}>
-            {excluded} {DIM_MANY[dim]} hidden — no purchase-cost data.
-          </Text>
-        ) : null}
-      </View>
-
-      <Divider />
-
-      {/* 4 — units sold at the selected level (volume needs no cost data) */}
-      <View>
-        <SectionHead title={`Units sold by ${DIM_ONE[dim]}`} subtitle="Volume ≠ profit" badge={rangeLabel} />
-        {volumeRows.length === 0 ? (
-          <Empty text="No sales in this period." />
-        ) : (
-          <UnitsChart rows={volumeRows.slice(0, 6).map(p => ({ name: p.name, qty: p.qty, margin: p.margin, coverage: p.coverage.pct }))} />
-        )}
-      </View>
-
-      <Divider />
-
-      {/* 5 — cost trends */}
-      <View>
-        <SectionHead title="Cost trends" subtitle="Each unit's own history — never blended" />
-        {costSeries.length === 0 ? (
-          <Empty text={costTrendEmpty} />
-        ) : (
-          <CostChart series={costSeries} />
-        )}
-      </View>
+      {/* 2-5 — analysis sections. Phone: full-width stack with horizontal
+          dividers. Tablet: Profit|Margin and Units|Cost side by side with a
+          vertical rule (charts reflow to their column via onLayout). */}
+      {isTablet ? (
+        <>
+          <View style={{ marginTop: 30, flexDirection: "row" }}>
+            <View style={{ flex: 1, paddingRight: 22 }}>{profitSection}</View>
+            <View style={{ width: 1, backgroundColor: LINE, marginVertical: 6 }} />
+            <View style={{ flex: 1, paddingLeft: 22 }}>{marginSection}</View>
+          </View>
+          <Divider />
+          <View style={{ flexDirection: "row" }}>
+            <View style={{ flex: 1, paddingRight: 22 }}>{unitsSection}</View>
+            <View style={{ width: 1, backgroundColor: LINE, marginVertical: 6 }} />
+            <View style={{ flex: 1, paddingLeft: 22 }}>{costSection}</View>
+          </View>
+        </>
+      ) : (
+        <>
+          {/* 2 — profit contribution at the selected level, TOP 5 (cost-covered) */}
+          <View style={{ marginTop: 30 }}>{profitSection}</View>
+          <Divider />
+          {/* 3 — margin at the selected level (cost-covered rows only) */}
+          {marginSection}
+          <Divider />
+          {/* 4 — units sold at the selected level (volume needs no cost data) */}
+          {unitsSection}
+          <Divider />
+          {/* 5 — cost trends */}
+          {costSection}
+        </>
+      )}
 
       <Divider />
 
@@ -900,35 +997,37 @@ export default function AnalyticsScreen({
         {opportunities.length === 0 ? (
           <Empty text={opportunityEmpty} />
         ) : (
-          <View style={{ gap: 14, marginTop: 14 }}>
+          <View style={{ gap: 14, marginTop: 14, flexDirection: isTablet ? "row" : "column", flexWrap: isTablet ? "wrap" : "nowrap" }}>
             {opportunities.map(o => (
-              <View key={o.key} style={{ backgroundColor: CARD, borderRadius: 14, borderLeftWidth: 3, borderLeftColor: AMBER, padding: 16, gap: 12 }}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                  <Text style={{ flex: 1, fontSize: 17, fontWeight: "800", color: TXT }} numberOfLines={1}>{o.productName}</Text>
-                  <View style={{ backgroundColor: GREEN_BG, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 }}>
-                    <Text style={{ fontSize: 12, fontWeight: "800", color: GREEN, ...monoStyle }}>Save {fmtG(Math.round(o.saving))}/unit</Text>
+              <View key={o.key} style={isTablet ? { width: "48%" } : undefined}>
+                <View style={{ backgroundColor: CARD, borderRadius: 14, borderLeftWidth: 3, borderLeftColor: AMBER, padding: 16, gap: 12 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                    <Text style={{ flex: 1, fontSize: 17, fontWeight: "800", color: TXT }} numberOfLines={1}>{o.productName}</Text>
+                    <View style={{ backgroundColor: GREEN_BG, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 }}>
+                      <Text style={{ fontSize: 12, fontWeight: "800", color: GREEN, ...monoStyle }}>Save {fmtG(Math.round(o.saving))}/unit</Text>
+                    </View>
                   </View>
+                  <View style={{ flexDirection: "row", gap: 18 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 12, color: TXT2 }}>Current</Text>
+                      <Text style={{ fontSize: 14, fontWeight: "700", color: TXT, marginTop: 3 }} numberOfLines={1}>{o.current}</Text>
+                      <Text style={{ fontSize: 13, color: "#d9d9d9", marginTop: 2, ...monoStyle }}>
+                        {fmtG(Math.round(o.currentCost))} / unit
+                      </Text>
+                    </View>
+                    <View style={{ width: 14, alignItems: "center", paddingTop: 24 }}>
+                      <Ionicons name="arrow-up" size={14} color={AMBER} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 12, color: TXT2 }}>Alternative</Text>
+                      <Text style={{ fontSize: 14, fontWeight: "700", color: TXT, marginTop: 3 }} numberOfLines={1}>{o.cheaper}</Text>
+                      <Text style={{ fontSize: 13, fontWeight: "700", color: GREEN, marginTop: 2, ...monoStyle }}>
+                        {fmtG(Math.round(o.cheaperCost))} / unit
+                      </Text>
+                    </View>
+                  </View>
+                  {o.stale ? <Text style={{ fontSize: 11, color: AMBER }}>Old data — verify before buying.</Text> : null}
                 </View>
-                <View style={{ flexDirection: "row", gap: 18 }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 12, color: TXT2 }}>Current</Text>
-                    <Text style={{ fontSize: 14, fontWeight: "700", color: TXT, marginTop: 3 }} numberOfLines={1}>{o.current}</Text>
-                    <Text style={{ fontSize: 13, color: "#d9d9d9", marginTop: 2, ...monoStyle }}>
-                      {fmtG(Math.round(o.currentCost))} / unit
-                    </Text>
-                  </View>
-                  <View style={{ width: 14, alignItems: "center", paddingTop: 24 }}>
-                    <Ionicons name="arrow-up" size={14} color={AMBER} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 12, color: TXT2 }}>Alternative</Text>
-                    <Text style={{ fontSize: 14, fontWeight: "700", color: TXT, marginTop: 3 }} numberOfLines={1}>{o.cheaper}</Text>
-                    <Text style={{ fontSize: 13, fontWeight: "700", color: GREEN, marginTop: 2, ...monoStyle }}>
-                      {fmtG(Math.round(o.cheaperCost))} / unit
-                    </Text>
-                  </View>
-                </View>
-                {o.stale ? <Text style={{ fontSize: 11, color: AMBER }}>Old data — verify before buying.</Text> : null}
               </View>
             ))}
           </View>

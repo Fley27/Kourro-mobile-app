@@ -5,6 +5,7 @@
 // Chain-only rule (one base item per product) is what keeps per-product
 // stock and cost unambiguous — see schema.ts note.
 import { getDb, insertOutbox, recomputeItemCosts } from "./db";
+import { mintId } from "./db/ids";
 
 export type Item = {
   id: string; product_id: string; name: string;
@@ -270,7 +271,7 @@ export async function upsertVariantPriceRow(db: any, args: {
 }): Promise<string> {
   const now = new Date().toISOString();
   const price = Math.max(0, Number(args.price) || 0);
-  const id = `vpr-${args.variantId}-${args.date}-${Math.random().toString(36).slice(2, 6)}`;
+  const id = mintId();
   const rec = {
     id, variant_id: args.variantId, price, date: args.date,
     created_at: now, updated_at: now, is_deleted: 0,
@@ -293,7 +294,7 @@ export async function upsertBundleRow(db: any, args: {
   price: number; date: string; active?: boolean;
 }): Promise<string> {
   const now = new Date().toISOString();
-  const id = args.bundleId || `bnd-${args.variantId}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = args.bundleId || mintId();
   const minQuantity = Math.max(0, Number(args.minQuantity) || 0);
   const active = args.active === false ? 0 : 1;
   const rec = {
@@ -349,7 +350,7 @@ export async function upsertSupplierCost(db: any, args: {
     } catch {}
     return;
   }
-  const id = `psc-${args.supplierId}-${args.itemId}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = mintId();
   const rec = {
     id, product_id: args.productId, supplier_id: args.supplierId,
     unit_id: args.itemId, item_id: args.itemId, cost,
@@ -476,8 +477,12 @@ export function costForItem(
 
 /**
  * Cost per CANONICAL (smallest-unit) count — for margin math against
- * canonical quantities (checkout freeze, stock value). Equals currentBaseCost
- * whenever the reference base is also the smallest (all legacy chains).
+ * canonical quantities (checkout freeze, stock value, coupon discount).
+ * `currentBaseCost` is per anchor (factor-1) unit; the smallest item's
+ * cumulative factor is minItemFactor, so the smallest unit costs
+ * `base × minItemFactor` — the same formula `costForItem` uses at item level.
+ * The anchor always has factor 1, so minItemFactor ≤ 1 and the canonical
+ * unit can never cost more than the anchor.
  */
 export function currentCanonicalCost(
   allItems: Item[],
@@ -487,7 +492,7 @@ export function currentCanonicalCost(
   const base = currentBaseCost(allItems, batches, productId);
   if (!(base > 0)) return 0;
   const m = minItemFactor(allItems, productId);
-  return m > 0 ? base / m : 0;
+  return m > 0 ? base * Math.min(m, 1) : 0;
 }
 
 /** Cost-per-unit preview for a draft batch (display only, any status). */
@@ -569,10 +574,9 @@ function slugBatch(s: string): string {
   return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-function batchUid(taken: Set<string>, base: string): string {
-  let id = `batch-${base}`;
-  let n = 2;
-  while (!id || taken.has(id)) id = `batch-${base}-${n++}`;
+function batchUid(taken: Set<string>, _base: string): string {
+  let id = mintId();
+  while (taken.has(id)) id = mintId();
   taken.add(id);
   return id;
 }

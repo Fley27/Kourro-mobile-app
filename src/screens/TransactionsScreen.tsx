@@ -4,17 +4,24 @@
 // and reprints through ReceiptModal.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, ScrollView, TextInput, Alert, Modal, SectionList } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { palette, radius, shadow, topIconBtn } from "../theme";
 import { fmtG, fmt, monoStyle } from "../format";
-import { useResponsive } from "../responsive";
+import { useResponsive, sheetBox } from "../responsive";
 import { getDb } from "../db";
+import { useSalesEvents } from "../salesEvents";
 import { getUserById } from "../users";
 import { PAYMENT_LABELS, buildReceipts, receiptItemsFrom, attachLineLabels, type ReceiptData } from "../receipts";
 import ReceiptModal from "../components/ReceiptModal";
 import { TxnDetailBody } from "./cartViews";
 import { CreditPayFlow } from "../components/CreditPayFlow";
 import { uploadError } from "../components/UploadTransition";
+import { SkeletonCardRow } from "../components/Skeleton";
+import { notifUI, type NotifRoute } from "../notifRoute";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { FALLBACK_STORE_ID } from "../db/ids";
+import { mintId } from "../db/ids";
 
 type TxnViewState = { name: "hub" } | { name: "sale"; saleId: string };
 
@@ -39,7 +46,7 @@ function shortDate(iso: string | null | undefined): string {
 
 export default function TransactionsScreen({
   role = "cashier",
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   storeName,
   currentUser,
   userStoreIds = [],
@@ -50,9 +57,13 @@ export default function TransactionsScreen({
   currentUser?: any;
   userStoreIds?: string[];
 }) {
-  const { padH } = useResponsive();
+  const insets = useSafeAreaInsets();
+  const { padH, width, isTablet } = useResponsive();
+  const paneW = Math.min(460, Math.max(340, Math.round(width * 0.38)));
   const [view, setView] = useState<TxnViewState>({ name: "hub" });
   const [sales, setSales] = useState<any[]>([]);
+  // First-load flag only — later `load()` calls (view change) keep the list.
+  const [loading, setLoading] = useState(true);
   const [customers, setCustomers] = useState<any[]>([]);
   const [hubCredits, setHubCredits] = useState<any[]>([]);
   const [hubPayments, setHubPayments] = useState<any[]>([]);
@@ -76,9 +87,32 @@ export default function TransactionsScreen({
     { key: "1w", label: "Plis pase 1 semèn", days: 7 },
     { key: "2w", label: "Plis pase 2 semèn", days: 14 },
     { key: "1m", label: "Plis pase 1 mwa", days: 30 },
-    { key: "3m", label: "Plis pase 1 trimès", days: 90 },
+    { key: "3m", label: "Plis pase 3 mwa", days: 90 },
     { key: "1y", label: "Plis pase 1 an", days: 365 },
   ];
+
+  // --- Notification deep-link (src/notifRoute.ts) ---
+  // A corrected sale reopens its own detail. The row is fetched by id rather
+  // than pulled from `sales`, because role/store filters may hide it from the
+  // hub list even though the tap is a legitimate way to reach it.
+  const notifHandler = useRef<(r: NotifRoute) => boolean>(() => false);
+  useEffect(() => {
+    notifHandler.current = (r) => {
+      if (r.screen === "sale") {
+        (async () => {
+          try {
+            const db = await getDb();
+            const row = ((await db.getAllAsync("SELECT * FROM sales WHERE id = ?", [r.id]).catch(() => [])) as any[])[0];
+            if (row) await openSale(row);
+          } catch { /* a vanished sale just leaves the hub as-is */ }
+        })();
+        return true;
+      }
+      return false;
+    };
+  });
+  useEffect(() => notifUI.register(r => notifHandler.current(r)), []);
+
 
   function saleCreditInfo(sale: any) {
     const credit = hubCredits.find(c => c.sale_id === sale.id) ?? null;
@@ -153,10 +187,16 @@ export default function TransactionsScreen({
       setCustomers(custs);
       try { setHubCredits(((await db.getAllAsync("SELECT * FROM credits")) as any[]) ?? []); } catch {}
       try { setHubPayments(((await db.getAllAsync("SELECT * FROM credit_payments")) as any[]) ?? []); } catch {}
-    } catch {}
+    } catch {
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => { load(); }, []);
   useEffect(() => { if (view.name === "hub") load(); }, [view]);
+  // Live: a sale made on another register lands via autoSync's pull, and a
+  // local commit emits too — without this the list only refreshed on remount.
+  useSalesEvents(() => { load().catch(() => {}); });
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -275,7 +315,7 @@ export default function TransactionsScreen({
       const pays = ((await db.getAllAsync("SELECT * FROM credit_payments WHERE receipt_number = ?", [info.receipt]).catch(() => [])) as any[]) ?? [];
       const payRow = pays[0];
       const pair = buildCreditPaymentReceipts({
-        payId: payRow?.id ?? `pay-${Date.now()}`,
+        payId: payRow?.id ?? mintId(),
         receiptNumber: info.receipt,
         debtId: detail.credit?.id ?? detail.sale?.id,
         storeName: storeName ?? "Jesyon Magazen",
@@ -317,9 +357,7 @@ export default function TransactionsScreen({
     }
   }, [showPay, pendingReceipt]);
 
-  if (view.name === "sale" && detail) {
-    return (
-      <>
+  const detailPane = detail ? (
       <View style={{ flex: 1, backgroundColor: "#000" }}>
         {!showPay ? (
         <View style={{ padding: 12, backgroundColor: "#000", flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 0.5, borderColor: "#262626" }}>
@@ -344,7 +382,7 @@ export default function TransactionsScreen({
             />
           </View>
         ) : (
-        <ScrollView ref={detailScroll} style={{ flex: 1, backgroundColor: "#000" }} contentContainerStyle={{ padding: padH, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+        <KeyboardSafeScrollView ref={detailScroll} style={{ flex: 1, backgroundColor: "#000" }} contentContainerStyle={{ padding: padH, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
           <TxnDetailBody
             sale={detail.sale}
             items={detail.items}
@@ -355,9 +393,15 @@ export default function TransactionsScreen({
             payments={detail.payments ?? []}
             onPayPress={detail.credit && detailDue > 0 ? () => setShowPay(true) : undefined}
           />
-        </ScrollView>
+        </KeyboardSafeScrollView>
         )}
       </View>
+  ) : null;
+
+  if (!isTablet && view.name === "sale" && detail) {
+    return (
+      <>
+      {detailPane}
       <ReceiptModal
         visible={showReceipt}
         receipts={receipts}
@@ -370,7 +414,8 @@ export default function TransactionsScreen({
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#000" }}>
+    <View style={{ flex: 1, backgroundColor: "#000", flexDirection: isTablet ? "row" : "column" }}>
+      <View style={{ width: isTablet ? paneW : undefined, flex: isTablet ? undefined : 1, borderRightWidth: isTablet ? 1 : 0, borderRightColor: "#1c1c1f" }}>
       <SectionList
         sections={grouped}
         keyExtractor={s => s.id}
@@ -439,16 +484,36 @@ export default function TransactionsScreen({
           );
         }}
         ListEmptyComponent={
-          <View style={{ padding: 24, alignItems: "center" }}><Text style={{ color: palette.muted2, fontSize: 13 }}>Pa gen vant.</Text></View>
+          loading ? (
+            <View style={{ paddingTop: 8 }}>
+              {[0, 1, 2, 3].map(i => <SkeletonCardRow key={i} tone="dark" />)}
+            </View>
+          ) : (
+            <View style={{ padding: 24, alignItems: "center" }}><Text style={{ color: palette.muted2, fontSize: 13 }}>Pa gen vant.</Text></View>
+          )
         }
       />
+      </View>
+      {isTablet ? (
+        <View style={{ flex: 1, backgroundColor: "#000" }}>
+          {view.name === "sale" && detail ? detailPane : (
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+              <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="card-outline" size={28} color="#8e8e93" />
+              </View>
+              <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 16, marginTop: 14, textAlign: "center" }}>Chwazi yon vant</Text>
+              <Text style={{ color: "#8e8e93", fontFamily: "Inter_400Regular", fontSize: 13, marginTop: 6, textAlign: "center", lineHeight: 19 }}>Tape yon vant nan lis la pou wè resi a isit la.</Text>
+            </View>
+          )}
+        </View>
+      ) : null}
       <Modal visible={showFilters} transparent animationType="slide" onRequestClose={() => setShowFilters(false)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
           <Pressable style={{ flex: 1 }} onPress={() => setShowFilters(false)} />
-          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32, maxHeight: "85%" }}>
+          <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 + insets.bottom, maxHeight: "85%" }}>
             <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
             {filterView === "kredi" ? (
-              <ScrollView showsVerticalScrollIndicator={false}>
+              <KeyboardSafeScrollView showsVerticalScrollIndicator={false}>
                 <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
                   <Pressable onPress={() => setFilterView("main")} style={{ width: 48, height: 48, borderRadius: 24, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
                     <Ionicons name="arrow-back" size={22} color="#fff" />
@@ -501,7 +566,7 @@ export default function TransactionsScreen({
                     </Pressable>
                   );
                 })}
-              </ScrollView>
+              </KeyboardSafeScrollView>
             ) : (
               <>
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>

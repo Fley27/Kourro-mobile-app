@@ -2,12 +2,16 @@
 // (typed/scanned, id or VTE-...), plus lost-receipt search (customer/date/item).
 import React, { useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Alert } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useResponsive, sheetBox } from "../responsive";
 import { findSaleForPickup, recordPickup, listOpenPickups, toNum, remainingOf } from "./store";
 import { printPickupReceipt, type PickupReceiptLine } from "./receipt";
 import { PAYMENT_LABELS, receiptLineLabels, attachLineLabels } from "../receipts";
 import { saleLineLabel } from "../labels";
 import { getDb } from "../db";
 import { uploadSuccess, uploadError } from "../components/UploadTransition";
+import { KeyboardSafeView } from "../components/KeyboardSafe";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export function PickupReceiptExtra({ items, saleId }: { items: any[]; saleId: string }) {
   const open = (items ?? []).filter(it => remainingOf(it) > 0);
@@ -33,6 +37,8 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
   cashierName?: string | null;
   onClose: () => void;
 }) {
+  const insets = useSafeAreaInsets();
+  const { width, isTablet } = useResponsive();
   const [query, setQuery] = useState("");
   const [lines, setLines] = useState<any[]>([]);
   const [saleId, setSaleId] = useState<string | null>(null);
@@ -132,8 +138,9 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardSafeView>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-        <View style={{ backgroundColor: "#1C1C1E", borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 16, paddingBottom: 28, maxHeight: "90%" }}>
+        <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#1C1C1E", borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 16, paddingBottom: 28 + insets.bottom, maxHeight: "90%" }}>
           <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
           <Text style={{ fontWeight: "800", fontSize: 17, color: "#fff" }}>Rekipere machandiz</Text>
           <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 4 }}>Chèche pa ID vant / VTE-… (eskane oswa tape). Ka repete jiskaske 0.</Text>
@@ -149,7 +156,7 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
             <Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>Pèdi resi? Lis vant ki gen balans (pa kliyan/dat/atik)</Text>
           </Pressable>
           {openList.length > 0 ? (
-            <ScrollView style={{ maxHeight: 140, marginTop: 6 }}>
+            <KeyboardSafeScrollView style={{ maxHeight: 140, marginTop: 6 }}>
               {openList.map(r => (
                 <Pressable key={r.sale.id} onPress={() => { setQuery(r.sale.sale_number ?? r.sale.id); setOpenList([]); }}
                   style={{ padding: 10, borderWidth: 0.5, borderColor: "#3a3a3c", backgroundColor: "#2b2b2b", borderRadius: 10, marginBottom: 6 }}>
@@ -157,10 +164,10 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
                   <Text style={{ fontSize: 11, color: "#8e8e93" }}>{r.openItems.map((it: any) => `${saleLineLabel(it)} (rete ${remainingOf(it)})`).join(", ")}</Text>
                 </Pressable>
               ))}
-            </ScrollView>
+            </KeyboardSafeScrollView>
           ) : null}
           {saleId ? (
-            <ScrollView style={{ marginTop: 10, maxHeight: 320 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <KeyboardSafeScrollView style={{ marginTop: 10, maxHeight: 320 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <Text style={{ fontWeight: "700", fontSize: 13, marginBottom: 8, color: "#fff" }}>Vant {saleNumber}</Text>
               {lines.filter(it => remainingOf(it) > 0.000001).map(it => (
                 <View key={it.id} style={{ borderWidth: 0.5, borderColor: "#3a3a3c", backgroundColor: "#2b2b2b", borderRadius: 12, padding: 10, marginBottom: 8 }}>
@@ -175,7 +182,7 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
                     style={{ marginTop: 8, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 10, padding: 10, fontWeight: "700", color: "#fff", backgroundColor: "#000" }} />
                 </View>
               ))}
-            </ScrollView>
+            </KeyboardSafeScrollView>
           ) : null}
           <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
             <Pressable onPress={onClose} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
@@ -189,6 +196,8 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
           </View>
         </View>
       </View>
+    
+      </KeyboardSafeView>
     </Modal>
   );
 }

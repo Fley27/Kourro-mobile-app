@@ -2,7 +2,7 @@
 // five-step guided flow (product → items → batch → variants → prices) and
 // the manage screens (same steps, existing entities, section menu).
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, Pressable, Modal, SafeAreaView, Alert } from "react-native";
+import { View, Text, Pressable, Modal, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb } from "../../db";
 import { UploadTransition, minDelay, type UploadPhase } from "../../components/UploadTransition";
@@ -14,6 +14,9 @@ import BatchStep from "./BatchStep";
 import VariantsStep from "./VariantsStep";
 import PricesStep from "./PricesStep";
 import BundlesStep from "./BundlesStep";
+import { SafeScreen } from "../../components/SafeScreen";
+import { IS_TABLET_DEVICE } from "../../responsive";
+import { KeyboardSafeView } from "../../components/KeyboardSafe";
 
 export type StepKey = "product" | "items" | "batch" | "variants" | "prices" | "bundles";
 
@@ -183,7 +186,9 @@ export default function CatalogFlowModal({
   nextRef.current = null;
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={close}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
+      <KeyboardSafeView>
+      <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
+        <View style={{ flex: 1, width: IS_TABLET_DEVICE ? "100%" : undefined, maxWidth: IS_TABLET_DEVICE ? 940 : undefined, alignSelf: IS_TABLET_DEVICE ? "center" : undefined }}>
         <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 }}>
           <Pressable
             onPress={() => {
@@ -298,7 +303,9 @@ export default function CatalogFlowModal({
             )}
           </>
         )}
-      </SafeAreaView>
+        </View>
+      </SafeScreen>
+      </KeyboardSafeView>
       <UploadTransition visible={upBusy} phase={upPhase} title="Anrejistre pwodwi" detail={upMsg} />
     </Modal>
   );

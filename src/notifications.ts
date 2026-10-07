@@ -1,5 +1,6 @@
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
+import type { NotifRoute } from "./notifRoute";
 
 let handlerConfigured = false;
 
@@ -31,17 +32,62 @@ async function ensurePermitted(): Promise<boolean> {
   }
 }
 
-export async function notifyLocal(title: string, body: string): Promise<void> {
+/**
+ * Post a local notification. `route` is the record that triggered it — it
+ * rides along in `content.data` so a tap can reopen that exact record
+ * (see notifRoute.ts). Callers that fire without one are plain status
+ * banners with nowhere to go.
+ */
+export async function notifyLocal(title: string, body: string, route?: NotifRoute): Promise<void> {
   try {
     const ok = await ensurePermitted();
     if (!ok) return;
     await Notifications.scheduleNotificationAsync({
-      content: { title, body, sound: "default" },
+      content: { title, body, sound: "default", data: route ? { route } : undefined },
       trigger: null,
     });
   } catch {
     // Notifications are best-effort; never break the underlying action
   }
+}
+
+type RouteHandler = (route: NotifRoute) => void;
+
+/**
+ * Wire taps (and the cold-start tap that launched the app) to `onRoute`.
+ * The listener fires once per response; `lastKey` drops the replay that
+ * `getLastNotificationResponseAsync` would otherwise hand us for a response
+ * we already acted on. Returns a disposer — App.tsx registers exactly once,
+ * so there is no shared subscription state to manage.
+ */
+export function initNotifRouting(onRoute: RouteHandler): () => void {
+  if (Platform.OS === "web") return () => {};
+  configure();
+
+  let lastKey: string | null = null;
+  const handle = (resp: Notifications.NotificationResponse | null | undefined) => {
+    const req = resp?.notification?.request;
+    if (!req) return;
+    const route = (req.content?.data as { route?: NotifRoute } | undefined)?.route;
+    if (!route || typeof route.screen !== "string") return;
+    const key = `${req.identifier ?? ""}|${req.content?.title ?? ""}`;
+    if (key === lastKey) return;
+    lastKey = key;
+    console.log("[notif] tap →", JSON.stringify(route));
+    try { onRoute(route); } catch { /* a bad route must never break a tap */ }
+  };
+
+  let sub: { remove: () => void } | null = null;
+  try {
+    sub = Notifications.addNotificationResponseReceivedListener(handle);
+  } catch { /* listener is best-effort */ }
+  // Cold start: the app was launched straight from the notification tap, so
+  // no live response ever reaches the listener above.
+  try {
+    Notifications.getLastNotificationResponseAsync().then(handle).catch(() => {});
+  } catch { /* best-effort */ }
+
+  return () => { try { sub?.remove(); } catch { /* ignore */ } };
 }
 
 // One stable identifier so re-scheduling replaces the existing reminder

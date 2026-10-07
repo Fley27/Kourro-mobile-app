@@ -1,12 +1,26 @@
 import React, { useEffect, useRef, useState } from "react";
 import { View, Text, Pressable, Animated, Easing, useColorScheme } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ht } from "../i18n";
 import { shadow, motion } from "../theme";
 
 export type Tab = "home" | "pos" | "customers" | "orders" | "transactions" | "more";
 
-const tabs: { id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+// Role → the tab set the nav chrome shows (bottom bar on phones; sidebar
+// gating on tablets). Extracted from App so both navs can't drift.
+//  • associate: floor work only — Kliyan + Kòmand + Plis, no checkout.
+//  • owner/admin/manager/cashier: Kay, Vant, Tranzaksyon, Plis.
+//  • cook: also sees Kliyan (kitchen display).
+export function visibleTabsFor(role: string): Tab[] {
+  return role === "associate"
+    ? ["customers", "orders", "more"]
+    : (["owner", "admin", "manager", "cashier"] as string[]).includes(role)
+      ? ["home", "pos", "transactions", "more"]
+      : ["home", "pos", "customers", "transactions", "more"];
+}
+
+export const tabs: { id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { id: "home", label: ht.home, icon: "bookmark-outline" },
   { id: "pos", label: ht.sale, icon: "cart-outline" },
   { id: "customers", label: "Kliyan", icon: "people-outline" },
@@ -34,6 +48,9 @@ const ACTIVE_LABEL_SIZE = 15;
 export function BottomNav({ active, onChange, visibleTabs }: { active: Tab; onChange: (t: Tab) => void; visibleTabs?: Tab[] }) {
   const scheme = useColorScheme();
   const isDark = scheme === "dark";
+  // Bar background stays flush to the screen edge, but the icons/labels lift
+  // out of the iOS home-indicator / Android gesture zone via the bottom inset.
+  const insets = useSafeAreaInsets();
   // Near-black bar in both schemes (inherently dark-mode ready).
   const BAR_BG = isDark ? "#191920" : "#0B0B0D";
 
@@ -84,7 +101,7 @@ export function BottomNav({ active, onChange, visibleTabs }: { active: Tab; onCh
           backgroundColor: BAR_BG,
           flexDirection: "row",
           overflow: "visible",
-          paddingBottom: BOTTOM_PAD,
+          paddingBottom: BOTTOM_PAD + insets.bottom,
         }}
       >
         {/* Sliding white selector — carries the active icon with it */}

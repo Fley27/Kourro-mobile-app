@@ -8,6 +8,8 @@
 // Required: everything except email, address line 2 and the marketing toggle.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Switch, FlatList, Alert, ActivityIndicator } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useResponsive, sheetBox } from "../responsive";
 import { Ionicons } from "@expo/vector-icons";
 import * as Contacts from "expo-contacts";
 import COUNTRIES from "../data/countries.json";
@@ -15,6 +17,8 @@ import DEPARTMENTS from "../data/haitiDepartments.json";
 import DIALS from "../data/countryDial.json";
 import { MaskedTextInput, countDigits, indexAfterDigits } from "./maskedInput";
 import { normalizePhoneInput, formatPhoneDigits } from "../phoneFormat";
+import { KeyboardSafeView } from "./KeyboardSafe";
+import { KeyboardSafeScrollView } from "./KeyboardSafe";
 
 export type CustomerFormData = {
   firstName: string;
@@ -32,6 +36,10 @@ export type CustomerFormData = {
   birthDay: string;
   birthMonth: string;
   birthYear: string;
+  /** Display-only: the record was auto-created from a phone lookup. */
+  prospect?: boolean;
+  /** Set by the prospect toggle → updateCustomerRecord clears is_prospect. */
+  clearProspect?: boolean;
 };
 
 export const EMPTY_CUSTOMER_FORM: CustomerFormData = {
@@ -50,6 +58,8 @@ export const EMPTY_CUSTOMER_FORM: CustomerFormData = {
   birthDay: "",
   birthMonth: "",
   birthYear: "",
+  prospect: false,
+  clearProspect: false,
 };
 
 export const MONTHS = [
@@ -171,6 +181,8 @@ export function DarkDropdown(props: {
   placeholder?: string;
   searchable?: boolean;
 }) {
+  const insets = useSafeAreaInsets();
+  const { width, isTablet } = useResponsive();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const current = props.options.find(o => o.code === props.value);
@@ -189,15 +201,16 @@ export function DarkDropdown(props: {
         <Ionicons name="chevron-down" size={18} color={MUTED} />
       </Pressable>
       <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
+      <KeyboardSafeView>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-          <View style={{ backgroundColor: "#161616", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, maxHeight: "70%" }}>
+          <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#161616", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28 + insets.bottom, maxHeight: "70%" }}>
             <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 10 }} />
             <Text style={{ fontWeight: "800", fontSize: 15, color: INK, marginBottom: 10 }}>{props.label}</Text>
             {props.searchable ? (
               <TextInput value={q} onChangeText={setQ} placeholder="Chèche…" placeholderTextColor={MUTED}
                 style={{ backgroundColor: BOX, borderWidth: 1, borderColor: HAIR, borderRadius: 10, padding: 12, marginBottom: 8, fontSize: 14, color: INK }} />
             ) : null}
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <KeyboardSafeScrollView showsVerticalScrollIndicator={false}>
               {filtered.map(o => (
                 <Pressable key={o.code} onPress={() => { props.onSelect(o.code); setOpen(false); }}
                   style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 0.5, borderBottomColor: "#262626" }}>
@@ -206,10 +219,12 @@ export function DarkDropdown(props: {
                 </Pressable>
               ))}
               {filtered.length === 0 ? <Text style={{ color: MUTED, textAlign: "center", padding: 16 }}>Pa jwenn</Text> : null}
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </View>
-      </Modal>
+      
+      </KeyboardSafeView>
+    </Modal>
     </View>
   );
 }
@@ -221,6 +236,8 @@ export function CountryDialPicker({ visible, onClose, onPick, title }: {
   onPick: (iso: string) => void;
   title: string;
 }) {
+  const insets = useSafeAreaInsets();
+  const { width, isTablet } = useResponsive();
   const [q, setQ] = useState("");
   const rows = useMemo(() => {
     const all = DIALS as { c: string; n: string; d: string }[];
@@ -234,8 +251,9 @@ export function CountryDialPicker({ visible, onClose, onPick, title }: {
   }, [q]);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardSafeView>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-        <View style={{ backgroundColor: "#161616", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, maxHeight: "75%" }}>
+        <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#161616", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28 + insets.bottom, maxHeight: "75%" }}>
           <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 10 }} />
           <Text style={{ fontWeight: "800", fontSize: 15, color: INK, marginBottom: 10 }}>{title}</Text>
           <TextInput value={q} onChangeText={setQ} placeholder="Chèche peyi oswa kòd…" placeholderTextColor={MUTED}
@@ -256,6 +274,8 @@ export function CountryDialPicker({ visible, onClose, onPick, title }: {
           />
         </View>
       </View>
+    
+      </KeyboardSafeView>
     </Modal>
   );
 }
@@ -299,6 +319,8 @@ export default function CustomerForm({ initial, onState }: {
   initial?: Partial<CustomerFormData>;
   onState?: (data: CustomerFormData, valid: boolean) => void;
 }) {
+  const insets = useSafeAreaInsets();
+  const { width, isTablet } = useResponsive();
   const [d, setD] = useState<CustomerFormData>({ ...EMPTY_CUSTOMER_FORM, ...initial });
   const set = (k: keyof CustomerFormData) => (v: string | boolean) =>
     setD(prev => ({ ...prev, [k]: v }));
@@ -410,6 +432,24 @@ export default function CustomerForm({ initial, onState }: {
         <Switch value={d.marketingConsent} onValueChange={v => set("marketingConsent")(v)} />
       </View>
 
+      {d.prospect ? (
+        <View style={{ marginTop: 10, backgroundColor: "#1a1408", borderWidth: 1, borderColor: "#5a4a1a", borderRadius: 12, padding: 14 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 6 }}>
+            <View style={{ backgroundColor: "#7a5c00", borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2, marginRight: 8 }}>
+              <Text style={{ color: "#ffd60a", fontSize: 10, fontWeight: "700" }}>PWOSPÈK</Text>
+            </View>
+            <Text style={{ color: INK, fontSize: 14, fontWeight: "700", flex: 1 }}>Te kreye otomatikman</Text>
+          </View>
+          <Text style={{ color: MUTED, fontSize: 12, marginBottom: 10 }}>
+            Kont sa a soti nan chèch telefòn. Fèmen bouton sa a yon fwa ou konfime li se yon vre kliyan.
+          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+            <Text style={{ flex: 1, color: INK, fontSize: 15, fontWeight: "600", marginRight: 12 }}>Li pa pwospèk anko</Text>
+            <Switch value={!!d.clearProspect} onValueChange={v => set("clearProspect")(v)} />
+          </View>
+        </View>
+      ) : null}
+
       <Divider />
       <SectionTitle>Address</SectionTitle>
 
@@ -461,8 +501,9 @@ export default function CustomerForm({ initial, onState }: {
       />
 
       <Modal visible={contactsOpen} transparent animationType="slide" onRequestClose={() => setContactsOpen(false)}>
+      <KeyboardSafeView>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-          <View style={{ backgroundColor: "#161616", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28, maxHeight: "75%" }}>
+          <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#161616", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 28 + insets.bottom, maxHeight: "75%" }}>
             <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 10 }} />
             <Text style={{ fontWeight: "800", fontSize: 15, color: INK, marginBottom: 10 }}>Contacts</Text>
             <TextInput value={contactsQ} onChangeText={setContactsQ} placeholder="Chèche…" placeholderTextColor={MUTED}
@@ -484,7 +525,9 @@ export default function CustomerForm({ initial, onState }: {
             />
           </View>
         </View>
-      </Modal>
+      
+      </KeyboardSafeView>
+    </Modal>
     </View>
   );
 }

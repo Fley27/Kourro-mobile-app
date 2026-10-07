@@ -4,7 +4,9 @@
 // what it already loads (stats, notes, transactions). Edit once here,
 // it changes everywhere.
 import React, { useState } from "react";
-import { View, Text, Pressable, useWindowDimensions } from "react-native";
+import { View, Text, Pressable } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { KeyboardSafeView } from "./KeyboardSafe";
 import { Ionicons } from "@expo/vector-icons";
 import { fmtG, fmt, monoStyle } from "../format";
 import { deptName, countryName } from "./CustomerForm";
@@ -327,10 +329,12 @@ export function ModalScreen({ children, topInset }: {
   children: React.ReactNode;
   topInset?: number;
 }) {
-  const { height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   return (
-    <View style={{ flex: 1, minHeight: height, backgroundColor: "#000", padding: 18, paddingTop: topInset ?? 60 }}>
-      {children}
-    </View>
+    <KeyboardSafeView>
+      <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: topInset ?? insets.top + 12 }}>
+        {children}
+      </View>
+    </KeyboardSafeView>
   );
 }

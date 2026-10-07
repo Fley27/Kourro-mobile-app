@@ -9,10 +9,11 @@ import { Text } from "../../components/InterText";
 import { Ionicons } from "@expo/vector-icons";
 import { fmtG, monoStyle } from "../../format";
 import { getDb } from "../../db";
-import { SyncManager } from "../../sync/syncManager";
+import { syncNow } from "../../sync/autoSync";
 import { useResponsive } from "../../responsive";
 import { ColumnChart, LineChart, type ChartBar } from "../../components/charts";
 import CreditCustomerProfile from "./CreditCustomerProfile";
+import { FALLBACK_STORE_ID } from "../../db/ids";
 import {
   creditHealth,
   customerCreditRows,
@@ -109,7 +110,7 @@ function Empty({ text }: { text: string }) {
 
 export default function CreditReportScreen({
   role = "owner",
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   storeName,
   userStoreIds = [],
   deviceId = "device-unknown",
@@ -171,7 +172,7 @@ export default function CreditReportScreen({
     setRefreshing(true);
     try {
       if (withCloud) {
-        try { await new SyncManager(storeId, deviceId).fullSync({ quiet: true }); } catch {}
+        try { await syncNow({ quiet: true, storeId, deviceId }); } catch {}
         if (!mounted.current) return;
       }
       await load();

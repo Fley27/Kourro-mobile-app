@@ -4,6 +4,7 @@
 // history preserved — never overwritten).
 import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Modal, KeyboardAvoidingView, Platform, Alert } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../db";
 import { currentVariantPrice, type UnpricedVariantRow } from "../catalogModel";
@@ -24,6 +25,7 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
   rows: UnpricedVariantRow[];
   onSaved: () => void;
 }) {
+  const insets = useSafeAreaInsets();
   const { width, isTablet } = useResponsive();
   const [vals, setVals] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -138,7 +140,7 @@ export default function MissingPricesSheet({ visible, onClose, rows, onSaved }: 
       <KeyboardAvoidingView enabled={Platform.OS === "ios"} behavior="padding" keyboardVerticalOffset={0} style={{ flex: 1 }}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
           <ScrollView keyboardShouldPersistTaps="always" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
-            <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: "#1C1C1E", borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 16, paddingBottom: 28, maxHeight: "88%" }}>
+            <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: "#1C1C1E", borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 16, paddingBottom: 28 + insets.bottom, maxHeight: "88%" }}>
               <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
               <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
                 <View style={{ width: 44, height: 44, borderRadius: 14, backgroundColor: "#2b2b2b", borderWidth: 0.5, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>

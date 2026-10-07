@@ -1,10 +1,12 @@
 // Auth store for the mobile app — shared singleton (zustand) so App + screens
 // see the same session state. Session/profile persisted via SecureStore.
-// Offline-first: a signed-in profile unlocks by PIN after a cold reopen.
+// Offline-first: a local (non-hosted) boot restores the cached profile
+// outright; a hosted boot falls back to the offline PIN unlock.
 import { create } from "zustand";
 import * as SecureStore from "expo-secure-store";
 import { supabase, isLiveSupabase } from "./supabase";
 import { USERS, type Role, type User } from "../users";
+import { mintId } from "../db/ids";
 
 export type AuthStatus = "loading" | "signedout" | "signedin";
 
@@ -128,7 +130,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (!isLiveSupabase) {
       // Mock: create a local owner account (no backend needed to try the flow).
       const cred: CachedProfile = {
-        userId: `owner-${Date.now()}`,
+        userId: mintId(),
         email: email.trim().toLowerCase(),
         name: name.trim() || "Nouvo Pwopriyetè",
         role: "owner",
@@ -202,9 +204,14 @@ async function restore() {
   const cache = await readCachedProfile();
   if (cache) useAuthStore.setState({ cached: cache });
   if (!isLiveSupabase) {
-    // Local dev: no real Supabase — if a profile was cached on disk, keep it
-    // so LoginScreen can offer PIN unlock (!user && cached). Else login.
-    useAuthStore.setState({ status: "signedout", error: null });
+    // Local dev: restore straight from the cached profile — a rebundle or app
+    // restart must not bounce a tester back to the login form. signOut() clears
+    // the cache, so an explicit log out still needs credentials to get back in.
+    if (cache) {
+      useAuthStore.setState({ cached: cache, user: mapProfileToUser(cache), status: "signedin", error: null });
+    } else {
+      useAuthStore.setState({ status: "signedout", error: null });
+    }
     return;
   }
   const { data: { session } } = await supabase.auth.getSession();

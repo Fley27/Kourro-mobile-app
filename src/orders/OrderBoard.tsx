@@ -3,6 +3,8 @@
 // from the Orders tab and as a sheet inside the POS order strip.
 import React, { useEffect, useMemo, useState } from "react";
 import { Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useResponsive, sheetBox } from "../responsive";
 import { Ionicons } from "@expo/vector-icons";
 import { fmtG, monoStyle } from "../format";
 import { getDb } from "../db";
@@ -40,6 +42,9 @@ import type { SettleSuccess } from "./settlement";
 import ReceiptModal from "../components/ReceiptModal";
 import type { ReceiptData } from "../receipts";
 import { buildOrderBill } from "./bill";
+import { KeyboardSafeView } from "../components/KeyboardSafe";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { FALLBACK_STORE_ID } from "../db/ids";
 
 type Sheet =
   | { mode: "edit"; line: OrderLine }
@@ -67,7 +72,7 @@ export function OrderBoard({
   onChanged,
   showHeader = true,
   headerRight,
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   deviceId = "web",
   storeName = "Pétion-Ville",
   canSell = true,
@@ -87,6 +92,8 @@ export function OrderBoard({
   /** Opens the in-Orders "Mete atik" picker (the gold bar button). */
   onAddItems?: () => void;
 }) {
+  const insets = useSafeAreaInsets();
+  const { width, isTablet } = useResponsive();
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [menuLine, setMenuLine] = useState<OrderLine | null>(null);
   const [showPay, setShowPay] = useState(false);
@@ -409,7 +416,7 @@ export function OrderBoard({
         </View>
       ) : null}
 
-      <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 12, paddingBottom: 24 }}>
+      <KeyboardSafeScrollView contentContainerStyle={{ padding: 16, paddingTop: 12, paddingBottom: 24 }}>
         {/* Stats: full order value + how many items are out vs total. */}
         <View style={{ backgroundColor: PROD_DARK.card, borderRadius: 16, borderWidth: 1, borderColor: PROD_DARK.hair, padding: 16, flexDirection: "row", alignItems: "center" }}>
           <View style={{ flex: 1, alignItems: "center" }}>
@@ -550,7 +557,7 @@ export function OrderBoard({
             })
           )}
         </View>
-      </ScrollView>
+      </KeyboardSafeScrollView>
 
       {/* Bottom bar: running total + open the in-screen Mete atik picker. */}
       {onAddItems && order.status === "open" ? (
@@ -600,7 +607,7 @@ export function OrderBoard({
       {/* "•••" line menu — everything the rules allow beyond the primary CTA. */}
       <Modal visible={!!menuLine} transparent animationType="fade" onRequestClose={() => setMenuLine(null)}>
         <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.72)", justifyContent: "flex-end" }} onPress={() => setMenuLine(null)}>
-          <View style={{ backgroundColor: "#111114", borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 20, paddingBottom: 30, borderTopWidth: 1, borderColor: PROD_DARK.hair }}>
+          <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#111114", borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 20, paddingBottom: 30 + insets.bottom, borderTopWidth: 1, borderColor: PROD_DARK.hair }}>
             <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: "#3a3a3c", alignSelf: "center", marginBottom: 14 }} />
             <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 17 }} numberOfLines={1}>{menuLine?.name ?? "Atik"}</Text>
             <View style={{ marginTop: 14, gap: 8 }}>
@@ -654,6 +661,8 @@ function ActionSheet({
   onSubmit: () => void;
   busy: boolean;
 }) {
+  const insets = useSafeAreaInsets();
+  const { width, isTablet } = useResponsive();
   const mode = sheet?.mode ?? null;
   const showQty = mode === "edit" || mode === "change";
   const reqReason = mode === "override" || (mode === "decide" && !(sheet as any)?.accept);
@@ -664,8 +673,9 @@ function ActionSheet({
 
   return (
     <Modal visible={!!sheet} transparent animationType="fade" onRequestClose={onClose}>
+      <KeyboardSafeView>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.72)", justifyContent: "flex-end" }}>
-        <View style={{ backgroundColor: "#111114", borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 20, paddingBottom: 30, borderTopWidth: 1, borderColor: PROD_DARK.hair }}>
+        <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#111114", borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 20, paddingBottom: 30 + insets.bottom, borderTopWidth: 1, borderColor: PROD_DARK.hair }}>
           <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: "#3a3a3c", alignSelf: "center", marginBottom: 14 }} />
           <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 17 }}>{mode ? SHEET_TITLE[mode] : ""}</Text>
           {line ? (
@@ -713,6 +723,8 @@ function ActionSheet({
           </View>
         </View>
       </View>
+    
+      </KeyboardSafeView>
     </Modal>
   );
 }

@@ -5,5 +5,5 @@
     "allowSyntheticDefaultImports": true,
     "noEmit": true
   },
-  "include": ["src", "app"]
+  "include": ["src", "app", "App.tsx"]
 }

@@ -1,5 +1,6 @@
 import React from "react";
 import { View, Text, Pressable, Modal } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useResponsive, sheetBox } from "../responsive";
 import { ht } from "../i18n";
 
@@ -15,11 +16,12 @@ export function ScanSheet(props: {
   productLabel: string;
   overlay?: boolean;
 }) {
+  const insets = useSafeAreaInsets();
   const { visible, onClose, onSimulate, productLabel, overlay } = props;
   const { width, isTablet } = useResponsive();
   const body = (
     <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-      <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16, minHeight: 320 }}>
+      <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16, paddingBottom: 16 + insets.bottom, minHeight: 320 }}>
         <View style={{ width: 40, height: 4, backgroundColor: "#e2e8f0", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
         <Text style={{ fontWeight: "900", fontSize: 18, textAlign: "center" }}>📷 {ht.scan}</Text>
         <View style={{ height: 160, backgroundColor: "#0f172a", borderRadius: 24, marginTop: 16, alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: "#22c55e", borderStyle: "dashed" }}>

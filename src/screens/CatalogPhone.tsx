@@ -9,11 +9,14 @@ import {
   SearchHeader, CategoryStrip, ProductCard, statusForProduct,
 } from "./CatalogShared";
 import type { CatalogModel } from "../catalogModel";
+import { SkeletonProductCard } from "../components/Skeleton";
 
 export interface CatalogPhoneProps {
   role: Role;
   products: Product[];
   categories: Category[];
+  /** First DB load — skeleton cards instead of the "Pa gen pwodwi" flash. */
+  loading?: boolean;
   q: string; setQ: React.Dispatch<React.SetStateAction<string>>;
   onOpenFilter: () => void; filterOn: boolean; draftCount: number;
   cat: string; setCat: React.Dispatch<React.SetStateAction<string>>;
@@ -34,7 +37,7 @@ export interface CatalogPhoneProps {
 export function CatalogPhone(props: CatalogPhoneProps) {
   const { width, padH } = useResponsive();
   const {
-    role, products, categories,
+    role, products, categories, loading,
     q, setQ, onOpenFilter, filterOn, draftCount, cat, setCat,
     filtered,
     canEdit,
@@ -82,7 +85,18 @@ export function CatalogPhone(props: CatalogPhoneProps) {
               />
             );
           }}
-          ListEmptyComponent={<View style={{ backgroundColor: "#1C1C1E", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>Pa gen pwodwi nan kategori sa</Text><Text style={{ color: "#8e8e93", fontSize: 11, marginTop: 4 }}>Eseye yon lòt chèche oswa kategori</Text></View>}
+          ListEmptyComponent={
+            loading ? (
+              <View style={{ gap: 12 }}>
+                <SkeletonProductCard />
+                <SkeletonProductCard />
+                <SkeletonProductCard />
+                <SkeletonProductCard />
+              </View>
+            ) : (
+              <View style={{ backgroundColor: "#1C1C1E", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>Pa gen pwodwi nan kategori sa</Text><Text style={{ color: "#8e8e93", fontSize: 11, marginTop: 4 }}>Eseye yon lòt chèche oswa kategori</Text></View>
+            )
+          }
         />
       </>
     </View>

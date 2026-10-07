@@ -8,7 +8,7 @@
 // come later via Inventory + Pri. The type toggle covers goods (units +
 // variants steps) and services (supplier hidden, variants in serviceMode).
 import React, { useEffect, useState } from "react";
-import { View, Text, Pressable, ScrollView, Modal, SafeAreaView, Alert } from "react-native";
+import { View, Text, Pressable, ScrollView, Modal, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../../db";
 import { loadCatalogModel, softDeleteProduct } from "../../catalogModel";
@@ -18,6 +18,9 @@ import { UploadTransition, minDelay, type UploadPhase } from "../../components/U
 import ProductStep from "./ProductStep";
 import ItemsStep from "./ItemsStep";
 import VariantsStep from "./VariantsStep";
+import { SafeScreen } from "../../components/SafeScreen";
+import { IS_TABLET_DEVICE } from "../../responsive";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
 
 const MAX_PRODUCTS = 10;
 const norm = (s: string) => String(s ?? "").trim().toLowerCase();
@@ -249,7 +252,8 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
+      <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
+        <View style={{ flex: 1, width: IS_TABLET_DEVICE ? "100%" : undefined, maxWidth: IS_TABLET_DEVICE ? 940 : undefined, alignSelf: IS_TABLET_DEVICE ? "center" : undefined }}>
         <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 }}>
           <Pressable
             onPress={() => {
@@ -298,7 +302,7 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
 
         {view === "list" ? (
           <View style={{ flex: 1 }}>
-          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+          <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
             {rows.length === 0 ? (
               <View style={{ alignItems: "center", paddingVertical: 40 }}>
                 <Text style={{ fontSize: 13, color: "#8e8e93" }}>Poko gen pwodwi — tape + pou ajoute premye a.</Text>
@@ -336,7 +340,7 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
                 <Text style={{ fontWeight: "700", fontSize: 14, color: "#fff" }}>+ ajoute yon lòt pwodwi</Text>
               </Pressable>
             )}
-          </ScrollView>
+          </KeyboardSafeScrollView>
           {session.length > 0 && (
             <View style={{ padding: 16, paddingTop: 10, backgroundColor: "#000", borderTopWidth: 0.5, borderColor: "#262626" }}>
               <Pressable onPress={() => setView("review")} style={{ paddingVertical: 14, borderRadius: 12, backgroundColor: "#fff", alignItems: "center" }}>
@@ -347,7 +351,7 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
           </View>
         ) : view === "review" ? (
           <View style={{ flex: 1 }}>
-          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+          <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
             {rows.map(r => {
               const iss = issues[r.id]?.msgs ?? [];
               const stp = issues[r.id]?.step ?? 0;
@@ -366,7 +370,7 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
                 </Pressable>
               );
             })}
-          </ScrollView>
+          </KeyboardSafeScrollView>
           <View style={{ padding: 16, paddingTop: 10, backgroundColor: "#000", borderTopWidth: 0.5, borderColor: "#262626" }}>
             <Pressable onPress={submit} disabled={busy} style={{ paddingVertical: 14, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", opacity: busy ? 0.6 : 1 }}>
               <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>{busy ? "Ap soumèt…" : `Soumèt ${session.length} pwodwi`}</Text>
@@ -396,7 +400,7 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
                   <VariantsStep ctx={ctx} productId={draftId} productName={draftName} serviceMode={flowType === "service"} stageMode registerNext={registerNext} active={stepKey === "variants"} onNext={goNext} />
                 </View>
                 {stepKey === "summary" ? (
-                  <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+                  <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
                     <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 6 }}>
                       <Text style={{ fontWeight: "800", fontSize: 17, color: "#fff" }} numberOfLines={1}>{draftName || "—"}</Text>
                       <Text style={{ fontSize: 12, color: "#8e8e93" }}>
@@ -406,13 +410,14 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
                     <Pressable onPress={collapseProduct} style={{ paddingVertical: 14, borderRadius: 12, backgroundColor: "#fff", alignItems: "center" }}>
                       <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>Anrejistre pwodwi a</Text>
                     </Pressable>
-                  </ScrollView>
+                  </KeyboardSafeScrollView>
                 ) : null}
               </>
             ) : null}
           </View>
         )}
-      </SafeAreaView>
+        </View>
+      </SafeScreen>
       <UploadTransition visible={upBusy} phase={upPhase} title="Soumèt pwodwi" detail={upMsg} />
     </Modal>
   );

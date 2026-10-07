@@ -1,6 +1,7 @@
 import React from "react";
 import { View, Text, TextInput, Pressable, FlatList } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { SkeletonListRow } from "../components/Skeleton";
 
 // Dark reference design: black list, pill search + filter, initial tiles,
 // name + phone|email rows with hairline separators. Phone only.
@@ -9,6 +10,8 @@ export interface CustomersPhoneProps {
   customers: any[];
   debts: any[];
   displayCustomers: any[];
+  /** First DB load — show skeleton rows instead of the "Pa gen kliyan" flash. */
+  loading?: boolean;
   search: string;
   setSearch: (v: string) => void;
   showDebtOnly: boolean;
@@ -28,8 +31,8 @@ function initials(name: string) {
 }
 
 export function CustomersPhone(props: CustomersPhoneProps) {
-  const { displayCustomers, search, setSearch, showDebtOnly, setShowDebtOnly, selectedCustomerId, setSelectedCustomerId, onAdd, padH } = props;
-  const sorted = [...displayCustomers].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
+  const { displayCustomers, search, setSearch, showDebtOnly, setShowDebtOnly, selectedCustomerId, setSelectedCustomerId, onAdd, padH, loading } = props;
+  // Ordering comes from the shell (displayCustomers) so phone matches tablet. 
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
@@ -76,7 +79,7 @@ export function CustomersPhone(props: CustomersPhoneProps) {
       </View>
 
       <FlatList
-        data={sorted}
+        data={displayCustomers}
         keyExtractor={(item, index) => `${item.id}__${index}`}
         style={{ flex: 1 }}
         contentContainerStyle={{ paddingBottom: 120 }}
@@ -100,10 +103,16 @@ export function CustomersPhone(props: CustomersPhoneProps) {
           );
         }}
         ListEmptyComponent={
-          <View style={{ padding: 32, alignItems: "center" }}>
-            <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>Pa gen kliyan</Text>
-            <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 4 }}>Eseye yon lòt rechèch</Text>
-          </View>
+          loading ? (
+            <View>
+              {[0, 1, 2, 3, 4].map(i => <SkeletonListRow key={i} tone="dark" padH={padH} />)}
+            </View>
+          ) : (
+            <View style={{ padding: 32, alignItems: "center" }}>
+              <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>Pa gen kliyan</Text>
+              <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 4 }}>Eseye yon lòt rechèch</Text>
+            </View>
+          )
         }
       />
     </View>

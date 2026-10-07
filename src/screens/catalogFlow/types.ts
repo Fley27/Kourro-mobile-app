@@ -1,6 +1,7 @@
 // Catalog flow shared types + small helpers (create chain + manage reuse).
 import type { Category } from "../CatalogShared";
 import type { Item, Variant, Batch } from "../../catalogModel";
+import { mintId } from "../../db/ids";
 
 export type FlowRole = string;
 
@@ -21,10 +22,9 @@ export function slugifyName(s: string): string {
   return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-export function uniqueId(prefix: string, taken: Set<string>, base: string): string {
-  let id = `${prefix}-${base}`;
-  let n = 2;
-  while (!id || taken.has(id)) id = `${prefix}-${base}-${n++}`;
+export function uniqueId(_prefix: string, taken: Set<string>, _base: string): string {
+  let id = mintId();
+  while (taken.has(id)) id = mintId();
   taken.add(id);
   return id;
 }

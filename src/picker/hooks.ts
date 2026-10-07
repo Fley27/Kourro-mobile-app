@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import { Alert } from "react-native";
 import { getUnitsForProduct, getPricesForUnit, getDefaultUnit, resolveLinePrice, type PricingMaps } from "../pricing";
 import { normName } from "../screens/CatalogShared";
-import type { Product, CartItem, PendingSel, PendingState, SaleRow, PriceLine } from "../screens/POSShared";
+import type { Product, CartItem, PendingSel, PendingState, SaleRow, SaleGroup, PriceLine } from "../screens/POSShared";
 
 // ---- Sale logic shared between checkout (POSScreen) and the Orders in-screen
 // item picker. Extracted from POSScreen so one edit updates both flows. ----
@@ -65,13 +65,15 @@ export function makePricing(pricing: PricingMaps, minFactorMap: Map<string, numb
 }
 
 // ---- Sales list: one row per priced variant (unit × variant). Legacy
-// products without pricing rows fall back to a single selling-price row. ----
+// products without pricing rows fall back to a single selling-price row.
+// `variantSales` (key → 30-day units sold) stamps each row's trend count. ----
 export function computeSaleRows(
   products: Product[],
   pricing: PricingMaps,
   minFactorMap: Map<string, number>,
   catNames: Record<string, string>,
   search: string,
+  variantSales?: Map<string, number>,
 ): SaleRow[] {
   const rows: SaleRow[] = [];
   for (const p of products) {
@@ -86,6 +88,7 @@ export function computeSaleRows(
           key: `${p.id}|base|Regular`, product: p, unitId: "", unitName: p.unit ?? "pcs",
           factor: 1, variant: "Regular", price: legacy, maxQ: maxQtyForP(minFactorMap, p, 1),
           variantCountForItem: 1, isTop: (p.sales_count ?? 0) >= 90,
+          salesQty: variantSales?.get(`${p.id}|base|Regular`) ?? 0,
         });
       }
       continue;
@@ -98,6 +101,7 @@ export function computeSaleRows(
           key: `${p.id}|${u.id}|${r.variant}`, product: p, unitId: u.id,
           unitName: u.unit_name, factor, variant: r.variant, price: Number(r.price) || 0,
           maxQ, variantCountForItem: rs.length, isTop: (p.sales_count ?? 0) >= 90,
+          salesQty: variantSales?.get(`${p.id}|${u.id}|${r.variant}`) ?? 0,
         });
       }
     }
@@ -134,12 +138,58 @@ export function useSaleRows(opts: {
   minFactorMap: Map<string, number>;
   catNames: Record<string, string>;
   search: string;
+  variantSales?: Map<string, number>;
 }): SaleRow[] {
-  const { products, pricing, minFactorMap, catNames, search } = opts;
+  const { products, pricing, minFactorMap, catNames, search, variantSales } = opts;
   return useMemo(
-    () => computeSaleRows(products, pricing, minFactorMap, catNames, search),
-    [products, pricing, minFactorMap, catNames, search],
+    () => computeSaleRows(products, pricing, minFactorMap, catNames, search, variantSales),
+    [products, pricing, minFactorMap, catNames, search, variantSales],
   );
+}
+
+// ---- Group the flat variant list by product for the grouped checkout card:
+// identity once in the header, variants as sub-rows. Group order follows the
+// list's existing rank (out-of-stock last); inside a group: in-stock first,
+// smallest factor first, best-seller (30-day) marked as bestKey. ----
+export function groupSaleRows(rows: SaleRow[], catNames: Record<string, string> = {}): SaleGroup[] {
+  const groups: SaleGroup[] = [];
+  const byProduct = new Map<string, SaleGroup>();
+  for (const r of rows) {
+    let g = byProduct.get(r.product.id);
+    if (!g) {
+      g = {
+        product: r.product,
+        categoryName: catNames[String(r.product.category_id ?? "")] ?? "",
+        rows: [],
+        variantCount: 0,
+        bestKey: null,
+      };
+      byProduct.set(r.product.id, g);
+      groups.push(g);
+    }
+    g.rows.push(r);
+  }
+  for (const g of groups) {
+    g.variantCount = g.rows.length;
+    // Mirrors computeSaleRows' outRank: unavailable/out-of-stock last.
+    const outRank = (r: SaleRow) => {
+      const p = r.product;
+      if (p.item_type === "service") return (p.is_available !== 0 && (p.is_available as any) !== false) ? 0 : 1;
+      return r.maxQ <= 0 ? 1 : 0;
+    };
+    g.rows.sort((a, b) => {
+      const ra = outRank(a), rb = outRank(b);
+      if (ra !== rb) return ra - rb;
+      if (a.factor !== b.factor) return a.factor - b.factor;
+      return a.variant.localeCompare(b.variant);
+    });
+    let best: SaleRow | null = null;
+    for (const r of g.rows) {
+      if (r.salesQty > 0 && (!best || r.salesQty > best.salesQty)) best = r;
+    }
+    g.bestKey = best ? best.key : null;
+  }
+  return groups;
 }
 
 // ---- Pending line (tap → 10s hero countdown → commit). The committed line

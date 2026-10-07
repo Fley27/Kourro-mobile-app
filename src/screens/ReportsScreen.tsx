@@ -11,10 +11,11 @@ import { palette, topIconBtn } from "../theme";
 import SalesReportScreen from "./SalesReportScreen";
 import CreditReportScreen from "./credit/CreditReportScreen";
 import BusinessGuardScreen from "./BusinessGuardScreen";
+import { FALLBACK_STORE_ID } from "../db/ids";
 
 export default function ReportsScreen({
   role = "cashier",
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   storeName,
   currentUser,
   userStoreIds = [],

@@ -7,8 +7,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, ScrollView, Modal, Alert } from "react-native";
 import { useResponsive } from "../responsive";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Role } from "../users";
 import { getDb, insertOutbox } from "../db";
+import { useSalesEvents } from "../salesEvents";
 import { fmtG } from "../format";
 import { SuppliersPhone } from "./SuppliersPhone";
 import { SuppliersTablet } from "./SuppliersTablet";
@@ -30,6 +32,7 @@ import {
   type SupplierFormValues,
 } from "../components/SupplierSheets";
 import { UploadTransition, minDelay, uploadSuccess, uploadError, type UploadPhase } from "../components/UploadTransition";
+import { mintId } from "../db/ids";
 
 export type Supplier = {
   id: string;
@@ -58,12 +61,14 @@ type Props = {
   stores?: { id: string; name: string }[];
 };
 
-const uid = () => `sup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-const accUid = () => `sba-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+const uid = () => mintId();
+const accUid = () => mintId();
 const byName = (a: any, b: any) => String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
 
 export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
   const [suppliers, setSuppliers] = useState<any[]>([]);
+  // First-load flag — skeleton rows instead of the "Pa gen founisè" flash.
+  const [loading, setLoading] = useState(true);
   const [batchCounts, setBatchCounts] = useState<Record<string, { count: number; total: number }>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [supplierBatches, setSupplierBatches] = useState<any[]>([]);
@@ -89,8 +94,9 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
   const isOwner = role === "owner";
   const canWrite = isOwner || role === "admin";
   const { width, isTablet, isLandscape, padH } = useResponsive();
+  const insets = useSafeAreaInsets();
   // Master-detail shows in portrait; landscape tablets use phone layout.
-  const showTablet = isTablet && !isLandscape;
+  const showTablet = isTablet;
 
   async function load() {
     try {
@@ -111,10 +117,14 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
       setBatchCounts(counts);
     } catch (e) {
       console.log("[Suppliers load] failed:", e);
+    } finally {
+      setLoading(false);
     }
   }
 
   useEffect(() => { load(); }, []);
+  // Live: refreshed after any pull that brought supplier rows.
+  useSalesEvents(() => { load().catch(() => {}); });
 
   async function loadBankAccounts(id: string): Promise<any[]> {
     try {
@@ -449,11 +459,12 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
   ) : null;
 
   return (
-    <View style={{ flex: 1, backgroundColor: showTablet ? "#F8F9FA" : "#000", alignItems: showTablet ? "center" : undefined }}>
+    <View style={{ flex: 1, backgroundColor: "#000", alignItems: showTablet ? "center" : undefined }}>
       {showTablet ? (
         <SuppliersTablet
           suppliers={suppliers}
           displaySuppliers={displaySuppliers}
+          loading={loading}
           batchCounts={batchCounts}
           search={search}
           setSearch={setSearch}
@@ -492,6 +503,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
         <SuppliersPhone
           suppliers={suppliers}
           displaySuppliers={displaySuppliers}
+          loading={loading}
           search={search}
           setSearch={setSearch}
           showBatchOnly={showBatchOnly}
@@ -507,7 +519,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
 
       {selectedSupplier && (
         <Modal visible={!!selectedSupplier && !showTablet} transparent={false} animationType="slide" onRequestClose={() => setSelectedId(null)}>
-          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: 60 }}>
+          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 18 + insets.bottom }}>
             <CustomerProfileHeader
               onBack={() => {
                 if (showEdit) setShowEdit(false);
@@ -528,7 +540,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
                 </Pressable>
               ) : undefined}
             />
-            <ScrollView ref={detailScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 }}>
+            <ScrollView ref={detailScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 + insets.bottom }}>
               {body}
             </ScrollView>
             {showProfileMenu && selectedSupplier ? (

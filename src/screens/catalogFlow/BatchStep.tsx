@@ -17,6 +17,8 @@ import { canHandleBatches } from "./types";
 import PickerGrid from "../../components/PickerGrid";
 import { uploadError } from "../../components/UploadTransition";
 import { MoneyInput } from "../../components/maskedInput";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { mintId } from "../../db/ids";
 
 function todayStr(): string {
   const d = new Date();
@@ -152,7 +154,7 @@ export default function BatchStep({
   function stageAdd() {
     if (!openValid || busy) { setTouched(true); if (openError) Alert.alert("Enkonplè", openError); return; }
     setStaged(prev => [...prev, {
-      key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      key: mintId(),
       itemId, supplierId, qty: qty.trim(), total: total.trim(), date,
     }]);
     setQty("");
@@ -361,7 +363,7 @@ export default function BatchStep({
   }
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {productName ? <Text style={{ fontSize: 12, color: "#8e8e93" }}>{productName} · pri acha antre isit la sèlman</Text> : null}
       {batches.map(b => {
         const st = statusStyle(String(b.status));
@@ -484,6 +486,6 @@ export default function BatchStep({
         ) : null}
       </View>
       )}
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

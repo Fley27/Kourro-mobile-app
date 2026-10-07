@@ -9,6 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 import CustomerForm, { EMPTY_CUSTOMER_FORM, type CustomerFormData } from "./CustomerForm";
 import { CustomerProfileHeader, ModalScreen } from "./CustomerProfile";
 import { MoneyInput } from "./maskedInput";
+import { KeyboardSafeScrollView } from "./KeyboardSafe";
 
 export type CustomerSaveExtra = { creditLimit: number | null };
 
@@ -20,14 +21,14 @@ export function NewCustomerFormBody({ formKey, initial, onFormState }: {
   onFormState: (data: any, valid: boolean) => void;
 }) {
   return (
-    <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       <CustomerForm
         key={`new-cust-${formKey}`}
         initial={initial}
         onState={onFormState}
       />
       <View style={{ height: 16 }} />
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }
 
@@ -46,7 +47,7 @@ export function EditCustomerFormBody({ formKey, initial, onFormState, notes, not
   onFormState: (data: any, valid: boolean) => void;
 } & CustomerNotesProps) {
   return (
-    <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       <CustomerForm
         key={`edit-cust-${formKey}`}
         initial={initial}
@@ -54,7 +55,7 @@ export function EditCustomerFormBody({ formKey, initial, onFormState, notes, not
       />
       <NotesBlock notes={notes} noteInput={noteInput} onNoteInput={onNoteInput} savingNote={savingNote} onAddNote={onAddNote} notesLimit={notesLimit} />
       <View style={{ height: 16 }} />
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }
 
@@ -155,7 +156,7 @@ export function NewCustomerSheet({ visible, resetKey, initial, onClose, onSave, 
       saveDisabled={!form?.valid || !limitOk}
       saving={saving}
     >
-      <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+      <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         <CustomerForm
           key={`sheet-new-${resetKey ?? "x"}-${visible ? "open" : "shut"}`}
           initial={{ ...EMPTY_CUSTOMER_FORM, ...initial }}
@@ -165,7 +166,7 @@ export function NewCustomerSheet({ visible, resetKey, initial, onClose, onSave, 
           <CreditLimitSection value={creditLimit} onChange={setCreditLimit} editable={!!canEditCreditLimit} current={null} />
         ) : null}
         <View style={{ height: 16 }} />
-      </ScrollView>
+      </KeyboardSafeScrollView>
     </SheetShell>
   );
 }
@@ -201,7 +202,7 @@ export function EditCustomerContent({ resetKey, visible, initial, initialCreditL
     cb.current({ data: form?.data ?? null, valid: !!form?.valid && limitOk, creditLimit: parsedLimit, limitOk });
   }, [form, parsedLimit, limitOk]);
   return (
-    <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       <CustomerForm
         key={`sheet-edit-${resetKey ?? "x"}-${visible ? "open" : "shut"}`}
         initial={{ ...EMPTY_CUSTOMER_FORM, ...initial }}
@@ -212,7 +213,7 @@ export function EditCustomerContent({ resetKey, visible, initial, initialCreditL
       ) : null}
       <NotesBlock {...notesProps} />
       <View style={{ height: 16 }} />
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }
 

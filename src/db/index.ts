@@ -3,6 +3,9 @@ import { fmtG } from "../format";
 import { itemCostsFor } from "../analytics/metrics";
 import { seedDevCatalogIfNeeded, buildDevCatalogMemory, devSeedEnabled } from "./devSeed";
 import { runCatalogCutover, cleanupAutoBaseJunk, migrateInventoryBatches, backfillSkus, backfillSupplierCostItems, migrateBundlesToV3 } from "./cutoverCatalog";
+import { FALLBACK_STORE_ID, STORE_IDS, stableId } from "./ids";
+import { USER_IDS } from "../users";
+import { mintId } from "./ids";
 
 // Web fallback: in-memory mock when expo-sqlite not available (Expo web)
 let SQLite: any = null;
@@ -204,19 +207,40 @@ if (devSeedEnabled()) {
 }
 
 const customersSeed = [
-  { id: "cust-1", store_id: "demo-store-id", name: "Jean Baptiste", id_card_number: "004-123-4567", phone: "+509 3810 0001", address: "Delmas 33, Port-au-Prince", total_debt: 3500, credit_limit: 5000, credit_limit_source: "manual", is_high_risk: true, open_debt_count: 1 },
-  { id: "cust-2", store_id: "demo-store-id", name: "Marie Claire", id_card_number: "004-987-6543", phone: "+509 3820 0002", address: "Pétion-Ville, Rue Panaméricaine", total_debt: 0, credit_limit: null, is_high_risk: false, open_debt_count: 0 },
-  { id: "cust-3", store_id: "demo-store-id", name: "Frantz Delmas", id_card_number: "004-111-2222", phone: "+509 3833 0003", address: "Carrefour, Bizoton", total_debt: 0, credit_limit: null, is_high_risk: false, open_debt_count: 0 },
+  { id: stableId("cust-1"), store_id: FALLBACK_STORE_ID, name: "Jean Baptiste", id_card_number: "004-123-4567", phone: "+509 3810 0001", address: "Delmas 33, Port-au-Prince", total_debt: 3500, credit_limit: 5000, credit_limit_source: "manual", is_high_risk: true, open_debt_count: 1 },
+  { id: stableId("cust-2"), store_id: FALLBACK_STORE_ID, name: "Marie Claire", id_card_number: "004-987-6543", phone: "+509 3820 0002", address: "Pétion-Ville, Rue Panaméricaine", total_debt: 0, credit_limit: null, is_high_risk: false, open_debt_count: 0 },
+  { id: stableId("cust-3"), store_id: FALLBACK_STORE_ID, name: "Frantz Delmas", id_card_number: "004-111-2222", phone: "+509 3833 0003", address: "Carrefour, Bizoton", total_debt: 0, credit_limit: null, is_high_risk: false, open_debt_count: 0 },
 ];
 const creditsSeed = [
-  { id: "debt-1", store_id: "demo-store-id", customer_id: "cust-1", sale_id: "sale-debt-1", amount: 3500, amount_paid: 0, balance: 3500, status: "pending", due_date: new Date(Date.now() - 5*24*3600*1000).toISOString().slice(0,10), created_at: new Date(Date.now() - 10*24*3600*1000).toISOString() },
+  { id: stableId("debt-1"), store_id: FALLBACK_STORE_ID, customer_id: stableId("cust-1"), sale_id: stableId("sale-debt-1"), amount: 3500, amount_paid: 0, balance: 3500, status: "pending", due_date: new Date(Date.now() - 5*24*3600*1000).toISOString().slice(0,10), created_at: new Date(Date.now() - 10*24*3600*1000).toISOString() },
 ];
 
+// Single-flight: `db` is only assigned once openDatabaseAsync resolves, so
+// without this every caller that arrives during that await opens its OWN
+// connection and runs the whole migration block again. That is not harmless
+// duplication — one-time steps such as remapNonUuidSaleItemIds mint fresh
+// uuids and queue them for push even when their UPDATE no longer matches, so
+// N concurrent first calls produced N copies of every sale line in the cloud.
+let dbOpening: Promise<any> | null = null;
+
 export async function getDb(): Promise<any> {
+  if (db) return db;
+  if (!dbOpening) {
+    dbOpening = openDb().finally(() => { dbOpening = null; });
+  }
+  return dbOpening;
+}
+
+async function openDb(): Promise<any> {
   if (db) return db;
   if (SQLite) {
     try {
       db = await SQLite.openDatabaseAsync("jesyon.db");
+      // Queue outbox rows for the operational tables (shifts/reports/tabs/
+      // pickups/hands/notifications) at this one choke point — see
+      // withOpsOutbox below. Wrapping before the schema loop keeps every
+      // subsequent write covered.
+      withOpsOutbox(db);
       // Run schema statement-by-statement (not one giant exec): a single
       // failing statement must not abort the whole init and silently drop
       // us onto the RAM mock (which loses all sales on rebundle).
@@ -450,6 +474,11 @@ export async function getDb(): Promise<any> {
       try { await db.execAsync("ALTER TABLE suppliers ADD COLUMN department TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE suppliers ADD COLUMN city TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE suppliers ADD COLUMN payment_methods TEXT"); } catch {}
+      // --- promotions (proformat / discount / coupon / redemption log / audit) ---
+      // The 5 new tables ship in SCHEMA_SQL; these are the columns added to
+      // pre-existing tables for installs created before this release.
+      try { await db.execAsync("ALTER TABLE sales ADD COLUMN proformat_id TEXT"); } catch {}
+      try { await db.execAsync("ALTER TABLE customers ADD COLUMN is_prospect INTEGER DEFAULT 0"); } catch {}
       try { await db.execAsync(`CREATE TABLE IF NOT EXISTS supplier_bank_accounts (
         id TEXT PRIMARY KEY, store_id TEXT, supplier_id TEXT NOT NULL,
         bank_name TEXT NOT NULL, currency TEXT NOT NULL, account_number TEXT,
@@ -481,6 +510,33 @@ export async function getDb(): Promise<any> {
       // Price every item once per launch: derived costs get written back to
       // items.cost (and pushed out), so a container is never cost-free again.
       try { await recomputeItemCosts(db); } catch (e) { console.log("[backfill] item costs skipped:", String(e)); }
+      // --- one-time: rewrite proformat cost snapshots to the article-cost
+      // formula (resell − items.cost per line). The old snapshot multiplied a
+      // base-unit cost by a canonical qty and could explode past the resell
+      // price, so every old profit scope was garbage. Guarded by user_version
+      // (a proformat snapshot is frozen after this — repair must not re-run
+      // when items.cost drifts later). On failure the flag stays unset and
+      // the repair retries next launch.
+      try {
+        const uv = ((await db.getAllAsync("PRAGMA user_version")) as any[]) ?? [];
+        if (Number(uv?.[0]?.user_version ?? 0) < 1) {
+          const { repairProformatCosts } = await import("../promos/promosModel");
+          const n = await repairProformatCosts(db);
+          await db.execAsync("PRAGMA user_version = 1");
+          if (n) console.log(`[migrate] proformat cost repair: ${n} row(s) rewritten`);
+        }
+      } catch (e) { console.log("[migrate] proformat cost repair skipped:", String(e)); }
+      // --- one-time: non-uuid sale line ids (see remapNonUuidSaleItemIds) ---
+      // Guarded by its own _meta flag so it never competes with the
+      // user_version steps above for the same launch.
+      try {
+        const seen = ((await db.getAllAsync("SELECT value FROM _meta WHERE key = ?", ["sale_item_ids_uuid"])) as any[]) ?? [];
+        if (!seen.length) {
+          const n = await remapNonUuidSaleItemIds(db);
+          await db.runAsync("INSERT OR REPLACE INTO _meta (key,value) VALUES (?,?)", ["sale_item_ids_uuid", "1"]);
+          if (n) console.log(`[migrate] sale_item ids -> uuid: ${n} row(s)`);
+        }
+      } catch (e) { console.log("[migrate] sale_item id remap skipped:", String(e)); }
       // --- demo customers/credits (credit flows need them; independent of catalog) ---
       try {
         const existing = await db.getAllAsync("SELECT id FROM customers LIMIT 1").catch(() => []);
@@ -515,8 +571,8 @@ export async function getDb(): Promise<any> {
   // Seed stores + categories for persistent testing (except users)
   if (!memStore.has("stores")) {
     memStore.set("stores", [
-      { id: "st-petyonvil", name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", created_at: new Date().toISOString(), disabled: 0, breach_flagged: 0, breached_at: null, revoked_by: null, currency: "HTG", updated_at: new Date().toISOString() },
-      { id: "st-delma", name: "Delmas", location: "Dèlma", code: "DL-9034", created_at: new Date().toISOString(), disabled: 0, breach_flagged: 0, breached_at: null, revoked_by: null, currency: "HTG", updated_at: new Date().toISOString() },
+      { id: STORE_IDS.petionVille, name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", created_at: new Date().toISOString(), disabled: 0, breach_flagged: 0, breached_at: null, revoked_by: null, currency: "HTG", updated_at: new Date().toISOString() },
+      { id: STORE_IDS.delmas, name: "Delmas", location: "Dèlma", code: "DL-9034", created_at: new Date().toISOString(), disabled: 0, breach_flagged: 0, breached_at: null, revoked_by: null, currency: "HTG", updated_at: new Date().toISOString() },
     ]);
   }
   if (!memStore.has("categories")) memStore.set("categories", []);
@@ -583,14 +639,14 @@ export async function getDb(): Promise<any> {
     memStore.set("customers", [...customersSeed]);
     memStore.set("customer_history", []);
     memStore.set("employees", [
-      { id: "emp-1", store_id: "demo-store-id", full_name: "Jacques Owner", role: "owner", phone: "+509 1000 0001", salary: 85000, address: "Delmas 33, Port-au-Prince", is_active: 1, online_status: 1 },
-      { id: "emp-2", store_id: "demo-store-id", full_name: "Marie Admin", role: "admin", phone: "+509 1000 0002", salary: 65000, address: "Pétion-Ville, Rue Panaméricaine", is_active: 1, online_status: 1 },
-      { id: "emp-3", store_id: "demo-store-id", full_name: "Pierre Manager", role: "manager", phone: "+509 1000 0003", salary: 45000, address: "Carrefour, Bizoton", is_active: 1, online_status: 0 },
-      { id: "emp-4", store_id: "demo-store-id", full_name: "Sophie Cashier", role: "cashier", phone: "+509 1000 0004", salary: 25000, address: "Tabarre, Route de l'Aéroport", is_active: 1, online_status: 0 },
-      { id: "emp-5", store_id: "demo-store-id", full_name: "Jean-Louis Dupont", role: "cashier", phone: "+509 3456 7890", salary: 22000, address: "Jacmel, Centre-Ville", is_active: 0, online_status: 0 },
-      { id: "emp-6", store_id: "demo-store-id", full_name: "Marie-Claire Fontaine", role: "manager", phone: "+509 4567 8901", salary: 48000, address: "Cap-Haïtien, Bas-Rivière", is_active: 1, online_status: 1 },
-      { id: "emp-7", store_id: "demo-store-id", full_name: "Robenson Saintil", role: "cashier", phone: "+509 5678 9012", salary: 20000, address: "Les Cayes, Boucan Rouge", is_active: 0, online_status: 0 },
-      { id: "emp-8", store_id: "demo-store-id", full_name: "Tatiana Beaumont", role: "admin", phone: "+509 6789 0123", salary: 60000, address: "Pétion-Ville, Nazon", is_active: 1, online_status: 1 },
+      { id: stableId("emp-1"), store_id: FALLBACK_STORE_ID, full_name: "Jacques Owner", role: "owner", phone: "+509 1000 0001", salary: 85000, address: "Delmas 33, Port-au-Prince", is_active: 1, online_status: 1 },
+      { id: stableId("emp-2"), store_id: FALLBACK_STORE_ID, full_name: "Marie Admin", role: "admin", phone: "+509 1000 0002", salary: 65000, address: "Pétion-Ville, Rue Panaméricaine", is_active: 1, online_status: 1 },
+      { id: stableId("emp-3"), store_id: FALLBACK_STORE_ID, full_name: "Pierre Manager", role: "manager", phone: "+509 1000 0003", salary: 45000, address: "Carrefour, Bizoton", is_active: 1, online_status: 0 },
+      { id: stableId("emp-4"), store_id: FALLBACK_STORE_ID, full_name: "Sophie Cashier", role: "cashier", phone: "+509 1000 0004", salary: 25000, address: "Tabarre, Route de l'Aéroport", is_active: 1, online_status: 0 },
+      { id: stableId("emp-5"), store_id: FALLBACK_STORE_ID, full_name: "Jean-Louis Dupont", role: "cashier", phone: "+509 3456 7890", salary: 22000, address: "Jacmel, Centre-Ville", is_active: 0, online_status: 0 },
+      { id: stableId("emp-6"), store_id: FALLBACK_STORE_ID, full_name: "Marie-Claire Fontaine", role: "manager", phone: "+509 4567 8901", salary: 48000, address: "Cap-Haïtien, Bas-Rivière", is_active: 1, online_status: 1 },
+      { id: stableId("emp-7"), store_id: FALLBACK_STORE_ID, full_name: "Robenson Saintil", role: "cashier", phone: "+509 5678 9012", salary: 20000, address: "Les Cayes, Boucan Rouge", is_active: 0, online_status: 0 },
+      { id: stableId("emp-8"), store_id: FALLBACK_STORE_ID, full_name: "Tatiana Beaumont", role: "admin", phone: "+509 6789 0123", salary: 60000, address: "Pétion-Ville, Nazon", is_active: 1, online_status: 1 },
     ]);
     memStore.set("shifts", []);
     memStore.set("cash_movements", []);
@@ -727,7 +783,7 @@ export async function getDb(): Promise<any> {
         const ui = arr.findIndex((x: any) => x.product_id === rec.product_id && x.supplier_id === rec.supplier_id && x.unit_id === rec.unit_id);
         if (ui >= 0) arr[ui] = { ...arr[ui], ...rec, id: arr[ui].id };
         else {
-          if (!rec.id) rec.id = `psc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          if (!rec.id) rec.id = mintId();
           arr.push(rec);
         }
         memStore.set("product_supplier_costs", arr);
@@ -927,13 +983,13 @@ export async function getDb(): Promise<any> {
         const ts = new Date().toISOString();
         let c: any;
         if (params.length >= 15 && sql.includes("check_date")) {
-          c = { id: params[0], store_id: params[1], report_id: params[2], cashier_id: params[3], check_date: params[4] ?? ts.slice(0,10), stated_amount: params[5] ?? 0, program_amount: params[6] ?? 0, status: params[7] ?? "pending", action: params[8] ?? null, set_by: params[9] ?? "owner-1", set_by_role: params[10] ?? "owner", is_default: params[11] ?? 0, approved_by: params[12] ?? null, correct_amount: params[13] ?? null, created_at: params[14] ?? ts, updated_at: ts };
+          c = { id: params[0], store_id: params[1], report_id: params[2], cashier_id: params[3], check_date: params[4] ?? ts.slice(0,10), stated_amount: params[5] ?? 0, program_amount: params[6] ?? 0, status: params[7] ?? "pending", action: params[8] ?? null, set_by: params[9] ?? USER_IDS.owner, set_by_role: params[10] ?? "owner", is_default: params[11] ?? 0, approved_by: params[12] ?? null, correct_amount: params[13] ?? null, created_at: params[14] ?? ts, updated_at: ts };
         } else if (params.length === 11) {
           const created = params[10] ?? ts;
-          c = { id: params[0], store_id: params[1], report_id: params[2], cashier_id: params[3], check_date: created.slice(0,10), stated_amount: params[4] ?? 0, program_amount: params[5] ?? 0, status: params[6] ?? "pending", action: params[7] ?? null, set_by: "owner-1", set_by_role: "owner", is_default: 1, approved_by: params[8] ?? null, correct_amount: params[9] ?? null, created_at: created, updated_at: ts };
+          c = { id: params[0], store_id: params[1], report_id: params[2], cashier_id: params[3], check_date: created.slice(0,10), stated_amount: params[4] ?? 0, program_amount: params[5] ?? 0, status: params[6] ?? "pending", action: params[7] ?? null, set_by: USER_IDS.owner, set_by_role: "owner", is_default: 1, approved_by: params[8] ?? null, correct_amount: params[9] ?? null, created_at: created, updated_at: ts };
         } else {
           const created = params[8] ?? ts;
-          c = { id: params[0], store_id: params[1], report_id: params[2], cashier_id: params[3], check_date: created.slice(0,10), stated_amount: params[4] ?? 0, program_amount: params[5] ?? 0, status: params[6] ?? "pending", action: params[7] ?? null, set_by: "owner-1", set_by_role: "owner", is_default: 1, approved_by: null, correct_amount: null, created_at: created, updated_at: ts };
+          c = { id: params[0], store_id: params[1], report_id: params[2], cashier_id: params[3], check_date: created.slice(0,10), stated_amount: params[4] ?? 0, program_amount: params[5] ?? 0, status: params[6] ?? "pending", action: params[7] ?? null, set_by: USER_IDS.owner, set_by_role: "owner", is_default: 1, approved_by: null, correct_amount: null, created_at: created, updated_at: ts };
           if (params.length === 9) { c.action = params[7] ?? null; c.created_at = params[8] ?? ts; c.updated_at = ts; }
         }
         arr.push(c);
@@ -1045,9 +1101,9 @@ export async function getDb(): Promise<any> {
         if (cm.type === "withdrawal" || cm.type === "inventory") {
           const notifs = memStore.get("notifications") ?? [];
           const label = cm.type === "inventory" ? `Kach envantè ${fmtG(cm.amount)}` : `Retrè ${fmtG(cm.amount)}`;
-          for (const sup of ["owner-1", "admin-1", "manager-1"]) {
+          for (const sup of [USER_IDS.owner, USER_IDS.admin, USER_IDS.manager]) {
             if (sup === cm.created_by) continue;
-            notifs.push({ id: `notif-${Date.now()}-${sup}-${Math.random().toString(36).slice(2, 4)}`, user_id: sup, type: cm.type === "inventory" ? "inventory_pickup" : "withdrawal", reference_id: cm.id, message: `${label} — ${cm.reason ?? ""}`.trim(), status: "pending", created_at: new Date().toISOString() });
+            notifs.push({ id: mintId(), user_id: sup, type: cm.type === "inventory" ? "inventory_pickup" : "withdrawal", reference_id: cm.id, message: `${label} — ${cm.reason ?? ""}`.trim(), status: "pending", created_at: new Date().toISOString() });
           }
           memStore.set("notifications", notifs);
         }
@@ -1190,8 +1246,8 @@ export async function getDb(): Promise<any> {
         memStore.set("cash_discrepancies", cds);
         // Create notifications for all supervisors
         const notifs = memStore.get("notifications") ?? [];
-        for (const sup of ["owner-1", "admin-1", "manager-1"]) {
-          notifs.push({ id: `notif-${Date.now()}-${sup}-${Math.random().toString(36).slice(2,4)}`, user_id: sup, type: "cash_discrepancy", reference_id: params[0], message: `Kesye rapòte ${fmtG(params[3])} olye de ${fmtG(params[2])} — manke ${fmtG(params[4])}`, status: "pending", created_at: new Date().toISOString() });
+        for (const sup of [USER_IDS.owner, USER_IDS.admin, USER_IDS.manager]) {
+          notifs.push({ id: mintId(), user_id: sup, type: "cash_discrepancy", reference_id: params[0], message: `Kesye rapòte ${fmtG(params[3])} olye de ${fmtG(params[2])} — manke ${fmtG(params[4])}`, status: "pending", created_at: new Date().toISOString() });
         }
         memStore.set("notifications", notifs);
       } else if (sql.includes("UPDATE notifications SET")) {
@@ -2034,23 +2090,181 @@ export async function recomputeItemCosts(db: any, productId?: string): Promise<n
   return changed;
 }
 
+/**
+ * One-time: sale line ids once minted as `${saleId}_${lineIdx}_${productId}`.
+ * The cloud column is uuid, so those lines bounced on push and every other
+ * register saw the sale with no lines. Remap them to real uuids, repoint
+ * sale_pickups, and queue them for push (they were never in the cloud).
+ */
+export async function remapNonUuidSaleItemIds(db: any): Promise<number> {
+  const rows = ((await db.getAllAsync("SELECT * FROM sale_items WHERE instr(id,'_') > 0")) as any[]) ?? [];
+  let changed = 0;
+  for (const r of rows) {
+    const newId = mintId();
+    const now = new Date().toISOString();
+    await db.runAsync("UPDATE sale_pickups SET sale_item_id = ? WHERE sale_item_id = ?", [newId, r.id]);
+    const res = await db.runAsync("UPDATE sale_items SET id = ?, updated_at = ? WHERE id = ?", [newId, now, r.id]);
+    // Only the run whose UPDATE actually renamed the row may queue it. A
+    // concurrent getDb() could have read the same composite row a moment
+    // earlier; queueing anyway would push a uuid the device never inserted and
+    // every register would then pull a duplicate copy of that line.
+    if (Number(res?.changes ?? 1) === 0) continue;
+    // Explicit field list (no spread): SQLite hands back 0/1 booleans, and the
+    // cloud wants `false` for is_deleted.
+    await insertOutbox("sale_items", "create", {
+      id: newId, store_id: r.store_id, sale_id: r.sale_id, product_id: r.product_id,
+      product_name: r.product_name, unit_id: r.unit_id ?? null, variant: r.variant ?? null,
+      quantity: r.quantity, unit_price: r.unit_price, cost_price: r.cost_price,
+      line_total: r.line_total, quantity_delivered: r.quantity_delivered,
+      updated_at: now, is_deleted: false,
+    }, db);
+    changed++;
+  }
+  return changed;
+}
+
+// ── Operational outbox interceptor ─────────────────────────────────────────
+// How many times a rejected record is retried before it is dropped. See
+// getDirtyChanges: the queue is read FIFO inside a 100-row window, so a record
+// the server refuses forever must not squat on a slot.
+export const MAX_PUSH_ATTEMPTS = 8;
+
+// Shifts, the day's report, open tabs and their lines, pickup events, standby
+// hands and notifications are written from ~45 call sites across a dozen
+// screens. Asking each one to queue an outbox row by hand meant new callers
+// forgot and their rows never left the device, so the DB layer queues them
+// instead: after a write to one of these tables, read the row back and queue
+// whatever it now looks like. Reads are by primary key and `insertOutbox`
+// already bumps the auto-sync loop.
+const OPS_OUTBOX_TABLES = new Set([
+  "shifts", "daily_reports", "suspended_sales", "suspended_sale_items",
+  "sale_pickups", "standby_hands", "notifications",
+]);
+
+function opsOutboxTable(sql: string): string | null {
+  const m = /^\s*(INSERT|UPDATE|DELETE)\s+(?:OR\s+\w+\s+)?(\w+)/i.exec(sql ?? "");
+  if (!m) return null;
+  return OPS_OUTBOX_TABLES.has(m[2]) ? m[2] : null;
+}
+
+// Position of the `id = ?` placeholder among the statement's `?`s, or -1 when
+// the statement isn't id-keyed (bulk updates such as
+// `WHERE cashier_id = ? AND start_time >= ?`).
+function opsIdParamIndex(sql: string): number {
+  const at = sql.search(/\bid\s*=\s*\?/i);
+  if (at < 0) return -1;
+  return (sql.slice(0, at).match(/\?/g) ?? []).length;
+}
+
+// The WHERE clause plus the bindings that belong to it: an UPDATE's `?`s start
+// in the SET list, so a pre-write lookup has to skip past those to bind the
+// predicate correctly.
+function opsWhere(sql: string): { where: string; bindings: (params: any[]) => any[] } {
+  const at = sql.search(/\bWHERE\b/i);
+  if (at < 0) return { where: "", bindings: () => [] };
+  const where = sql.slice(at).replace(/^\s*WHERE\b/i, "").trim();
+  const setQ = (sql.slice(0, at).match(/\?/g) ?? []).length;
+  const whereQ = (where.match(/\?/g) ?? []).length;
+  return { where, bindings: (params) => (params ?? []).slice(setQ, setQ + whereQ) };
+}
+
+// Queue rows the statement touched. The payload carries the write time: the
+// cloud arbitrates on lamport_clock first and then updated_at, these tables
+// keep lamport at 0 and a few UPDATEs never touch updated_at, so without a
+// fresh timestamp the cloud's own stamped clock wins and the row is dropped as
+// a conflict. A DELETE travels as a tombstone — the push endpoint upserts by id
+// and has no delete operation of its own.
+async function queueOpsRows(d: any, table: string, ids: any[], op: "create" | "update") {
+  for (const id of ids ?? []) {
+    if (id == null || id === "") continue;
+    const rows = (await d.getAllAsync(`SELECT * FROM ${table} WHERE id = ?`, [id]).catch(() => [])) as any[];
+    const row = rows?.[0];
+    if (row) await insertOutbox(table, op, { ...row, updated_at: new Date().toISOString() }, d);
+  }
+}
+
+// Wrap runAsync so every write to an operational table is queued. The affected
+// rows have to be identified BEFORE the statement runs: a DELETE's ids are gone
+// afterwards, and a bulk UPDATE's predicate stops matching its own rows.
+function withOpsOutbox(target: any) {
+  try {
+    const raw = target?.runAsync?.bind(target);
+    if (typeof raw !== "function" || target.__opsOutboxWrapped) return;
+    target.__opsOutboxWrapped = true;
+    target.runAsync = async (sql: string, params: any[] = []) => {
+      const table = opsOutboxTable(sql);
+      if (!table) return raw(sql, params);
+
+      const isInsert = /^\s*INSERT/i.test(sql);
+      const isDelete = /^\s*DELETE/i.test(sql);
+      const idIdx = isInsert ? -1 : opsIdParamIndex(sql);
+      const bulk = !isInsert && !isDelete && idIdx < 0;
+      const { where, bindings } = opsWhere(sql);
+
+      let before: any[] = [];
+      let ids: any[] = [];
+      try {
+        if (isDelete && where) {
+          before = (await target.getAllAsync(`SELECT * FROM ${table} WHERE ${where}`, bindings(params))) as any[];
+        } else if (bulk) {
+          if (where) before = (await target.getAllAsync(`SELECT id FROM ${table} WHERE ${where}`, bindings(params))) as any[];
+        } else if (isInsert) {
+          // Every INSERT into these tables lists `id` first.
+          if (/^\s*INSERT\b[^()]*\(\s*id\s*,/i.test(sql)) ids = [params?.[0]];
+        } else if (idIdx >= 0 && idIdx < (params?.length ?? 0)) {
+          ids = [params[idIdx]];
+        }
+      } catch (e) { console.warn("[outbox] pre-read failed", table, e); }
+
+      const r = await raw(sql, params);
+
+      try {
+        if (isDelete) {
+          for (const row of before) {
+            await insertOutbox(table, "update", { ...row, is_deleted: 1, updated_at: new Date().toISOString() }, target);
+          }
+        } else if (bulk && before.length) {
+          await queueOpsRows(target, table, before.map(r2 => r2?.id), "update");
+        } else if (ids.length) {
+          await queueOpsRows(target, table, ids, isInsert ? "create" : "update");
+        }
+      } catch (e) { console.warn("[outbox] auto-queue failed", table, e); }
+      return r;
+    };
+  } catch (e) {
+    // A frozen/host-provided runAsync would throw here. Sync of these tables
+    // then falls back to whatever the screens queue by hand, so say so loudly
+    // instead of failing getDb().
+    console.warn("[outbox] interceptor not installed:", e);
+  }
+}
+
 // Generic helpers
 // `dbOverride` keeps a caller-provided handle (used by recomputeItemCosts so the
 // row and its outbox entry are written through the same connection).
 export async function insertOutbox(table: string, operation: "create"|"update"|"delete", payload: any, dbOverride?: any) {
   const d = dbOverride ?? await getDb();
-  const { v4 } = await import("uuid");
-  // use uuid v4 for JS env
-  const id = payload.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  // The outbox id is a local queue key only — nothing parses it, so mint a uuid.
   await d.runAsync(
     "INSERT INTO outbox (id, table_name, operation, payload, created_at) VALUES (?,?,?,?,?)",
-    [id + ":" + Date.now(), table, operation, JSON.stringify(payload), new Date().toISOString()]
+    [mintId(), table, operation, JSON.stringify(payload), new Date().toISOString()]
   );
+  // Every local write has to reach the other registers: queue a sync right
+  // after the write lands (autoSync debounces, so a checkout's dozen inserts
+  // become one push). Dynamic import keeps db <- sync -> db acyclic.
+  try { (await import("../sync/autoSync")).requestSync(); } catch {}
 }
 
 export async function getDirtyChanges(): Promise<{ table: string; operation: string; payload: any; outboxId: string }[]> {
   const d = await getDb();
-  const rows = await d.getAllAsync("SELECT * FROM outbox ORDER BY created_at ASC LIMIT 100");
+  // FIFO with a 100-row window: a record the server keeps rejecting would
+  // otherwise occupy a slot forever and eventually push every newer row out of
+  // the window, stalling sync completely. pushToCloud counts attempts and drops
+  // the row once MAX_PUSH_ATTEMPTS is reached.
+  const rows = await d.getAllAsync(
+    "SELECT * FROM outbox WHERE COALESCE(attempts,0) < ? ORDER BY created_at ASC LIMIT 100",
+    [MAX_PUSH_ATTEMPTS],
+  );
   return (rows as any[]).map(r => ({
     table: r.table_name,
     operation: r.operation,

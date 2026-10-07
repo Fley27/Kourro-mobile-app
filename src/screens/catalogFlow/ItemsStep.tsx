@@ -24,6 +24,8 @@ import { canManageCatalog, slugifyName, uniqueId } from "./types";
 import { ratioForUnit as ratioFor, stagedDescendantsOfPool, UnitRefPicker, UnitRelationRow, type UnitRelation } from "./StepForms";
 import { fmtG } from "../../format";
 import { uploadError } from "../../components/UploadTransition";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { mintId } from "../../db/ids";
 
 type Relation = UnitRelation;
 
@@ -290,7 +292,7 @@ export default function ItemsStep({
     const err = validateCandidate({ key: null, name, refId, refKey, relation, qty }, staged);
     if (err) { setTouched(true); Alert.alert("Enkonplè", err); return; }
     setStaged(prev => [...prev, {
-      key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      key: mintId(),
       name: name.trim(), refId, refKey, relation, qty: qty.trim(),
     }]);
     resetForm();
@@ -546,7 +548,7 @@ export default function ItemsStep({
   })();
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {productName ? <Text style={{ fontSize: 12, color: "#8e8e93" }}>{productName} · {items.length + staged.length} inite</Text> : null}
 
       {/* Hard gate: a product with no purchase cost anywhere must get one
@@ -710,6 +712,6 @@ export default function ItemsStep({
         ) : null}
       </View>
       )}
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

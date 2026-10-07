@@ -2,7 +2,8 @@ import React, { useEffect, useState } from "react";
 import { View, Text, ScrollView, Pressable, ActivityIndicator, TextInput, Alert, Modal } from "react-native";
 import { getDb } from "../db";
 import { ht } from "../i18n";
-import { USERS, getUserById } from "../users";
+import { USERS, getUserById, USER_IDS } from "../users";
+import { mintId } from "../db/ids";
 
 type Sale = { id: string; sale_number: string; total: number; payment_method: string; status: string; created_at: string; amount_paid: number };
 type Shift = { id: string; opening_balance: number; status: string; start_time: string; cashier_confirmed: number; manager_confirmed: number; supervisor_confirmed: number; actual_cash?: number };
@@ -17,7 +18,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
   const [showWithdraw, setShowWithdraw] = useState(false);
   const [withdrawAmt, setWithdrawAmt] = useState("");
   const [withdrawReason, setWithdrawReason] = useState("");
-  const [withdrawTakenBy, setWithdrawTakenBy] = useState<string>("owner-1");
+  const [withdrawTakenBy, setWithdrawTakenBy] = useState<string>(USER_IDS.owner);
   const [withdrawals, setWithdrawals] = useState<any[]>([]);
   const [debtCollections, setDebtCollections] = useState<any[]>([]);
   const [cashRequests, setCashRequests] = useState<any[]>([]);
@@ -82,9 +83,9 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
     if (!openingInput.trim() || isNaN(parseFloat(openingInput))) return Alert.alert("Antre montan kach");
     const amt = parseFloat(openingInput);
     const db = await getDb();
-    const id = `shift-${Date.now()}`;
+    const id = mintId();
     await db.runAsync("INSERT INTO shifts (id, store_id, cashier_id, manager_id, opening_balance, status, start_time, end_time, cashier_confirmed, manager_confirmed, supervisor_confirmed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-      [id, storeId, "cashier-1", "manager-1", amt, "open", new Date().toISOString(), null, 0, 1, 0]);
+      [id, storeId, USER_IDS.cashier, USER_IDS.manager, amt, "open", new Date().toISOString(), null, 0, 1, 0]);
     if (amt !== EXPECTED_OPENING) {
       Alert.alert("Kach ouvèti anrejistre", `Kach ouvèti: ${amt} HTG (atann: ${EXPECTED_OPENING} HTG) — Kesye dwe konfime.`);
     } else {
@@ -98,7 +99,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
     if (!shift) return Alert.alert("Pa gen chanjman ouvè");
     const db = await getDb();
     await db.runAsync("INSERT INTO cash_requests (id, shift_id, amount, reason, created_by, status, created_at) VALUES (?,?,?,?,?,?,?)",
-      [`crq-${Date.now()}`, shift.id, amt, cashRequestReason || "Bezwen plis kach pou ouvèti", "cashier-1", "pending", new Date().toISOString()]);
+      [mintId(), shift.id, amt, cashRequestReason || "Bezwen plis kach pou ouvèti", USER_IDS.cashier, "pending", new Date().toISOString()]);
     Alert.alert("Demann voye", `${amt} HTG mande — tann validasyon Manadjè`);
     setCashRequestAmt(""); setCashRequestReason(""); setShowCashRequest(false); load();
   }
@@ -127,7 +128,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
       if (actual !== expected) {
         const diff = expected - actual;
         await db.runAsync("INSERT INTO cash_discrepancies (id, shift_id, manager_amount, cashier_amount, difference, status, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
-          [`cd-${Date.now()}`, shift.id, expected, actual, diff, "pending", currentUser.id, new Date().toISOString()]);
+          [mintId(), shift.id, expected, actual, diff, "pending", currentUser.id, new Date().toISOString()]);
         Alert.alert("Diskrepans anrejistre", `Ou di ${actual} olye de ${expected} (manke ${diff}). Tout sipèvizè resevwa notifikasyon. Ou pa ka vann jiskaske yo konfime.`);
         setCashierCashInput(""); setCashierCashSecret(""); load(); return;
       }
@@ -193,7 +194,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
     if (!takenByUser) return Alert.alert("Chwazi ki moun ki pran kach la");
     const db = await getDb();
     await db.runAsync("INSERT INTO cash_movements (id, shift_id, store_id, type, amount, reason, created_by, taken_by, validated_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      [`cm-${Date.now()}`, shift.id, storeId, "withdrawal", amt, withdrawReason || `Retrè pa ${takenByUser.name}`, role, takenByUser.id, null, new Date().toISOString()]);
+      [mintId(), shift.id, storeId, "withdrawal", amt, withdrawReason || `Retrè pa ${takenByUser.name}`, role, takenByUser.id, null, new Date().toISOString()]);
     Alert.alert("Retrè anrejistre", `${amt} HTG pran pa ${takenByUser.name} — tann konfimasyon ${takenByUser.name} ak kòd ${takenByUser.secret})`);
     setWithdrawAmt(""); setWithdrawReason(""); setShowWithdraw(false); load();
   }
@@ -213,7 +214,7 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
   }
   async function handleEndShift() {
     if (!shift) return;
-    const pendingManagerWithdrawals = withdrawals.filter((w: any) => !w.validated_by && !(w.created_by === "cashier" || w.created_by === "stock" || w.created_by === "cashier-1"));
+    const pendingManagerWithdrawals = withdrawals.filter((w: any) => !w.validated_by && !(w.created_by === "cashier" || w.created_by === "stock" || w.created_by === USER_IDS.cashier));
     if (pendingManagerWithdrawals.length > 0) return Alert.alert("Tann Kesye", `Gen ${pendingManagerWithdrawals.length} retrè ki poko valide pa Kesye.`);
     const actual = parseFloat(actualCash);
     if (isNaN(actual)) return Alert.alert("Antre montan kach ou konte");
@@ -309,9 +310,9 @@ export default function ShiftReportScreen({ storeId, role = "seller", currentUse
                     const db = await getDb();
                     await db.runAsync("UPDATE shifts SET cashier_confirmed = ? WHERE id = ?", [1, shift.id]);
                     // Notify supervisors even on Yes (info)
-                    for (const sup of ["owner-1","admin-1","manager-1"]) {
+                    for (const sup of [USER_IDS.owner,USER_IDS.admin,USER_IDS.manager]) {
                       await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-                        [`notif-yes-${Date.now()}-${sup}`, sup, "cash_confirm_yes", shift.id, `Kesye konfime ${opening} HTG kòrèk`, "pending", new Date().toISOString()]);
+                        [mintId(), sup, "cash_confirm_yes", shift.id, `Kesye konfime ${opening} HTG kòrèk`, "pending", new Date().toISOString()]);
                     }
                     Alert.alert("Konfime ✓", `Kesye konfime ${opening} HTG — koresponn ak kes la. Notifikasyon voye. Ou ka vann kounye a!`);
                     load();

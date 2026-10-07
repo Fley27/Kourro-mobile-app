@@ -114,7 +114,7 @@ export function CustomerRowCard({ item, debts, isSelected, fill, onPress }: Cust
 // ── Empty list state (identical on both form factors) ──
 
 export function CustomerListEmpty() {
-  return <View style={{ backgroundColor: "white", borderWidth: 1, borderColor: "#F1F5F9", borderRadius: 16, padding: 28, alignItems: "center", marginTop: 8 }}><View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#F8FAFC", borderWidth: 1, borderColor: "#F1F5F9", alignItems: "center", justifyContent: "center", marginBottom: 10 }}><Text style={{ fontSize: 18, color: "#94A3B8" }}>◯</Text></View><Text style={{ fontWeight: "600", fontSize: 13, color: "#334155" }}>Pa gen kliyan</Text><Text style={{ color: "#94A3B8", fontSize: 12, marginTop: 4, textAlign: "center" }}>Eseye yon lòt rechèch oswa ajoute yon nouvo kliyan</Text></View>;
+  return <View style={{ backgroundColor: "#111", borderWidth: 1, borderColor: "#262626", borderRadius: 16, padding: 28, alignItems: "center", marginTop: 8 }}><View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#1c1c1e", borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center", marginBottom: 10 }}><Text style={{ fontSize: 18, color: "#8e8e93" }}>◯</Text></View><Text style={{ fontWeight: "600", fontSize: 13, color: "#fff" }}>Pa gen kliyan</Text><Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 4, textAlign: "center" }}>Eseye yon lòt rechèch oswa ajoute yon nouvo kliyan</Text></View>;
 }
 
 // ── Detail header content (avatar + name + chips; containers differ per caller) ──

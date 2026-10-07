@@ -4,7 +4,8 @@ import { ht } from "../i18n";
 import { fmtG, fmt, monoStyle } from "../format";
 import { formatCheckoutRow } from "../catalogModel";
 import { useResponsive } from "../responsive";
-import { PROD_DARK, type SaleRow, type PendingState, type PriceLine, type SearchMode } from "../screens/POSShared";
+import { PROD_DARK, type PendingState, type PriceLine, type SearchMode } from "../screens/POSShared";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 // ---- Phone-set picker components: shared by checkout-phone (POSPhone) and
 // the Orders in-screen item picker. One edit here updates both screens. ----
@@ -13,13 +14,13 @@ import { PROD_DARK, type SaleRow, type PendingState, type PriceLine, type Search
 export function SearchModeBar(props: { searchMode: SearchMode; onChange: (m: SearchMode) => void }) {
   const { searchMode, onChange } = props;
   return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ backgroundColor: "#efe7d2", borderRadius: 14, padding: 3, borderWidth: 0.5, borderColor: "rgba(200,162,74,0.35)" }}>
+    <KeyboardSafeScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ backgroundColor: "#efe7d2", borderRadius: 14, padding: 3, borderWidth: 0.5, borderColor: "rgba(200,162,74,0.35)" }}>
       {([["name", "Nom"], ["barcode", "Bakod"], ["category", "Kategori"]] as [SearchMode, string][]).map(([mode, label]) => (
         <Pressable key={mode} onPress={() => { onChange(mode); }} style={{ minWidth: 78, backgroundColor: searchMode === mode ? "white" : "transparent", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, alignItems: "center", shadowColor: "#000", shadowOpacity: searchMode === mode ? 0.08 : 0, shadowRadius: 4, elevation: searchMode === mode ? 2 : 0 }}>
           <Text style={{ color: searchMode === mode ? "#16130c" : "#6b7280", fontSize: 12, fontWeight: searchMode === mode ? "700" : "600" }}>{label}</Text>
         </Pressable>
       ))}
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }
 
@@ -119,9 +120,9 @@ export function PendingCard(props: {
             </View>
             <Pressable onPress={() => onAdjust(1)} hitSlop={10} style={{ width: 42, height: 42, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}><Text style={{ color: "#16130c", fontWeight: "700", fontSize: 18, lineHeight: 20 }}>+</Text></Pressable>
           </View>
-          <Pressable onPress={onCommit} style={{ flex: 1, backgroundColor: PROD_DARK.green, borderRadius: 16, paddingVertical: 14, paddingHorizontal: 14, alignItems: "center", justifyContent: "center" }}>
-            <Text style={{ color: "#052e16", fontWeight: "800", fontSize: 14, letterSpacing: -0.2 }}>Ajoute • {pending.qty} {pending.unitName}</Text>
-            <Text style={{ color: "rgba(5,46,22,0.7)", fontWeight: "600", fontSize: 11, marginTop: 1 }}>Tape pou konfime</Text>
+          <Pressable onPress={onCommit} style={{ flex: 1, backgroundColor: "rgba(251,191,36,0.07)", borderWidth: 1, borderColor: "rgba(251,191,36,0.55)", borderRadius: 16, paddingVertical: 14, paddingHorizontal: 14, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ color: "#FBBF24", fontWeight: "800", fontSize: 14, letterSpacing: -0.2 }}>Ajoute • {pending.qty} {pending.unitName}</Text>
+            <Text style={{ color: "rgba(251,191,36,0.65)", fontWeight: "600", fontSize: 11, marginTop: 1 }}>Tape pou konfime</Text>
           </Pressable>
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 12 }}>
@@ -135,55 +136,5 @@ export function PendingCard(props: {
         </View>
       </View>
     </View>
-  );
-}
-
-// ---- One sellable variant row: the sales list shows variants (product ×
-// unit × variant + its price), never bare products. Key matches cartKey so
-// in-cart quantities light up per row. ----
-export function VariantCard(props: {
-  row: SaleRow;
-  inCartQty: number;
-  pendingActive: boolean;
-  flex?: number;
-  onPress: () => void;
-}) {
-  const { row, inCartQty, pendingActive, flex, onPress } = props;
-  const item = row.product;
-  // Services carry no stock: availability toggle is the only signal — never
-  // flag them red for stock 0, and always let them sell when available.
-  const isSvc = item.item_type === "service";
-  const svcAvail = !isSvc || (item.is_available !== 0 && (item.is_available as any) !== false);
-  const isOut = !isSvc && row.maxQ <= 0;
-  const isAlmost = !isSvc && !isOut && row.maxQ <= 5;
-  const stockText = isSvc ? "#4ade80" : isOut ? "#F87171" : isAlmost ? "#FBBF24" : "#4ade80";
-  const stockLabel = isSvc ? (svcAvail ? "Disponib" : "Koupe") : isOut ? "Ruptur" : isAlmost ? "Preske fini" : "Disponib";
-  const borderColor = pendingActive ? PROD_DARK.select : isOut ? "#7f1d1d" : isAlmost ? "rgba(245,158,11,0.5)" : PROD_DARK.hair;
-  const dimmed = isSvc ? !svcAvail : isOut;
-  const title = formatCheckoutRow(row.unitName, item.name, row.variant);
-  return (
-    <Pressable onPress={onPress} style={{ flex: flex as any, padding: 14, backgroundColor: PROD_DARK.card, borderRadius: 18, marginBottom: 2, flexDirection: "row", justifyContent: "space-between", alignItems: "center", borderWidth: pendingActive ? 2 : 1, borderColor, opacity: dimmed ? 0.62 : 1 }}>
-      <View style={{ flex: 1, paddingRight: 12 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          {row.isTop && <View style={{ borderWidth: 1, borderColor: PROD_DARK.avatar, borderRadius: 24, paddingHorizontal: 8, paddingVertical: 3 }}><Text style={{ fontSize: 10, color: PROD_DARK.avatar, fontWeight: "800", letterSpacing: 0.3 }}>★ TOP</Text></View>}
-          <Text style={{ fontWeight: "800", fontSize: 15, color: PROD_DARK.ink }} numberOfLines={1}>{title}</Text>
-          {inCartQty > 0 && <View style={{ backgroundColor: "#fff", borderRadius: 24, paddingHorizontal: 8, paddingVertical: 3 }}><Text style={{ fontSize: 11, color: "#16130c", fontWeight: "800" }}>×{inCartQty} nan panyen</Text></View>}
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 5 }}>
-          <Text style={{ color: PROD_DARK.muted, fontSize: 11, fontWeight: "600" }}>{item.sku}</Text>
-          <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: stockText }} />
-          <Text style={{ color: PROD_DARK.muted, fontSize: 11, fontWeight: "600" }}>{isSvc ? stockLabel : `${row.maxQ} ${row.unitName} nan stòk · ${stockLabel}`}</Text>
-          {isAlmost ? (
-            <View style={{ backgroundColor: PROD_DARK.amberBg, borderWidth: 1, borderColor: "rgba(245,158,11,0.5)", borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2 }}><Text style={{ fontSize: 10, color: PROD_DARK.amber, fontWeight: "800" }}>FÈB</Text></View>
-          ) : null}
-        </View>
-      </View>
-      <View style={{ alignItems: "flex-end", gap: 6 }}>
-        <Text style={{ fontWeight: "900", color: PROD_DARK.ink, fontSize: 15, textAlign: "right", ...monoStyle }}>{fmtG(row.price)}</Text>
-        <View style={{ borderWidth: 1, borderColor: isOut ? "#7f1d1d" : PROD_DARK.greenBd, borderRadius: 24, paddingHorizontal: 12, paddingVertical: 5, opacity: dimmed ? 0.6 : 1 }}>
-          <Text style={{ fontSize: 12, color: isOut ? "#F87171" : PROD_DARK.green, fontWeight: "800" }}>{isOut ? "Epuize" : "+ Tape"}</Text>
-        </View>
-      </View>
-    </Pressable>
   );
 }

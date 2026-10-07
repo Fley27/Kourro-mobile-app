@@ -1,14 +1,18 @@
 import React, { useEffect, useRef } from "react";
 import { View, Text, Pressable, FlatList, ScrollView, TextInput } from "react-native";
-import { palette, radius, shadow } from "../theme";
+import { blackPalette as palette, radius, shadow } from "../theme";
 import { CustomerProfileHeader, ProfileMenu } from "../components/CustomerProfile";
 import { SupplierProfileBody, SupplierBatchesList, SupplierBatchDetailBody, batchStatusLabel, type SupplierStats } from "../components/SupplierProfile";
 import { EditSupplierContent, supplierToFormValues, type EditSupplierState } from "../components/SupplierSheets";
 import { fmtG, monoStyle } from "../format";
+import { SkeletonListRow } from "../components/Skeleton";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export interface SuppliersTabletProps {
   suppliers: any[];
   displaySuppliers: any[];
+  /** First DB load — show skeleton rows instead of the "Pa gen founisè" flash. */
+  loading?: boolean;
   batchCounts: Record<string, { count: number; total: number }>;
   search: string;
   setSearch: (v: string) => void;
@@ -81,24 +85,24 @@ function TabletSearchBlock(props: {
           onPress={() => setShowBatchOnly(false)}
           style={{
             flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill,
-            backgroundColor: !showBatchOnly ? palette.surface : "transparent",
+            backgroundColor: !showBatchOnly ? palette.ink : "transparent",
             borderWidth: !showBatchOnly ? 0.5 : 0, borderColor: palette.hairline,
             shadowColor: "#000", shadowOpacity: !showBatchOnly ? 0.06 : 0, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
           }}
         >
-          <Text style={{ fontWeight: "600", fontSize: 12.5, color: !showBatchOnly ? palette.ink : palette.muted, letterSpacing: -0.1 }}>Tout • {suppliers.length}</Text>
+          <Text style={{ fontWeight: "600", fontSize: 12.5, color: !showBatchOnly ? "#000" : palette.muted, letterSpacing: -0.1 }}>Tout • {suppliers.length}</Text>
         </Pressable>
         <Pressable
           onPress={() => setShowBatchOnly(true)}
           style={{
             flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill,
-            backgroundColor: showBatchOnly ? palette.surface : "transparent",
+            backgroundColor: showBatchOnly ? palette.ink : "transparent",
             borderWidth: showBatchOnly ? 0.5 : 0, borderColor: palette.hairline,
             shadowColor: "#000", shadowOpacity: showBatchOnly ? 0.06 : 0, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
           }}
         >
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: showBatchOnly ? palette.warningDot : "#CBD5E1" }} />
-          <Text style={{ fontWeight: "600", fontSize: 12.5, color: showBatchOnly ? palette.ink : palette.muted, letterSpacing: -0.1 }}>Ki gen livrezon • {withBatches}</Text>
+          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: showBatchOnly ? palette.warningDot : "rgba(255,255,255,0.3)" }} />
+          <Text style={{ fontWeight: "600", fontSize: 12.5, color: showBatchOnly ? "#000" : palette.muted, letterSpacing: -0.1 }}>Ki gen livrezon • {withBatches}</Text>
         </Pressable>
       </View>
     </View>
@@ -114,9 +118,9 @@ function TabletSupplierRow(props: { item: any; batchCounts: Record<string, { cou
     <Pressable
       onPress={onPress}
       style={{
-        backgroundColor: active ? palette.ink : palette.surface,
+        backgroundColor: active ? palette.surfaceGrouped : palette.surface,
         borderWidth: 0.5,
-        borderColor: active ? palette.ink : hasBatches ? palette.successBd : palette.hairline,
+        borderColor: active ? palette.accentGold : hasBatches ? palette.successBd : palette.hairline,
         borderRadius: radius.md,
         padding: 12,
         flexDirection: "row",
@@ -140,7 +144,7 @@ function TabletSupplierRow(props: { item: any; batchCounts: Record<string, { cou
           backgroundColor: active ? palette.surface : hasBatches ? palette.successBg : palette.surfaceGrouped,
         }}
       >
-        <Text style={{ fontWeight: "800", fontSize: 13, color: active ? palette.ink : hasBatches ? "#065F46" : palette.muted2 }}>
+        <Text style={{ fontWeight: "800", fontSize: 13, color: active ? palette.ink : hasBatches ? palette.success : palette.muted2 }}>
           {(item.name?.[0] ?? "•").toUpperCase()}
         </Text>
       </View>
@@ -166,7 +170,7 @@ function TabletSupplierRow(props: { item: any; batchCounts: Record<string, { cou
 
 export function SuppliersTablet(props: SuppliersTabletProps) {
   const {
-    suppliers, displaySuppliers, batchCounts, search, setSearch, showBatchOnly, setShowBatchOnly,
+    suppliers, displaySuppliers, loading, batchCounts, search, setSearch, showBatchOnly, setShowBatchOnly,
     selectedId, setSelectedId, selectedSupplier,
     canManageSuppliers, isOwner, onOpenMenu, showProfileMenu, onCloseMenu, onOpenEdit, onDelete, onOpenBatch,
     showEdit, onCloseEdit, showAllBatches, setShowAllBatches, editState, setEditState, bankAccounts, onSaveEdit, saving,
@@ -195,7 +199,7 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
         </View>
         <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <View style={{ backgroundColor: palette.surfaceGrouped, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 5 }}>
-            <Text style={{ fontSize: 11, fontWeight: "700", color: "#3A3A3C" }}>
+            <Text style={{ fontSize: 11, fontWeight: "700", color: palette.muted2 }}>
               {suppliers.length} founisè • {Object.values(batchCounts).reduce((s, c) => s + c.count, 0)} livrezon
             </Text>
           </View>
@@ -204,7 +208,7 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
               onPress={onAdd}
               style={{ backgroundColor: palette.ink, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 9, ...shadow.card }}
             >
-              <Text style={{ fontSize: 13, fontWeight: "600", color: "#FFFFFF" }}>＋ Nouvo Founisè</Text>
+              <Text style={{ fontSize: 13, fontWeight: "600", color: "#000" }}>＋ Nouvo Founisè</Text>
             </Pressable>
           ) : null}
         </View>
@@ -236,13 +240,19 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
                 );
               }}
               ListEmptyComponent={
-                <View style={{ backgroundColor: "white", borderWidth: 1, borderColor: "#F1F5F9", borderRadius: 16, padding: 28, alignItems: "center", marginTop: 8 }}>
-                  <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#F8FAFC", borderWidth: 1, borderColor: "#F1F5F9", alignItems: "center", justifyContent: "center", marginBottom: 10 }}>
-                    <Text style={{ fontSize: 18, color: "#94A3B8" }}>◯</Text>
+                loading ? (
+                  <View>
+                    {[0, 1, 2, 3, 4].map(i => <SkeletonListRow key={i} tone="dark" padH={10} divider={false} />)}
                   </View>
-                  <Text style={{ fontWeight: "600", fontSize: 13, color: "#334155" }}>Pa gen founisè</Text>
-                  <Text style={{ color: "#94A3B8", fontSize: 12, marginTop: 4, textAlign: "center" }}>Eseye yon lòt rechèch oswa ajoute yon nouvo founisè</Text>
-                </View>
+                ) : (
+                  <View style={{ backgroundColor: "#111", borderWidth: 1, borderColor: "#262626", borderRadius: 16, padding: 28, alignItems: "center", marginTop: 8 }}>
+                    <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#1c1c1e", borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center", marginBottom: 10 }}>
+                      <Text style={{ fontSize: 18, color: "#8e8e93" }}>◯</Text>
+                    </View>
+                    <Text style={{ fontWeight: "600", fontSize: 13, color: "#fff" }}>Pa gen founisè</Text>
+                    <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 4, textAlign: "center" }}>Eseye yon lòt rechèch oswa ajoute yon nouvo founisè</Text>
+                  </View>
+                )
               }
             />
           </View>
@@ -294,7 +304,7 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
                   />
                 ) : null}
               </View>
-              <ScrollView ref={inspectorScroll} style={{ flex: 1 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 4 }}>
+              <KeyboardSafeScrollView ref={inspectorScroll} style={{ flex: 1 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 4 }}>
                 <View style={{ backgroundColor: "#000", borderWidth: 0.5, borderColor: "#262626", borderRadius: radius.lg, padding: 16 }}>
                   {showEdit && selectedSupplier ? (
                     <EditSupplierContent
@@ -324,14 +334,14 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
                     />
                   )}
                 </View>
-              </ScrollView>
+              </KeyboardSafeScrollView>
 
               <View style={{ flexDirection: "row", gap: 8, padding: 12, backgroundColor: palette.surface, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.lg, ...shadow.soft }}>
                 <Pressable
                   onPress={() => setSelectedId(null)}
                   style={{ flex: 1, paddingVertical: 12, backgroundColor: palette.ink, borderRadius: radius.pill, alignItems: "center" }}
                 >
-                  <Text style={{ fontWeight: "600", color: "#FFFFFF", fontSize: 14 }}>Fèmen</Text>
+                  <Text style={{ fontWeight: "600", color: "#000", fontSize: 14 }}>Fèmen</Text>
                 </Pressable>
               </View>
             </View>

@@ -2,13 +2,15 @@
 // Luxurious dark-hero sign-in/sign-up. In local-dev (mock) mode you can enter
 // through demo credentials for every role, each carrying its own secret code.
 import { useState } from "react";
-import { SafeAreaView, Text, View, TextInput, Pressable, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Image } from "react-native";
+import { Text, View, TextInput, Pressable, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Image } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuthState, DEMO_CREDENTIALS } from "../auth/authStore";
 import { isLiveSupabase } from "../auth/supabase";
 import { palette, radius, shadow } from "../theme";
 import type { Role } from "../users";
 import { useResponsive, centerBox } from "../responsive";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 const ROLE_META: Record<Role, { label: string; color: string; bg: string; icon: keyof typeof Ionicons.glyphMap }> = {
   owner: { label: "Pwopriyetè", color: palette.accentGold, bg: palette.accentGoldSoft, icon: "diamond-outline" },
@@ -76,7 +78,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   if (!user && cached) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: palette.ink2 }}>
-        <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: isTablet ? 32 : 24, alignItems: isTablet ? "center" : undefined }}>
+        <KeyboardSafeScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: isTablet ? 32 : 24, alignItems: isTablet ? "center" : undefined }}>
           <View style={{ ...centerBox(isTablet, width, 480), width: "100%" }}>
           <BrandHero compact />
           <View style={{ backgroundColor: palette.surface, borderRadius: radius.xl, padding: 22, borderWidth: 0.5, borderColor: "rgba(200,162,74,0.35)", ...shadow.elevated }}>
@@ -100,7 +102,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
             </Pressable>
           </View>
           </View>
-        </ScrollView>
+        </KeyboardSafeScrollView>
       </SafeAreaView>
     );
   }
@@ -126,7 +128,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: palette.ink2 }}>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
-        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1, alignItems: isTablet ? "center" : undefined }}>
+        <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1, alignItems: isTablet ? "center" : undefined }}>
           <View style={{ ...centerBox(isTablet, width, 560), width: "100%" }}>
           <BrandHero compact />
           <View style={{ flex: 1, backgroundColor: palette.bgWarm, borderTopLeftRadius: 32, borderTopRightRadius: 32, marginTop: -20, paddingHorizontal: isTablet ? 28 : 22, paddingTop: 26, paddingBottom: 40, ...(isTablet && { borderRadius: 32, marginTop: 0, marginBottom: 32 }) }}>
@@ -219,7 +221,7 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
             <Text allowFontScaling={false} style={{ fontSize: 10, color: palette.muted3, textAlign: "center", marginTop: 24, letterSpacing: 0.4 }}>G • Offline-first • Byen pwotèje</Text>
           </View>
           </View>
-        </ScrollView>
+        </KeyboardSafeScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

@@ -4,8 +4,10 @@ import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { buildReceipts, buildReceiptHtml, receiptToText, receiptItemsFrom, attachLineLabels } from "../receipts";
 import { getDb } from "../db";
+import { useSalesEvents } from "../salesEvents";
 import { fmtG, fmt } from "../format";
 import { useResponsive, sheetBox } from "../responsive";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { CustomersPhone } from "./CustomersPhone";
 import { CustomersTablet } from "./CustomersTablet";
 import { NewCustomerSheet, EditCustomerContent, type EditCustomerState } from "../components/CustomerSheets";
@@ -20,10 +22,14 @@ import {
 } from "./CustomersShared";
 import { CustomerProfileBody, CustomerProfileHeader, CustomerTxnsList, ProfileMenu, tenderLabel } from "../components/CustomerProfile";
 import { uploadSuccess, uploadError } from "../components/UploadTransition";
+import { FALLBACK_STORE_ID } from "../db/ids";
+import { mintId } from "../db/ids";
 
 export default function CustomersScreen({ role = "cashier", currentUser, onAddSale }: { role?: string; currentUser?: any; onAddSale?: (c: any) => void }) {
   const [customers, setCustomers] = useState<any[]>([]);
   const [debts, setDebts] = useState<any[]>([]);
+  // First-load flag — skeleton rows instead of the "Pa gen kliyan" flash.
+  const [loading, setLoading] = useState(true);
   const [pastCredits, setPastCredits] = useState<any[]>([]);
   const [pastSales, setPastSales] = useState<any[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
@@ -61,9 +67,10 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
   const canAddCustomer = ["owner", "admin", "manager", "cashier", "associate"].includes(role || "cashier");
   const canEditCustomer = ["owner", "admin", "manager"].includes(role || "cashier");
   const { width, height, isTablet, isLandscape, padH, fabRight } = useResponsive();
+  const insets = useSafeAreaInsets();
   const sheetH = Math.round(height * 5 / 6);
   // Master-detail shows in portrait; landscape tablets use phone layout.
-  const showTablet = isTablet && !isLandscape;
+  const showTablet = isTablet;
 
   async function load() {
     try {
@@ -75,10 +82,14 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     setDebts(allDebts);
     } catch (e) {
       console.log("[Customers load] failed:", e);
+    } finally {
+      setLoading(false);
     }
   }
 
   useEffect(() => { load(); }, []);
+  // Live: refreshed after any pull that brought customer rows.
+  useSalesEvents(() => { load().catch(() => {}); });
 
   useEffect(() => {
     if (!selectedCustomerId) {
@@ -246,7 +257,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
       const { buildCreditPaymentReceipts } = await import("../receipts");
       const db = await getDb();
       const pair = buildCreditPaymentReceipts({
-        payId: `pay-${Date.now()}`,
+        payId: mintId(),
         receiptNumber: info.receipt,
         debtId: txnCredit?.id ?? txnDetail.sale?.id,
         storeName: "Magazen",
@@ -264,7 +275,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
         for (const r of [pair.customer, pair.store]) {
           await db.runAsync(
             "INSERT INTO receipts (id,store_id,sale_id,copy_type,receipt_number,sale_number,cashier_id,cashier_name,cashier_role,content,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            [r.id, "demo-store-id", txnDetail.sale?.sale_id ?? txnDetail.sale?.id ?? null, r.copyType, r.receiptNumber, txnDetail.sale?.sale_number ?? null, currentUser?.id ?? null, currentUser?.name ?? "", currentUser?.role ?? "", JSON.stringify(r), new Date().toISOString()]
+            [r.id, FALLBACK_STORE_ID, txnDetail.sale?.sale_id ?? txnDetail.sale?.id ?? null, r.copyType, r.receiptNumber, txnDetail.sale?.sale_number ?? null, currentUser?.id ?? null, currentUser?.name ?? "", currentUser?.role ?? "", JSON.stringify(r), new Date().toISOString()]
           );
         }
       } catch {}
@@ -304,7 +315,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     setSavingNote(true);
     try {
       const db = await getDb();
-      const row = await addCustomerNote(db, "demo-store-id", selectedCustomer.id, noteInput.trim(), currentUser?.id ?? null);
+      const row = await addCustomerNote(db, FALLBACK_STORE_ID, selectedCustomer.id, noteInput.trim(), currentUser?.id ?? null);
       setEditNotes(prev => [row, ...prev].slice(0, 10));
       setNoteInput("");
     } finally {
@@ -324,6 +335,9 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
       const debtIds = new Set(debts.filter(d => Number(d.balance) > 0).map(d => d.customer_id));
       list = list.filter(c => debtIds.has(c.id));
     }
+    // One A→Z source of truth for BOTH phone and tablet (phone must not re-sort —
+    // the debt filter's overdue-first ordering below would be clobbered).
+    list.sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
     if (showDebtOnly) {
       list.sort((a, b) => {
         const aDue = debts.filter(d => d.customer_id === a.id && Number(d.balance) > 0).map(d => d.due_date ? new Date(d.due_date).getTime() : Number.MAX_SAFE_INTEGER).sort((x, y) => x - y)[0] ?? Number.MAX_SAFE_INTEGER;
@@ -339,7 +353,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     const db = await getDb();
     await db.runAsync(
       "INSERT INTO customer_history (id, customer_id, user_id, action, field_name, old_value, new_value, created_at) VALUES (?,?,?,?,?,?,?,?)",
-      [`cust-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, customerId, currentUser?.id ?? "unknown-user", action, fieldName, oldValue ?? null, newValue ?? null, new Date().toISOString()]
+      [mintId(), customerId, currentUser?.id ?? "unknown-user", action, fieldName, oldValue ?? null, newValue ?? null, new Date().toISOString()]
     );
     } catch (e) {
       console.log("[logEdit] failed:", e);
@@ -353,7 +367,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     setSavingCustomer(true);
     try {
     const db = await getDb();
-    const record = await insertCustomerRecord(db, "demo-store-id", data);
+    const record = await insertCustomerRecord(db, FALLBACK_STORE_ID, data);
     if (parsedLimit !== null) {
       await db.runAsync("UPDATE customers SET credit_limit = ?, credit_limit_source = ? WHERE id = ?", [parsedLimit, "manual", record.id]);
       record.credit_limit = parsedLimit;
@@ -399,6 +413,9 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
       ["email", selectedCustomer.email, patch.email],
       ["credit_limit", selectedCustomer.credit_limit, nextLimit],
     ].filter(([, oldValue, newValue]) => String(oldValue ?? "") !== String(newValue ?? ""));
+    if (patch.is_prospect === 0 && Number((selectedCustomer as any).is_prospect ?? 0) === 1) {
+      fieldUpdates.push(["is_prospect", "pwospèk", "konfime"]);
+    }
     for (const [fieldName, oldValue, newValue] of fieldUpdates) {
       await logEdit(selectedCustomer.id, "updated", fieldName as string, oldValue, newValue);
     }
@@ -413,12 +430,13 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: showTablet ? "#F8F9FA" : "#000", alignItems: showTablet ? "center" : undefined }}>
+    <View style={{ flex: 1, backgroundColor: "#000", alignItems: showTablet ? "center" : undefined }}>
       {showTablet ? (
         <CustomersTablet
           customers={customers}
           debts={debts}
           displayCustomers={displayCustomers}
+          loading={loading}
           search={search}
           setSearch={setSearch}
           showDebtOnly={showDebtOnly}
@@ -468,6 +486,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
           customers={customers}
           debts={debts}
           displayCustomers={displayCustomers}
+          loading={loading}
           search={search}
           setSearch={setSearch}
           showDebtOnly={showDebtOnly}
@@ -483,7 +502,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
 
       {selectedCustomer && (
         <Modal visible={!!selectedCustomer && !showTablet} transparent={false} animationType="slide" onRequestClose={() => setSelectedCustomerId(null)}>
-          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: 60 }}>
+          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 18 + insets.bottom }}>
             {!showPay ? (
             <CustomerProfileHeader
               onBack={() => {
@@ -524,7 +543,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
                 />
               </View>
             ) : (
-            <ScrollView ref={detailScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 }}>
+            <ScrollView ref={detailScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 + insets.bottom }}>
               {showEditSheet && selectedCustomer ? (
                 <EditCustomerContent
                   resetKey={selectedCustomer.id}
@@ -586,7 +605,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
         visible={showPayReceipt}
         receipts={payReceipt}
         onClose={() => { setShowPayReceipt(false); setPayReceipt(null); }}
-        staging={{ storeId: "demo-store-id", cashierId: currentUser?.id ?? null, customerId: selectedCustomer?.id ?? null }}
+        staging={{ storeId: FALLBACK_STORE_ID, cashierId: currentUser?.id ?? null, customerId: selectedCustomer?.id ?? null }}
         locked
       />
 

@@ -1,11 +1,14 @@
 import React, { useMemo, useState, useRef, useEffect } from "react";
 import { View, Text, Pressable, TextInput, Alert, Modal, ScrollView, StyleSheet, Animated, Easing, KeyboardAvoidingView, Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { palette, shadow } from "../../theme";
 import { useResponsive, centerBox, sheetBox } from "../../responsive";
 import { storeIdForLocation } from "../../org";
 import { getDb } from "../../db";
 import { EmployeeProfileBody } from "../../components/EmployeeProfile";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { mintId } from "../../db/ids";
 
 const GOLD = palette.accentGold;
 const GOLD_SOFT = palette.accentGoldSoft;
@@ -151,6 +154,7 @@ export default function TeamScreen({
   const [modalView, setModalView] = useState<"detail" | "edit" | "selfEdit" | "reset">("detail");
   const [resetTargetEmp, setResetTargetEmp] = useState<Employee | null>(null);
   const { width, isTablet, padH } = useResponsive();
+  const insets = useSafeAreaInsets();
   const slideAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -287,7 +291,7 @@ export default function TeamScreen({
           <Ionicons name="filter" size={20} color={filter !== "all" ? "#000" : "#fff"} />
         </Pressable>
       </View>
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+      <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
       {/* Employee rows — customers-list style */}
       {list.length === 0 ? (
         <View style={{ padding: 32, alignItems: "center" }}>
@@ -333,13 +337,13 @@ export default function TeamScreen({
           );
         })
       )}
-      </ScrollView>
+      </KeyboardSafeScrollView>
 
       {/* Filters sheet — Transactions style */}
       <Modal visible={showFilters} transparent animationType="slide" onRequestClose={() => setShowFilters(false)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
           <Pressable style={{ flex: 1 }} onPress={() => setShowFilters(false)} />
-          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32, maxHeight: "85%" }}>
+          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 + insets.bottom, maxHeight: "85%" }}>
             <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
               <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff" }}>Filters</Text>
@@ -395,7 +399,7 @@ export default function TeamScreen({
                 </View>
               </View>
             </View>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ padding: 16 }} contentContainerStyle={{ gap: 16, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ padding: 16 }} contentContainerStyle={{ gap: 16, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
               {/* Informasyon pèsonèl */}
               <View style={{ gap: 6 }}>
                 <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Enfòmasyon pèsonèl</Text>
@@ -454,8 +458,8 @@ export default function TeamScreen({
               </View>
 
               {newEmpError ? <View style={{ backgroundColor: "#FFF1F2", borderWidth: 0.5, borderColor: "#FECDD3", borderRadius: 12, padding: 12 }}><Text style={{ fontSize: 13, fontWeight: "600", color: "#B00020", textAlign: "center" }}>{newEmpError}</Text></View> : null}
-            </ScrollView>
-            <View style={{ padding: 16, backgroundColor: "white", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#e5e5ea", gap: 8 }}>
+            </KeyboardSafeScrollView>
+            <View style={{ padding: 16, paddingBottom: 16 + insets.bottom, backgroundColor: "white", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#e5e5ea", gap: 8 }}>
               <Pressable
                 onPress={() => {
                   setNewEmpError("");
@@ -464,7 +468,7 @@ export default function TeamScreen({
                   if (!newEmpAddress.trim()) { setNewEmpError("Adrès obligatwa."); return; }
                   if (!newEmpEmergName.trim() || !newEmpEmergPhone.trim() || !newEmpEmergAddress.trim()) { setNewEmpError("Kontak ijans konplè obligatwa: non, telefon, adrès."); return; }
                   if (!canAddRole(newEmpRole)) { setNewEmpError("Ou pa gen dwa kreye wòl sa a — se sèlman siperyè strik ka kreye (pa menm nivo, pa Owner)."); return; }
-                  const id = `emp-${Date.now()}`;
+                  const id = mintId();
                   const secret = String(employees.length + 1);
                   setEmployees(prev => [...prev, { id, name: newEmpName.trim(), role: newEmpRole as any, phone: newEmpPhone.trim(), address: newEmpAddress.trim(), store: currentStore, emergency: { name: newEmpEmergName.trim(), phone: newEmpEmergPhone.trim(), address: newEmpEmergAddress.trim() }, secret, password: `pass-${Math.random().toString(36).slice(2, 8)}`, lastAction: "Nouvo manm", kpi: "—", salary: newEmpRole === "admin" ? "G 32 000" : newEmpRole === "manager" ? "G 25 000" : "G 12 000", isOnline: false, active: true } as any]);
                   setNewEmpName(""); setNewEmpPhone(""); setNewEmpAddress(""); setNewEmpEmergName(""); setNewEmpEmergPhone(""); setNewEmpEmergAddress(""); setNewEmpRole("cashier"); setNewEmpError("");
@@ -484,7 +488,7 @@ export default function TeamScreen({
       {/* Detail modal — full-screen dark profile */}
       <Modal visible={!!selectedEmp} transparent={false} animationType="slide" onRequestClose={() => setSelectedEmp(null)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: 60, paddingBottom: 24 }}>
+          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 24 + insets.bottom }}>
             {modalView === "detail" ? (
               <>
                 <View style={{ flexDirection: "row", alignItems: "center" }}>
@@ -497,7 +501,7 @@ export default function TeamScreen({
                   <View style={{ width: 44 }} />
                 </View>
 
-            {modalView === "detail" && selectedEmp && <ScrollView ref={detailScrollRef} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false} scrollEventThrottle={16} onScroll={e => setEmpNameCollapsed(e.nativeEvent.contentOffset.y > 100)}>
+            {modalView === "detail" && selectedEmp && <KeyboardSafeScrollView ref={detailScrollRef} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false} scrollEventThrottle={16} onScroll={e => setEmpNameCollapsed(e.nativeEvent.contentOffset.y > 100)}>
               <View style={{ marginTop: 10 }}>
               <EmployeeProfileBody
                 employee={selectedEmp}
@@ -517,7 +521,7 @@ export default function TeamScreen({
                 }}
               />
               </View>
-            </ScrollView>}
+            </KeyboardSafeScrollView>}
               </>
             ) : (
               <>
@@ -528,7 +532,7 @@ export default function TeamScreen({
                   </Pressable>
                   <View style={{ flex: 1 }} />
                 </View>
-                <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }}>
+                <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }}>
 
             {/* Edit role — inside modal */}
             {modalView === "edit" && editingEmp && (
@@ -634,7 +638,7 @@ export default function TeamScreen({
                 </View>
               </Animated.View>
             )}
-                </ScrollView>
+                </KeyboardSafeScrollView>
               </>
             )}
           </View>

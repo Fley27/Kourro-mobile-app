@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
-import { View, Text, TextInput, Pressable, Alert, Modal, ScrollView, KeyboardAvoidingView, Platform, Animated, Easing, SafeAreaView } from "react-native";
+import { View, Text, TextInput, Pressable, Alert, Modal, ScrollView, KeyboardAvoidingView, Platform, Animated, Easing } from "react-native";
 import { getDb, insertOutbox } from "../db";
+import { useSalesEvents } from "../salesEvents";
 import { ht } from "../i18n";
 import { palette, radius, shadow, topIconBtn } from "../theme";
 import {
@@ -27,6 +28,10 @@ import { CartMenuView, CartCustomersView, NewCustomerView, EditCustomerView, Cus
 import { ProfileMenu, tenderLabel } from "../components/CustomerProfile";
 import { validateCheckout, persistSale } from "../sales/checkout";
 import { customerToFormData } from "../sales/customers";
+import { findCouponByCode, previewCouponAmount } from "../promos/promosModel";
+import { logPromo } from "../promos/audit";
+import { checkMin } from "../promos/promoMath";
+import { parseMin, type Coupon, type ProformatItem } from "../promos/types";
 import { saveCartDraft, loadCartDraft, clearCartDraft } from "../sales/cartDraft";
 import { CreditPayFlow } from "../components/CreditPayFlow";
 import { UploadTransition, minDelay, uploadSuccess, uploadError, type UploadPhase } from "../components/UploadTransition";
@@ -35,6 +40,10 @@ import CustomerForm, {
   type CustomerFormData,
 } from "../components/CustomerForm";
 import { MoneyInput } from "../components/maskedInput";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { mintId } from "../db/ids";
+
 export default function POSScreen({
   storeId,
   deviceId,
@@ -46,6 +55,8 @@ export default function POSScreen({
   onTabsChanged,
   attachCustomer = null,
   onAttachCustomerConsumed,
+  seed = null,
+  onSeedConsumed,
   canSell = true,
 }: {
   storeId: string;
@@ -58,14 +69,20 @@ export default function POSScreen({
   onTabsChanged?: () => void;
   attachCustomer?: any | null;
   onAttachCustomerConsumed?: () => void;
+  /** Proformat lines to load into the cart (frozen prices, customer attached). */
+  seed?: { proformat: any; customerId: string | null } | null;
+  onSeedConsumed?: () => void;
   canSell?: boolean;
 }) {
   const responsive = useResponsive();
   const { width, height, isTablet, isLandscape, padH } = responsive;
+  // Modal content must clear the notch / status bar and the gesture zone on
+  // every device — replaces the old hand-tuned paddingTop: 60.
+  const insets = useSafeAreaInsets();
   const sheetH = Math.round(height * 5 / 6);
-  // Tablet layout shows in portrait; landscape tablets
-  // render the phone layout (with its cart sheet + floating bar).
-  const showTablet = isTablet && !isLandscape;
+  // Tablet shows its two-pane layout in BOTH orientations (device class —
+  // src/responsive.ts). Landscape tablets keep the cart pane, no sheet.
+  const showTablet = isTablet;
   const [cart, setCart] = useState<CartItem[]>([]);
   const [search, setSearch] = useState("");
   const [searchMode, setSearchMode] = useState<SearchMode>("name");
@@ -109,7 +126,7 @@ export default function POSScreen({
       const { buildCreditPaymentReceipts } = await import("../receipts");
       const db = await getDb();
       const pair = buildCreditPaymentReceipts({
-        payId: `pay-${Date.now()}`,
+        payId: mintId(),
         receiptNumber: info.receipt,
         debtId: txnDetail.credit?.id ?? txnDetail.sale?.id,
         storeName: storeName ?? "Jesyon Magazen",
@@ -171,10 +188,14 @@ export default function POSScreen({
   const [payPhase, setPayPhase] = useState<UploadPhase>("loading");
   const [payTitle, setPayTitle] = useState("");
   const [payMsg, setPayMsg] = useState("");
+  // Receipt-open trace — "sale succeeded but no receipt" is invisible without it.
+  useEffect(() => {
+    console.log("[pos] receipt state", { showReceipt, hasReceipts: !!lastReceipts, payBusy, payPhase });
+  }, [showReceipt, lastReceipts, payBusy, payPhase]);
 
   // Catalog (products / pricing / cost + factor maps) — one loader shared
   // with the Orders in-screen item picker.
-  const { products, catNames, pricing, minFactorMap, getBaseCost } = useSaleCatalog();
+  const { products, catNames, pricing, minFactorMap, variantSales, loaded: catalogLoaded } = useSaleCatalog();
 
   // Shared sale logic (pricing / pending countdown / cart qty edits / sale
   // rows) — extracted to src/picker/hooks.ts so the Orders item picker
@@ -193,7 +214,7 @@ export default function POSScreen({
     editingQtyId, setEditingQtyId, editingQtyVal, setEditingQtyVal,
     decQty, incQty, removeFromCart, setCustomQty,
   } = useCartLines({ cart, setCart, products, pricing, minFactorMap });
-  const filtered = useSaleRows({ products, pricing, minFactorMap, catNames, search });
+  const filtered = useSaleRows({ products, pricing, minFactorMap, catNames, search, variantSales });
 
   // Open sales / tabs (Vant an Atann): suspended carts with frozen variant prices
   const [tabs, setTabs] = useState<SuspendedTab[]>([]);
@@ -222,16 +243,20 @@ export default function POSScreen({
     } catch { setTabs([]); }
   }
   useEffect(() => { loadTabs(); }, []);
+  // Live: the tab strip only re-reads suspended_sales — it never touches the
+  // cart, so a pull that brings a tab opened on another register can refresh
+  // it mid-checkout without disturbing what the cashier is ringing up.
+  useSalesEvents(() => { loadTabs().catch(() => {}); });
   const visibleTabs = isManagerPlus ? tabs : tabs.filter(t => (t.cashier_id ?? null) === myId);
   const canResumeTab = (t: SuspendedTab) => isManagerPlus || (t.cashier_id ?? null) === myId;
   // Bridge to the root-level TabsFab: badge count + sheet opener
   useEffect(() => tabsUI.registerOpener(() => { setTransferTabId(null); loadTabs(); setShowTabs(true); }), []);
-  useEffect(() => { tabsUI.setCount((tabs ?? []).length); }, [tabs.length]);
+  useEffect(() => { tabsUI.setCount(visibleTabs.length); }, [visibleTabs.length]);
 
   async function logTabEvent(db: any, tabId: string, action: string, note?: string) {
     try {
       await db.runAsync("INSERT INTO suspended_sale_events (id,suspended_sale_id,actor_id,actor_name,action,note,created_at) VALUES (?,?,?,?,?,?,?)",
-        [`tev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, tabId, myId, myName, action, note ?? null, new Date().toISOString()]);
+        [mintId(), tabId, myId, myName, action, note ?? null, new Date().toISOString()]);
     } catch {}
   }
 
@@ -281,7 +306,6 @@ export default function POSScreen({
       }
       await db.runAsync("UPDATE suspended_sales SET total = ?, updated_at = ? WHERE id = ? AND status = 'open'", [total, now, resumedTabId]);
       await logTabEvent(db, resumedTabId, "updated", `${lines.length} atik • ${fmtG(total)}`);
-      try { await insertOutbox("suspended_sales", "update", { id: resumedTabId, total, status: "open" }); } catch {}
       setCart([]); setPending(null); setPendingInput("");
       try { await clearCartDraft(db, storeId, myId); } catch {}
       setShowCartSheet(false);
@@ -308,7 +332,7 @@ export default function POSScreen({
       await minDelay((async () => {
         const db = await getDb();
         const now = new Date().toISOString();
-        const id = `tab-${Date.now()}`;
+        const id = mintId();
         await db.runAsync("INSERT INTO suspended_sales (id,store_id,label,customer_id,cashier_id,cashier_name,seller_role,status,total,completed_sale_id,device_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
           [id, storeId, label, customerId, myId, myName, currentUser?.role ?? role, "open", total, null, deviceId, now, now]);
         for (let i = 0; i < lines.length; i++) {
@@ -318,7 +342,6 @@ export default function POSScreen({
             [`${id}_${i}`, id, storeId, it.id, it.name, it.unitId || null, it.unitName, it.factor || 1, it.variant || null, it.qty, base, it.unitPrice, it.lineTotal, it.bundleApplied ? 1 : 0, now]);
         }
         await logTabEvent(db, id, "suspended", `${lines.length} atik • ${fmtG(total)}`);
-        try { await insertOutbox("suspended_sales", "create", { id, store_id: storeId, label, total, status: "open" }); } catch {}
         try { await clearCartDraft(db, storeId, myId); } catch {}
       })(), 2000);
       setCart([]); setPending(null); setPendingInput("");
@@ -411,7 +434,6 @@ export default function POSScreen({
             const db = await getDb();
             await db.runAsync("UPDATE suspended_sales SET status = ? WHERE id = ?", ["voided", t.id]);
             await logTabEvent(db, t.id, "voided", `${myName} anile`);
-            try { await insertOutbox("suspended_sales", "update", { id: t.id, status: "voided" }); } catch {}
             if (resumedTabId === t.id) { setResumedTabId(null); setResumedTabLabel(""); }
             await loadTabs();
           } catch (e: any) { uploadError("Erè", e?.message ?? "Anile tab echwe"); }
@@ -428,7 +450,6 @@ export default function POSScreen({
       const db = await getDb();
       await db.runAsync("UPDATE suspended_sales SET cashier_id = ?, cashier_name = ? WHERE id = ?", [target.id, target.name, t.id]);
       await logTabEvent(db, t.id, "transferred", `${t.cashier_name ?? "?"} → ${target.name} (pa ${myName})`);
-      try { await insertOutbox("suspended_sales", "update", { id: t.id, cashier_id: target.id }); } catch {}
       setTransferTabId(null);
       await loadTabs();
       uploadSuccess("Tab transfere ✓", `"${t.label}" kounye a pou ${target.name}.`);
@@ -461,6 +482,92 @@ export default function POSScreen({
       onAttachCustomerConsumed?.();
     }
   }, [attachCustomer]);
+  // Coupon redemption (single-use) + the proformat currently seeding the cart.
+  const [appliedCoupon, setAppliedCoupon] = useState<Coupon | null>(null);
+  const [couponDiscount, setCouponDiscount] = useState(0);
+  const [showCouponInput, setShowCouponInput] = useState(false);
+  const [couponBundle, setCouponBundle] = useState<Array<{ product_id: string; name: string; qty: number }> | null>(null);
+  const [couponCodeInput, setCouponCodeInput] = useState("");
+  const [applyingCoupon, setApplyingCoupon] = useState(false);
+  const [seededProformatId, setSeededProformatId] = useState<string | null>(null);
+  const [seededPfoReceipt, setSeededPfoReceipt] = useState<string | null>(null);
+  // Proformat → cart: frozen prices from the record, customer attached. Waits
+  // for the catalog snapshot so priceFor has real pricing maps to work with.
+  useEffect(() => {
+    if (!seed || !catalogLoaded) return;
+    (async () => {
+      try {
+        const db = await getDb();
+        const items: ProformatItem[] = seed.proformat?.items ?? [];
+        const lines: CartItem[] = [];
+        for (const it of items) {
+          const prod = products.find(p => p.id === it.product_id);
+          if (!prod) continue;
+          const factor = Number(it.factor) || 1;
+          const sel: PendingSel = { unitId: it.unit_id ?? "", unitName: it.unit_name ?? "pcs", factor, variant: it.variant ?? "Regular" };
+          const base = Number(it.base_price ?? it.unit_price);
+          const pr = priceFor(prod, sel, Math.max(1, Number(it.qty) || 1), base);
+          lines.push({
+            ...prod,
+            key: `${it.product_id}|${sel.unitId || "base"}|${sel.variant}`,
+            qty: Math.max(1, Number(it.qty) || 1),
+            unitId: sel.unitId, unitName: sel.unitName, factor, variant: sel.variant,
+            unitPrice: pr.unitPrice, lineTotal: pr.lineTotal, bundleApplied: pr.bundleApplied,
+            frozenBase: base,
+          });
+        }
+        if (!lines.length) {
+          uploadError("Pa chaje", "Pwodwi proformat yo pa nan katalòg la ankò.");
+          return;
+        }
+        setCart(lines);
+        setPending(null);
+        setPendingInput("");
+        if (seed.customerId) {
+          try {
+            const c = ((await db.getAllAsync("SELECT * FROM customers WHERE id = ?", [String(seed.customerId)])) as any[])[0];
+            if (c) setSelectedCustomer(c);
+          } catch {}
+        }
+        setSeededProformatId(String(seed.proformat.id));
+        setSeededPfoReceipt(String(seed.proformat.receipt_number ?? ""));
+        uploadSuccess("Proformat chaje ✓", `${seed.proformat.receipt_number} • ${lines.length} atik • pri jele`);
+      } catch (e: any) {
+        uploadError("Erè", e?.message ?? "Chajman proformat echwe");
+      } finally {
+        onSeedConsumed?.();
+      }
+    })();
+  }, [seed, catalogLoaded]);
+  // The discount shown/validated/paid always tracks the current cart — it is
+  // always pct × the cart's profit, capped and clamped to eligible lines.
+  useEffect(() => {
+    if (!appliedCoupon) return;
+    let alive = true;
+    (async () => {
+      try {
+        const db = await getDb();
+        const amt = await previewCouponAmount(db, cart, appliedCoupon);
+        if (alive) setCouponDiscount(Math.max(0, Math.round(Number(amt) * 100) / 100));
+      } catch {}
+    })();
+    return () => { alive = false; };
+  }, [appliedCoupon, cart]);
+  // The discount only stays while its bundle does: the moment a
+  // required item (or a min gate) breaks, the coupon drops immediately.
+  useEffect(() => {
+    if (!appliedCoupon || pending) return;
+    const gap = bundleGap(cart, couponBundle);
+    const gate = checkMin(cart, appliedCoupon.min);
+    if (!gap && gate.ok) return;
+    removeCoupon();
+    uploadSuccess("Koupon retire", gap ?? (!gate.ok ? gate.reason : "Kondisyon an pa satisfè ankò."));
+  }, [cart, appliedCoupon, couponBundle, pending]);
+  // The proformat link only describes the lines it seeded — drop it the moment
+  // the cart empties by any path (bulk clear, removing lines one by one).
+  useEffect(() => {
+    if (cart.length === 0 && seededProformatId) { setSeededProformatId(null); setSeededPfoReceipt(null); }
+  }, [cart.length, seededProformatId]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [custDebts, setCustDebts] = useState<any[]>([]);
   const [selectedCustomer, setSelectedCustomer] = useState<any | null>(selectedCreditCustomer ?? null);
@@ -598,6 +705,10 @@ export default function POSScreen({
   }, [cart, selectedCustomer, storeId, myId]);
 
   const subtotal = cart.reduce((s, it) => s + (Number(it.lineTotal ?? it.qty * (it.unitPrice ?? 0)) || 0), 0);
+  // What the customer actually pays after the applied coupon — every display
+  // and every pay keypad reads this, so the banner can never disagree.
+  const discountGoud = appliedCoupon ? couponDiscount : 0;
+  const payableSubtotal = Math.max(0, Math.round((subtotal - discountGoud) * 100) / 100);
   const amountGivenNum = parseFloat(amountGiven.replace(",", ".")) || 0;
 
   const filteredCustomers = useMemo(() => {
@@ -615,7 +726,7 @@ export default function POSScreen({
     if (!cart.length) return;
     Alert.alert("Vide panyen?", `${cart.length} atik • ${cart.reduce((s, it) => s + it.qty, 0)} pcs pral efase.`, [
       { text: "Anile", style: "cancel" },
-      { text: "Vide tout", style: "destructive", onPress: () => { setCart([]); setPending(null); setPendingInput(""); clearCustomerSlate(); getDb().then(db => clearCartDraft(db, storeId, myId)).catch(() => {}); setShowCartSheet(false); } },
+      { text: "Vide tout", style: "destructive", onPress: () => { setCart([]); setPending(null); setPendingInput(""); clearCustomerSlate(); removeCoupon(); setSeededProformatId(null); setSeededPfoReceipt(null); getDb().then(db => clearCartDraft(db, storeId, myId)).catch(() => {}); setShowCartSheet(false); } },
     ]);
   }
 
@@ -658,13 +769,24 @@ export default function POSScreen({
     if (top && row) { setSearch(top.barcode ?? top.sku ?? ""); handleProductPress(row); setShowBarcodeModal(false); }
   }
 
+  // A customer-bound coupon dies the moment the sale switches to another
+  // customer (or to none) — checkout would block it anyway.
+  function dropCouponOnCustomerChange(next: any | null) {
+    if (appliedCoupon?.customer_id && String(next?.id ?? "") !== String(appliedCoupon.customer_id)) {
+      removeCoupon();
+      uploadSuccess("Koupon retire", "Koupon an te pou yon lòt kliyan.");
+    }
+  }
+
   function selectCustomer(customer: any | null) {
+    dropCouponOnCustomerChange(customer);
     setSelectedCustomer(customer);
     onSelectCreditCustomer?.(customer);
   }
 
   // Cash/loyalty: link an existing customer to a cash sale WITHOUT switching to credit
   function selectCashCustomer(customer: any | null) {
+    dropCouponOnCustomerChange(customer);
     setSelectedCustomer(customer);
   }
 
@@ -675,7 +797,7 @@ export default function POSScreen({
     // Credit limit stays manager-only — cashier/associate create the record without one.
     const limit = !isManagerPlus || newCustLimit.trim() === "" ? null : parseInt(newCustLimit, 10);
     if (limit !== null && (isNaN(limit) || limit < 0)) return Alert.alert("Limit pa valab");
-    const id = `cust-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const id = mintId();
     const newCust = { id, store_id: storeId, name: newCustName.trim(), id_card_number: newCustIdCard.trim(), phone: newCustPhone.trim() || null, address: newCustAddress.trim() || null, credit_limit: limit, credit_limit_source: limit !== null ? "manual" : null, total_debt: 0, is_high_risk: false, open_debt_count: 0, created_at: new Date().toISOString() };
     try {
     const db = await getDb();
@@ -876,7 +998,7 @@ export default function POSScreen({
     try {
       const db = await getDb();
       const row = {
-        id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: mintId(),
         store_id: storeId, customer_id: selectedCustomer.id, text,
         created_by: myId, created_at: new Date().toISOString(),
       };
@@ -946,6 +1068,9 @@ export default function POSScreen({
       const address = composeAddress(data);
       await db.runAsync("UPDATE customers SET name = ?, phone = ?, address = ?, id_card_number = ?, email = ?, first_name = ?, last_name = ?, birth_day = ?, birth_month = ?, birth_year = ?, country = ?, department = ?, commune = ?, address_line1 = ?, address_line2 = ?, marketing_consent = ? WHERE id = ?",
         [name, data.phone.trim() || null, address, data.idDoc.trim(), data.email.trim() || null, data.firstName.trim(), data.lastName.trim(), data.birthDay, data.birthMonth, data.birthYear, data.country, data.department.trim() || null, data.commune.trim(), data.line1.trim(), data.line2.trim() || null, data.marketingConsent ? 1 : 0, selectedCustomer.id]);
+      if (data.clearProspect) {
+        await db.runAsync("UPDATE customers SET is_prospect = 0 WHERE id = ?", [selectedCustomer.id]);
+      }
       const updated = {
         ...selectedCustomer, name, phone: data.phone.trim() || null, address,
         id_card_number: data.idDoc.trim(), email: data.email.trim() || null,
@@ -955,6 +1080,7 @@ export default function POSScreen({
         commune: data.commune.trim(), address_line1: data.line1.trim(),
         address_line2: data.line2.trim() || null,
         marketing_consent: data.marketingConsent ? 1 : 0,
+        ...(data.clearProspect ? { is_prospect: 0 } : {}),
       };
       setCustomers(prev => prev.map(x => x.id === updated.id ? { ...x, ...updated } : x));
       setSelectedCustomer(updated);
@@ -984,6 +1110,134 @@ export default function POSScreen({
     if (cartView === "custDetail" || cartView === "custProfile") setCartNameCollapsed(false);
   }, [cartView]);
 
+  // Coupon: lookup by code → customer match → preview amount. The SAME amount
+  // flows into validateCheckout and persistSale at confirm (single source).
+  async function applyCouponByCode() {
+    const code = couponCodeInput.trim();
+    if (!code) return;
+    setApplyingCoupon(true);
+    try {
+      const db = await getDb();
+      const coupon = await findCouponByCode(db, storeId, code);
+      if (!coupon) { Alert.alert("Pa jwenn", "Kòd koupon sa a pa egziste."); return; }
+      if (coupon.status === "redeemed") { Alert.alert("Deja itilize", `Koupon ${coupon.code} deja itilize nan yon lòt vant.`); return; }
+      if (coupon.status === "expired") { Alert.alert("Ekspire", `Koupon ${coupon.code} ekspire.`); return; }
+      if (coupon.customer_id) {
+        if (!selectedCustomer) {
+          try {
+            const c = ((await db.getAllAsync("SELECT * FROM customers WHERE id = ?", [String(coupon.customer_id)])) as any[])[0];
+            if (c) setSelectedCustomer(c);
+          } catch {}
+        } else if (String(selectedCustomer.id) !== String(coupon.customer_id)) {
+          Alert.alert("Kliyan pa matche", "Koupon sa a anrejistre pou yon lòt kliyan. Retire kliyan seleksyone a anvan ou aplike l.");
+          return;
+        }
+      }
+      // Commit any in-progress pending line first — it may hold a required qty.
+      // (State is cleared only on the success path below, so a rejected code
+      // never discards a line the seller was still entering.)
+      let lines = cart;
+      if (pending) {
+        const s = { unitId: pending.unitId, unitName: pending.unitName, factor: pending.factor, variant: pending.variant };
+        lines = mergeLine(lines, pending.product, s, Math.max(1, pending.qty));
+      }
+      // Required bundle: conditional → the listed products; any proformat
+      // coupon → the full proformat. Assemble it BEFORE previewing so the
+      // discount is computed against a complete cart.
+      let bundle: Array<{ product_id: string; name: string; qty: number }> | null = null;
+      let pfoItems: ProformatItem[] | null = null;
+      if (coupon.proformat_id) {
+        const pfoRows = ((await db.getAllAsync("SELECT * FROM proformats WHERE id = ?", [String(coupon.proformat_id)])) as any[]) ?? [];
+        const pfo = pfoRows[0];
+        if (!pfo) { Alert.alert("Pa jwenn", "Proformat ki asosye ak koupon sa a pa disponib."); return; }
+        try { pfoItems = JSON.parse(String(pfo.items ?? "[]")) || []; } catch { pfoItems = []; }
+      }
+      if (coupon.type === "conditional") {
+        const req = parseMin(coupon.min)?.products ?? [];
+        if (!req.length) { Alert.alert("Kondisyon pa korek", "Koupon sa a pa gen lis pwodwi rekiz."); return; }
+        bundle = req.map(r => ({ product_id: String(r.product_id), name: String(r.name ?? ""), qty: Number(r.qty) || 0 }));
+      } else if (pfoItems) {
+        if (!pfoItems.length) { Alert.alert("Kondisyon pa korek", "Proformat sa a pa gen atik."); return; }
+        bundle = pfoItems.map(it => ({ product_id: String(it.product_id), name: String(it.name ?? ""), qty: Math.max(1, Number(it.qty) || 1) }));
+      }
+      let added = 0;
+      if (bundle) {
+        for (const r of bundle) {
+          const have = lines.filter(l => String(l.id) === String(r.product_id)).reduce((s, l) => s + (Number(l.qty) || 0), 0);
+          const need = r.qty - have;
+          if (need <= 0) continue;
+          const prod = products.find(p => p.id === r.product_id);
+          if (!prod) { Alert.alert("Pwodwi pa disponib", `${r.name || "Pwodwi"} pa nan katalòg la ankò.`); return; }
+          const pfoIt = pfoItems?.find(it => String(it.product_id) === String(r.product_id)) ?? null;
+          const existing = lines.find(l => String(l.id) === String(r.product_id));
+          if (existing) {
+            lines = mergeLine(lines, prod, { unitId: existing.unitId, unitName: existing.unitName, factor: existing.factor, variant: existing.variant }, need);
+          } else if (pfoIt) {
+            const factor = Number(pfoIt.factor) || 1;
+            const sel: PendingSel = { unitId: pfoIt.unit_id ?? "", unitName: pfoIt.unit_name ?? "pcs", factor, variant: pfoIt.variant ?? "Regular" };
+            const base = Number(pfoIt.base_price ?? pfoIt.unit_price);
+            const pr = priceFor(prod, sel, need, base);
+            lines = [...lines, {
+              ...prod,
+              key: `${prod.id}|${sel.unitId || "base"}|${sel.variant}`,
+              qty: need, unitId: sel.unitId, unitName: sel.unitName, factor, variant: sel.variant,
+              unitPrice: pr.unitPrice, lineTotal: pr.lineTotal, bundleApplied: pr.bundleApplied,
+              frozenBase: base,
+            }];
+          } else {
+            lines = mergeLine(lines, prod, defaultSelFor(prod), need);
+          }
+          added++;
+        }
+        const gap = bundleGap(lines, bundle);
+        if (gap) { Alert.alert("Pa ka ranpli pakèt la", gap); return; }
+      }
+      // Spec: a coupon is only valid when the cart already meets its purchase
+      // minimums (total price ≥ min_amount, item count ≥ min_items). Reject at
+      // entry so the banner never promises a discount confirm would strip —
+      // and the reason the seller sees IS the configured minimum.
+      const gate = checkMin(lines, coupon.min);
+      if (!gate.ok) { Alert.alert("Kondisyon pa satisfè", gate.reason); return; }
+      if (lines !== cart) {
+        setCart(lines);
+        setPending(null);
+        setPendingInput("");
+      }
+      const amt = await previewCouponAmount(db, lines, coupon);
+      setCouponDiscount(Math.max(0, Math.round(Number(amt) * 100) / 100));
+      setCouponBundle(bundle);
+      setAppliedCoupon(coupon);
+      setShowCouponInput(false);
+      setCouponCodeInput("");
+      uploadSuccess("Koupon aplike ✓", `${coupon.code} • −${fmtG(Math.max(0, Math.round(Number(amt) * 100) / 100))}${added ? ` • ${added} atik ajoute` : ""}`);
+    } catch (e: any) {
+      uploadError("Erè", e?.message ?? "Aplikasyon koupon echwe");
+    } finally {
+      setApplyingCoupon(false);
+    }
+  }
+
+  function removeCoupon() {
+    setAppliedCoupon(null);
+    setCouponDiscount(0);
+    setCouponBundle(null);
+  }
+
+  function closeCouponEntry() {
+    setShowCouponInput(false);
+    setCouponCodeInput("");
+  }
+
+  /** First missing requirement (or null when the cart satisfies the bundle). */
+  function bundleGap(lines: CartItem[], bundle: Array<{ product_id: string; name: string; qty: number }> | null): string | null {
+    if (!bundle) return null;
+    for (const r of bundle) {
+      const have = lines.filter(l => String(l.id) === String(r.product_id)).reduce((s, l) => s + (Number(l.qty) || 0), 0);
+      if (have < r.qty) return `${r.name || "Pwodwi rekiz"}: dwe gen omwen ${r.qty}× nan panyen an.`;
+    }
+    return null;
+  }
+
   async function confirmPay(methodOverride?: PaymentMethod, amountOverride?: number, akompteOverride?: number, providerOverride?: "moncash" | "natcash") {
     // Commit any in-progress pending line first so checkout sees the full cart.
     let lines = cart;
@@ -1001,6 +1255,30 @@ export default function POSScreen({
     const payGiven = amountOverride ?? (givenRaw === "" ? undefined : amountGivenNum);
     const payAkompte = akompteOverride ?? (parseFloat(akompte) || 0);
     const payProvider = providerOverride ?? mobileProvider;
+    // Re-preview the coupon against the FINAL lines (a just-committed pending
+    // line can change min gates / scope) — validate, copy and persist all use
+    // this one number.
+    let expectedDiscount = discountGoud;
+    let couponNow = appliedCoupon;
+    if (couponNow) {
+      const gap = bundleGap(lines, couponBundle);
+      const gate = checkMin(lines, couponNow.min);
+      if (gap || !gate.ok) {
+        // Spec: an invalid coupon is dropped, never forced — the sale
+        // continues as a plain full-proformat sale.
+        console.log("[pos] coupon dropped at confirm", { code: couponNow.code, gap, gate: gate.ok ? "ok" : gate.reason });
+        removeCoupon();
+        uploadSuccess("Koupon retire", gap ?? (!gate.ok ? gate.reason : "Kondisyon an pa satisfè ankò."));
+        couponNow = null;
+        expectedDiscount = 0;
+      } else {
+        try {
+          const amt = await previewCouponAmount(await getDb(), lines, couponNow);
+          expectedDiscount = Math.max(0, Math.round(Number(amt) * 100) / 100);
+          setCouponDiscount(expectedDiscount);
+        } catch { /* keep last preview */ }
+      }
+    }
     try {
       validateCheckout({
         lines,
@@ -1013,26 +1291,30 @@ export default function POSScreen({
         customer: selectedCustomer,
         canProcessCreditSale,
         creditDueDate,
+        appliedCoupon: couponNow,
+        expectedDiscount,
       });
     } catch (e: any) {
+      console.log("[pos] validateCheckout blocked", { title: e?.title, message: e?.message });
       return Alert.alert(e?.title ?? "Erè", e?.message ?? "Peman echwe");
     }
-    // Upload copy, based on tender type.
+    // Upload copy, based on tender type (always on the payable total).
     const saleTotal = lines.reduce((s, it) => s + (Number(it.lineTotal ?? it.qty * (it.unitPrice ?? 0)) || 0), 0);
+    const payable = Math.max(0, Math.round((saleTotal - expectedDiscount) * 100) / 100);
     let upTitle = "";
     let upDetail = "";
     if (payMethod === "cash") {
-      const given = payGiven ?? saleTotal;
-      const ch = Math.max(0, Math.round((given - saleTotal) * 100) / 100);
+      const given = payGiven ?? payable;
+      const ch = Math.max(0, Math.round((given - payable) * 100) / 100);
       upTitle = ch > 0 ? `${fmtG(ch)} change` : "No change";
       upDetail = `Out of ${fmtG(given)}`;
     } else if (payMethod === "credit") {
-      const rest = Math.max(0, Math.round((saleTotal - payAkompte) * 100) / 100);
+      const rest = Math.max(0, Math.round((payable - payAkompte) * 100) / 100);
       upTitle = payAkompte > 0 ? `${fmtG(payAkompte)} akompte` : "Kredi";
       upDetail = `Rès ${fmtG(rest)}`;
     } else {
       upTitle = payProvider === "moncash" ? "MonCash" : "NatCash";
-      upDetail = `${fmtG(saleTotal)}`;
+      upDetail = `${fmtG(payable)}`;
     }
     setPayBusy(true);
     setPayPhase("loading");
@@ -1042,7 +1324,8 @@ export default function POSScreen({
     setShowCartSheet(false);
     try {
       const db = await getDb();
-      const { receipts, customerPatch } = await minDelay(persistSale({
+      const proformatLink = seededProformatId ?? couponNow?.proformat_id ?? null;
+      const { sale: paidSale, receipts, customerPatch } = await minDelay(persistSale({
         db,
         storeId,
         deviceId,
@@ -1059,7 +1342,30 @@ export default function POSScreen({
         creditDueDate,
         resumedTabId,
         logTabEvent,
+        appliedCoupon: couponNow,
+        expectedDiscount,
+        proformatId: proformatLink,
       }), 2000);
+      if (proformatLink) {
+        // Proformat converted — the audit row is the historical "it got paid"
+        // record; readers derive live state from sales.proformat_id.
+        try {
+          await logPromo(db, {
+            store_id: storeId,
+            action: "proformat_paid",
+            entity_type: "proformat",
+            entity_id: proformatLink,
+            proformat_id: proformatLink,
+            sale_id: String(paidSale?.id ?? ""),
+            actor: { id: currentUser?.id ?? null, name: myName, role: String(currentUser?.role ?? role) },
+            snapshot: {
+              sale_number: paidSale?.sale_number ?? null,
+              total: Number(paidSale?.total ?? 0),
+              payment_method: payMethod,
+            },
+          });
+        } catch {}
+      }
       if (resumedTabId) {
         setResumedTabId(null); setResumedTabLabel("");
       }
@@ -1070,14 +1376,24 @@ export default function POSScreen({
       }
       setLastReceipts(receipts);
       setPayPhase("success");
-      setPayMsg(`${fmtG(saleTotal)} • vant anrejistre`);
+      setPayMsg(`${fmtG(payable)} • vant anrejistre`);
+      console.log("[pos] sale committed — receipt scheduled", { sale: paidSale?.id, hasReceipts: !!receipts, coupon: !!couponNow, discount: expectedDiscount });
+      // The sale is committed, so the receipt is scheduled HERE — before the
+      // cleanup below, which must never be able to swallow it. 1650ms = the
+      // 1500ms overlay hold + the 150ms hand-off (iOS drops same-tick swaps).
+      setTimeout(() => {
+        console.log("[pos] receipt timer fired", { coupon: !!couponNow });
+        setShowReceipt(true);
+      }, 1650);
       await new Promise(r => setTimeout(r, 1500));
-      resetCheckoutForm();
-      setCartView("cart");
-      loadTabs();
+      try {
+        resetCheckoutForm();
+        setCartView("cart");
+        loadTabs();
+      } catch (e: any) {
+        console.log("[pos] post-sale cleanup failed", e);
+      }
       setPayBusy(false);
-      // Open the receipt after the overlay hides — same-tick modal swaps get dropped on iOS
-      setTimeout(() => { setShowReceipt(true); }, 150);
       if (isCreditFlow) {
         onSelectCreditCustomer?.(null);
         setPayment("cash");
@@ -1085,6 +1401,7 @@ export default function POSScreen({
         const d = new Date(); d.setDate(d.getDate() + 30); setCreditDueDate(d.toISOString().slice(0, 10)); setCreditDueCustom("");
       }
     } catch (e: any) {
+      console.log("[pos] confirmPay failed", e?.message ?? String(e));
       setPayPhase("error");
       setPayMsg(e?.message ?? "Vant lan echwe — okenn chanjman pa anrejistre nèt. Verifye epi re-eseye.");
       await new Promise(r => setTimeout(r, 3500));
@@ -1110,6 +1427,9 @@ export default function POSScreen({
     setAmountGiven("");
     setAkompte("");
     clearCustomerSlate();
+    removeCoupon();
+    setSeededProformatId(null);
+    setSeededPfoReceipt(null);
     getDb().then(db => clearCartDraft(db, storeId, myId)).catch(() => {});
   }
 
@@ -1117,10 +1437,15 @@ export default function POSScreen({
 
   const cartCount = cart.reduce((s, it) => s + it.qty, 0);
 
-  // One charge entry point — opens the tender sheet.
-  function onChargePress(closeSheet: boolean) {
+  // One charge entry point — straight to the tender sheet. Coupons are never
+  // prompted; the customer asks and the payment screen has the entry.
+  function openTender(closeSheet: boolean) {
     if (closeSheet) setShowCartSheet(false);
     setShowTenderType(true);
+  }
+
+  function onChargePress(closeSheet: boolean) {
+    openTender(closeSheet);
   }
 
   // Luxury entrance — Apple-like stagger
@@ -1128,6 +1453,37 @@ export default function POSScreen({
   useEffect(() => {
     Animated.timing(entrance, { toValue: 1, duration: 420, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
   }, []);
+
+  // Rendered INSIDE the cart sheet / pay sheet as an absolute overlay — a root
+  // Modal launched from inside a Modal renders behind it on iOS.
+  const couponOverlay = (
+    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 80, elevation: 80 }}>
+      <Pressable onPress={closeCouponEntry} style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", paddingHorizontal: 24 }}>
+        <Pressable style={{ backgroundColor: "#161616", borderRadius: 18, borderWidth: 1, borderColor: "#3a3a3c", padding: 20 }} onPress={() => {}}>
+          <Text style={{ color: "#fff", fontSize: 18, fontWeight: "800" }}>Antre kòd koupon an</Text>
+          <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 4 }}>Kòd la sou mesaj kliyan an (KPN-…).</Text>
+          <TextInput
+            value={couponCodeInput}
+            onChangeText={t => setCouponCodeInput(t.toUpperCase())}
+            autoCapitalize="characters"
+            autoCorrect={false}
+            autoFocus
+            placeholder="KPN-XXXXXXX"
+            placeholderTextColor="#5a5a5e"
+            style={{ marginTop: 14, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 14, fontSize: 17, fontWeight: "700", color: "#fff", letterSpacing: 1.5 }}
+          />
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
+                <Pressable onPress={closeCouponEntry} style={{ flex: 1, height: 50, borderRadius: 12, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+                  <Text style={{ color: "#fff", fontWeight: "800", fontSize: 15 }}>Anile</Text>
+                </Pressable>
+            <Pressable onPress={applyCouponByCode} disabled={applyingCoupon || !couponCodeInput.trim()} style={{ flex: 1, height: 50, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", opacity: applyingCoupon || !couponCodeInput.trim() ? 0.5 : 1 }}>
+              <Text style={{ color: "#000", fontWeight: "800", fontSize: 15 }}>{applyingCoupon ? "…" : "Aplike"}</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </KeyboardAvoidingView>
+  );
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
@@ -1142,8 +1498,11 @@ export default function POSScreen({
           pendingLine={pendingLine}
           pendingMaxQ={pendingMaxQ}
           rows={filtered}
+          catNames={catNames}
+          catalogLoaded={catalogLoaded}
           cart={cart}
           subtotal={subtotal}
+          discount={discountGoud}
           resumedTabId={resumedTabId}
           resumedTabLabel={resumedTabLabel}
           visibleTabsCount={visibleTabs.length}
@@ -1159,7 +1518,6 @@ export default function POSScreen({
           onCommitPending={commitPendingWithInput}
           onCancelPending={() => setPending(null)}
           onProductPress={handleProductPress}
-          getBaseCost={getBaseCost}
           onClearCart={confirmClearCart}
           onSuspend={openSuspend}
           onUpdateResumedTab={updateResumedTab}
@@ -1172,6 +1530,8 @@ export default function POSScreen({
           onEditQtyBlur={() => setEditingQtyId(null)}
           onPay={() => onChargePress(false)}
           onOpenCartMenu={() => setCartView("menu")}
+          appliedCoupon={appliedCoupon}
+          onRemoveCoupon={removeCoupon}
           customerFlow={{
             view: cartView,
             setView: setCartView,
@@ -1224,8 +1584,10 @@ export default function POSScreen({
           pendingLine={pendingLine}
           pendingMaxQ={pendingMaxQ}
           rows={filtered}
+          catNames={catNames}
+          catalogLoaded={catalogLoaded}
           cart={cart}
-          subtotal={subtotal}
+          subtotal={payableSubtotal}
           onSearchChange={setSearch}
           onSearchModeChange={setSearchMode}
           onBarcodeSubmit={onBarcodeSubmit}
@@ -1236,6 +1598,7 @@ export default function POSScreen({
           onCommitPending={commitPendingWithInput}
           onCancelPending={() => setPending(null)}
           onProductPress={handleProductPress}
+          onDecQty={decQty}
           onOpenCart={() => { setCartView("cart"); setShowCartSheet(true); }}
         />
       )}
@@ -1243,16 +1606,18 @@ export default function POSScreen({
       {/* Tabs FAB lives at the app root (TabsFab) — above header and nav */}
 
       {/* Expanded cart sheet */}
-      <Modal visible={showCartSheet && !showTablet} transparent={false} animationType="slide" onRequestClose={() => setShowCartSheet(false)}>
+      <Modal visible={showCartSheet && !showTablet} transparent={false} animationType="slide" onRequestClose={() => { if (showCouponInput) { closeCouponEntry(); return; } setShowCartSheet(false); }}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: 60 }}>
+          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 18 + insets.bottom }}>
             {cartView === "cart" ? (
               <>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Pressable onPress={() => setShowCartSheet(false)} accessibilityLabel="Close cart" style={{ width: 44, height: 44, borderRadius: 10, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}><Text style={{ fontSize: 17, color: "#fff", fontWeight: "700" }}>✕</Text></Pressable>
                 <View style={{ flex: 1, alignItems: "center" }}>
                   <Text style={{ fontWeight: "900", fontSize: 20, color: "#fff" }}>{ht.cart}</Text>
-                  <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 2, fontWeight: "600" }}>{cart.reduce((s, it) => s + it.qty, 0)} pcs • {cart.length} atik</Text>
+                  <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 2, fontWeight: "600" }}>
+                    {cart.reduce((s, it) => s + it.qty, 0)} pcs • {cart.length} atik{seededPfoReceipt ? ` • ${seededPfoReceipt}` : ""}
+                  </Text>
                 </View>
                 <Pressable onPress={() => setShowCartMenu(true)} accessibilityLabel="More options" style={{ width: 44, height: 44, borderRadius: 10, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}><Text style={{ fontSize: 16, color: "#fff", fontWeight: "800", letterSpacing: 1 }}>···</Text></Pressable>
               </View>
@@ -1263,6 +1628,7 @@ export default function POSScreen({
                   right={18}
                   options={[
                     { label: "Ouvèti-Kont", onPress: () => { setCartView("cart"); openSuspend(); } },
+                    { label: "Vide panyen", onPress: () => { setShowCartMenu(false); confirmClearCart(); } },
                     { label: "Anile", onPress: () => {} },
                   ]}
                 />
@@ -1357,6 +1723,13 @@ export default function POSScreen({
                     <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.7)" />
                   </Pressable>
                 )}
+                {appliedCoupon ? (
+                  <Pressable onPress={removeCoupon} style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 10, height: 52, paddingHorizontal: 14, borderRadius: 12, backgroundColor: "rgba(52,199,89,0.10)", borderWidth: 1, borderColor: "#34c759" }}>
+                    <Ionicons name="pricetag" size={16} color="#34c759" />
+                    <Text style={{ flex: 1, color: "#fff", fontWeight: "800", fontSize: 13 }}>{appliedCoupon.code} • −{fmtG(discountGoud)}</Text>
+                    <Ionicons name="close-circle" size={20} color="#8e8e93" />
+                  </Pressable>
+                ) : null}
                 <CartLinesList
                   cart={cart}
                   editingQtyId={editingQtyId}
@@ -1372,6 +1745,7 @@ export default function POSScreen({
                 <CartTotalBar
                   payPulse={payPulse}
                   subtotal={subtotal}
+                  discount={discountGoud}
                   onPay={() => onChargePress(true)}
                 />
               </>
@@ -1397,7 +1771,7 @@ export default function POSScreen({
               </View>
             ) : cartView === "custDetail" ? (
               <View style={{ flex: 1, marginTop: 12 }}>
-                <ScrollView
+                <KeyboardSafeScrollView
                   style={{ flex: 1 }}
                   showsVerticalScrollIndicator={false}
                   scrollEventThrottle={16}
@@ -1415,7 +1789,7 @@ export default function POSScreen({
                     onAddItem={addLastVisitItemToCart}
                     addedProductIds={cart.map(c => c.id)}
                   />
-                </ScrollView>
+                </KeyboardSafeScrollView>
                 <View style={{ gap: 10, paddingTop: 10, paddingBottom: 4 }}>
                   <Pressable onPress={() => setCartView("custProfile")} style={{ height: 60, borderRadius: 12, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center" }}>
                     <Text style={{ color: "white", fontWeight: "800", fontSize: 14 }}>View Full Profile</Text>
@@ -1426,14 +1800,14 @@ export default function POSScreen({
                 </View>
               </View>
             ) : cartView === "custProfile" ? (
-              <ScrollView
+              <KeyboardSafeScrollView
                 style={{ flex: 1, marginTop: 12 }}
                 showsVerticalScrollIndicator={false}
                 scrollEventThrottle={16}
                 onScroll={e => setCartNameCollapsed(e.nativeEvent.contentOffset.y > 40)}
               >
                 <CustomerProfileBody customer={selectedCustomer} stats={payStats} notes={payNotes} transactions={payTxns} onOpenTransaction={openTxnDetail} />
-              </ScrollView>
+              </KeyboardSafeScrollView>
             ) : cartView === "custEdit" ? (
               <View style={{ flex: 1, marginTop: 12 }}>
                 <EditCustomerView
@@ -1449,7 +1823,7 @@ export default function POSScreen({
                 />
               </View>
             ) : cartView === "txnDetail" && txnDetail ? (
-              <ScrollView style={{ flex: 1, marginTop: 12 }} showsVerticalScrollIndicator={false}>
+              <KeyboardSafeScrollView style={{ flex: 1, marginTop: 12 }} showsVerticalScrollIndicator={false}>
                 <TxnDetailBody
                   sale={txnDetail.sale}
                   items={txnDetail.items}
@@ -1460,16 +1834,17 @@ export default function POSScreen({
                   payments={txnDetail.payments ?? []}
                   onPayPress={txnDetail.credit && txnDue > 0 ? () => setShowTxnPay(true) : undefined}
                 />
-              </ScrollView>
+              </KeyboardSafeScrollView>
             ) : null}
           </View>
         </KeyboardAvoidingView>
+        {showCouponInput ? couponOverlay : null}
       </Modal>
 
       {/* Suspend modal: label the tab (customer / table) */}
       <Modal visible={showSuspend} transparent={false} animationType="slide" onRequestClose={() => setShowSuspend(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: 60, paddingBottom: 24 }}>
+          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 24 + insets.bottom }}>
             <View style={{ flexDirection: "row", alignItems: "center" }}>
               <Pressable onPress={() => setShowSuspend(false)} accessibilityLabel="Back to cart" style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: "#e8e8ea", alignItems: "center", justifyContent: "center" }}>
                 <Ionicons name="chevron-back" size={24} color="#000" />
@@ -1492,14 +1867,14 @@ export default function POSScreen({
       {/* Tabs: resume / transfer / void — dark full-screen */}
       <Modal visible={showTabs} transparent={false} animationType="slide" onRequestClose={() => setShowTabs(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: 60, paddingBottom: 24 }}>
+          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 24 + insets.bottom }}>
             <View style={{ flexDirection: "row", alignItems: "center" }}>
               <Pressable onPress={() => setShowTabs(false)} accessibilityLabel="Close" hitSlop={8} style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}><Ionicons name="close" size={31} color="#fff" /></Pressable>
               <Text style={{ flex: 1, textAlign: "center", fontWeight: "800", fontSize: 20, color: "#fff" }}>Lis Ouvèti-Kont</Text>
               <View style={{ width: 44 }} />
             </View>
             <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 12, textAlign: "center" }}>{visibleTabs.length} tab ouvè{isManagerPlus ? " • tout kesye" : " • ou menm"}</Text>
-            <ScrollView style={{ flex: 1, marginTop: 14 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 12 }}>
+            <KeyboardSafeScrollView style={{ flex: 1, marginTop: 14 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 12 }}>
               {visibleTabs.length === 0 && (
                 <View style={{ padding: 24, alignItems: "center" }}><Text style={{ color: "#8e8e93", fontWeight: "600", fontSize: 13 }}>Pa gen tab ouvè</Text></View>
               )}
@@ -1532,7 +1907,7 @@ export default function POSScreen({
                     )}
                   </View>
                 ))}
-              </ScrollView>
+              </KeyboardSafeScrollView>
             </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -1545,10 +1920,10 @@ export default function POSScreen({
         onPay={payTxnDue}
         onSuccess={onTxnPaySuccess}
       />
-      <Modal visible={showTenderType} transparent={false} animationType="slide" onRequestClose={() => setShowTenderType(false)}>
+      <Modal visible={showTenderType} transparent={false} animationType="slide" onRequestClose={() => { if (showCouponInput) { closeCouponEntry(); return; } setShowTenderType(false); }}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
           <View style={{ flex: 1, backgroundColor: "#000" }}>
-            <ScrollView
+            <KeyboardSafeScrollView
               ref={payScrollRef}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
@@ -1558,7 +1933,7 @@ export default function POSScreen({
               onScroll={e => {
                 if (payView === "customer") setNameCollapsed(e.nativeEvent.contentOffset.y > 140);
               }}
-              contentContainerStyle={{ flexGrow: 1, padding: 18, paddingTop: 60, paddingBottom: 24 }}
+              contentContainerStyle={{ flexGrow: 1, padding: 18, paddingTop: insets.top + 12, paddingBottom: 24 + insets.bottom }}
             >
             {payView === "payCustomers" ? (
               <View style={{ flexDirection: "row", alignItems: "center" }}>
@@ -1595,7 +1970,7 @@ export default function POSScreen({
                   <Ionicons name="chevron-back" size={topIconBtn.iconSize} color={topIconBtn.icon} />
                 </Pressable>
                 <Text style={{ flex: 1, textAlign: "center", fontWeight: "800", fontSize: 18, color: "#fff" }} numberOfLines={1}>
-                  {payView === "menu" ? "" : payView === "payNew" ? "New Customer" : payView === "customer" ? (nameCollapsed ? splitName(selectedCustomer?.name ?? "").last || "Kliyan" : "Kliyan") : payView === "profile" ? "Profil" : payView === "edit" ? "Edit Customer" : payView === "txnDetail" ? `${fmtG(Number(txnDetail?.sale?.total ?? 0))} ${tenderLabel(txnDetail?.sale?.payment_method)}` : payView === "tender" ? `${fmtG(subtotal)} ${tenderMode === "cash" ? "Cash" : "Kredi"}` : ""}
+                  {payView === "menu" ? "" : payView === "payNew" ? "New Customer" : payView === "customer" ? (nameCollapsed ? splitName(selectedCustomer?.name ?? "").last || "Kliyan" : "Kliyan") : payView === "profile" ? "Profil" : payView === "edit" ? "Edit Customer" : payView === "txnDetail" ? `${fmtG(Number(txnDetail?.sale?.total ?? 0))} ${tenderLabel(txnDetail?.sale?.payment_method)}` : payView === "tender" ? `${fmtG(payableSubtotal)} ${tenderMode === "cash" ? "Cash" : "Kredi"}` : ""}
                 </Text>
                 {payView === "edit" ? (
                   <Pressable onPress={() => savePayCustomerEdit()} disabled={!editFormValid || savingEdit} style={{ paddingHorizontal: 16, height: 34, borderRadius: 12, backgroundColor: editFormValid ? "#fff" : "#3a3a3c", alignItems: "center", justifyContent: "center", opacity: editFormValid && !savingEdit ? 1 : 0.6 }}>
@@ -1620,12 +1995,36 @@ export default function POSScreen({
             )}
             {payView === "main" ? (
               <View style={{ flex: 1 }}>
-                <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" nestedScrollEnabled bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "center" }}>
+                <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" nestedScrollEnabled bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "center" }}>
                   <View style={{ alignItems: "center", paddingVertical: 20 }}>
-                    <Text style={{ fontWeight: "900", fontSize: 32, color: "#fff", letterSpacing: -0.5, ...monoStyle }}>{fmtG(subtotal)}</Text>
+                    <Text style={{ fontWeight: "900", fontSize: 32, color: "#fff", letterSpacing: -0.5, ...monoStyle }}>{fmtG(payableSubtotal)}</Text>
                     <Text style={{ color: "#9ca3af", fontSize: 13, marginTop: 6 }}>Chwazi ki tranzaksyon ou vle</Text>
                   </View>
-                </ScrollView>
+                  <View style={{ paddingHorizontal: 4, paddingBottom: 8 }}>
+                    {appliedCoupon ? (
+                      <Pressable
+                        onPress={removeCoupon}
+                        style={{ flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "rgba(52,199,89,0.10)", borderWidth: 1, borderColor: "#34c759", borderRadius: 14, paddingVertical: 12, paddingHorizontal: 14 }}
+                      >
+                        <Ionicons name="pricetag" size={16} color="#34c759" />
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>{appliedCoupon.code} • −{fmtG(discountGoud)}</Text>
+                          <Text style={{ color: "#8e8e93", fontSize: 11, marginTop: 1 }}>Peze pou retire koupon an</Text>
+                        </View>
+                        <Ionicons name="close-circle" size={20} color="#8e8e93" />
+                      </Pressable>
+                    ) : (
+                      <Pressable
+                        onPress={() => setShowCouponInput(true)}
+                        style={{ flexDirection: "row", alignItems: "center", gap: 10, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, paddingVertical: 14, paddingHorizontal: 14 }}
+                      >
+                        <Ionicons name="pricetags-outline" size={17} color="#F0B429" />
+                        <Text style={{ flex: 1, color: "#fff", fontWeight: "700", fontSize: 14 }}>Koupon / Rabais</Text>
+                        <Ionicons name="chevron-forward" size={16} color="#8e8e93" />
+                      </Pressable>
+                    )}
+                  </View>
+                </KeyboardSafeScrollView>
                 <View>
                   <View style={{ height: 1, backgroundColor: "#262626" }} />
                   {([
@@ -1679,7 +2078,7 @@ export default function POSScreen({
               </View>
             ) : payView === "customer" ? (
               <View style={{ marginTop: 6, flex: 1 }}>
-                <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+                <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
                   <CustomerDetailBody
                     customer={selectedCustomer}
                     stats={payStats}
@@ -1692,7 +2091,7 @@ export default function POSScreen({
                     onAddItem={addLastVisitItemToCart}
                     addedProductIds={cart.map(c => c.id)}
                   />
-                </ScrollView>
+                </KeyboardSafeScrollView>
                 <View style={{ borderTopWidth: 0.5, borderTopColor: palette.hairline, marginTop: 12, paddingTop: 12, gap: 10, paddingBottom: 8 }}>
                   <Pressable onPress={() => setPayView("profile")} style={{ height: 60, borderRadius: 12, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center" }}>
                     <Text style={{ color: "white", fontWeight: "800", fontSize: 14 }}>View Full Profile</Text>
@@ -1757,23 +2156,24 @@ export default function POSScreen({
             ) : payView === "tender" ? (
               <TenderView
                 mode={tenderMode}
-                subtotal={subtotal}
+                subtotal={payableSubtotal}
                 tenderInput={tenderInput}
                 onKey={pressTenderKey}
                 onTender={submitTender}
               />
             ) : null}
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </KeyboardAvoidingView>
+        {showCouponInput ? couponOverlay : null}
       </Modal>
 
       {/* Add customer modal - Manager/Admin only */}
       <Modal visible={showAddCustomer} transparent animationType="slide">
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
           <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
-              <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 20, borderTopRightRadius: 20, height: sheetH, padding: 16 }}>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
+              <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 20, borderTopRightRadius: 20, height: sheetH, padding: 16, paddingBottom: 16 + insets.bottom }}>
             <View style={{ width: 40, height: 4, backgroundColor: "#e2e8f0", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
             <Text style={{ fontWeight: "900", fontSize: 16, textAlign: "center" }}>👔 Enskri Nouvo Kliyan</Text>
             <Text style={{ color: "#64748b", textAlign: "center", fontSize: 11, marginTop: 4 }}>Kesye ak asosye ka enskri • Limit kredi se manadjè</Text>
@@ -1798,7 +2198,7 @@ export default function POSScreen({
               )}
             </View>
           </View>
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -1806,8 +2206,8 @@ export default function POSScreen({
       <Modal visible={showLimitEdit} transparent animationType="slide">
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
           <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
-              <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 20, borderTopRightRadius: 20, height: sheetH, padding: 16 }}>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}>
+              <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "white", borderTopLeftRadius: 20, borderTopRightRadius: 20, height: sheetH, padding: 16, paddingBottom: 16 + insets.bottom }}>
             <Text style={{ fontWeight: "900", fontSize: 16, textAlign: "center" }}>✎ Mete ajou limit kredi</Text>
             <Text style={{ color: "#64748b", textAlign: "center", fontSize: 11, marginTop: 4 }}>{selectedCustomer?.name} • {selectedCustomer?.id_card_number}</Text>
             <Text style={{ fontWeight: "700", fontSize: 12, marginTop: 12 }}>Limit (G) — kite vid pou san limit</Text>
@@ -1822,10 +2222,14 @@ export default function POSScreen({
               <Pressable onPress={handleEditCustomerLimit} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: "#7c3aed", borderRadius: 24, alignItems: "center", justifyContent: "center" }}><Text style={{ color: "white", fontWeight: "800" }}>Anrejistre</Text></Pressable>
             </View>
               </View>
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Root-level overlay — the coupon entry can open from the tender sheet
+          without the phone cart sheet. */}
+      {showCouponInput ? couponOverlay : null}
 
       {/* Barcode modal */}
       <ScanSheet

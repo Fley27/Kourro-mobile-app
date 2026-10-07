@@ -3,12 +3,16 @@
 // product; input above the bought amount is blocked per product.
 import React, { useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Alert } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useResponsive, sheetBox } from "../responsive";
 import { findSaleForPickup, setTakenTotal, toNum } from "./store";
 import { printPickupReceipt, type PickupReceiptLine } from "./receipt";
 import { PAYMENT_LABELS, receiptLineLabels, attachLineLabels } from "../receipts";
 import { saleLineLabel } from "../labels";
 import { getDb } from "../db";
 import { uploadSuccess, uploadError } from "../components/UploadTransition";
+import { KeyboardSafeView } from "../components/KeyboardSafe";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export default function PickupSheet({ visible, saleId, storeId, cashierId, storeName, cashierName, onClose, onSaved }: {
   visible: boolean;
@@ -20,6 +24,8 @@ export default function PickupSheet({ visible, saleId, storeId, cashierId, store
   onClose: () => void;
   onSaved?: () => void;
 }) {
+  const insets = useSafeAreaInsets();
+  const { width, isTablet } = useResponsive();
   const [lines, setLines] = useState<any[]>([]);
   const [saleNumber, setSaleNumber] = useState("");
   const [inputs, setInputs] = useState<Record<string, string>>({});
@@ -118,14 +124,15 @@ export default function PickupSheet({ visible, saleId, storeId, cashierId, store
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardSafeView>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-        <View style={{ backgroundColor: "#1C1C1E", borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 16, paddingBottom: 28, maxHeight: "90%" }}>
+        <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: "#1C1C1E", borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 16, paddingBottom: 28 + insets.bottom, maxHeight: "90%" }}>
           <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 12 }} />
           <Text style={{ fontWeight: "800", fontSize: 17, color: "#fff" }}>Partial pickup</Text>
           <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 4 }}>
             Vant {saleNumber} • Konbyen y ap pran avèk yo? (vid = tout)
           </Text>
-          <ScrollView style={{ marginTop: 12, maxHeight: 420 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+          <KeyboardSafeScrollView style={{ marginTop: 12, maxHeight: 420 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
             {lines.map(it => {
               const bought = toNum(it.quantity);
               const v = parsed(it);
@@ -167,7 +174,7 @@ export default function PickupSheet({ visible, saleId, storeId, cashierId, store
               );
             })}
             {lines.length === 0 ? <Text style={{ color: "#8e8e93", textAlign: "center", padding: 16 }}>Pa gen liy.</Text> : null}
-          </ScrollView>
+          </KeyboardSafeScrollView>
           <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
             <Pressable onPress={onClose} style={{ flex: 1, paddingVertical: 14, backgroundColor: "transparent", borderRadius: 12, borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center" }}>
               <Text style={{ fontWeight: "700", color: "#fff", fontSize: 14 }}>Anile</Text>
@@ -178,6 +185,8 @@ export default function PickupSheet({ visible, saleId, storeId, cashierId, store
           </View>
         </View>
       </View>
+    
+      </KeyboardSafeView>
     </Modal>
   );
 }

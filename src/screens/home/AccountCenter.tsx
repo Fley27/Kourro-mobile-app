@@ -1,10 +1,13 @@
 import React, { useState } from "react";
 import { View, Text, Pressable, TextInput, Alert, Modal, ScrollView, KeyboardAvoidingView, Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { palette, radius, shadow } from "../../theme";
+import { blackPalette as palette, radius, shadow } from "../../theme";
 import { useResponsive, centerBox, sheetBox, dialogBox } from "../../responsive";
 import { generateUniqueCode } from "./storeCodes";
 import type { BusinessType } from "../../users";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
+import { mintId } from "../../db/ids";
 
 type StoreItem = { id: string; name: string; location: string; code: string; createdAt: string; disabled?: boolean; breachFlagged?: boolean; breachedAt?: string; revokedBy?: string };
 
@@ -27,6 +30,7 @@ export default function AccountCenter({
   role, stores, setStores, activeStoreId, setActiveStoreId,
   appDisabled, setAppDisabled, businessType = "retail", onBusinessTypeChange, onClose,
 }: Props) {
+  const insets = useSafeAreaInsets();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newLocation, setNewLocation] = useState("");
@@ -44,7 +48,7 @@ export default function AccountCenter({
     if (!newName.trim() || !newLocation.trim()) { setError("Non ak lokal obligatwa."); return; }
     if (stores.length >= MAX_STORES) { setError("Ou rive nan limit maksimòm (3 magazen). Pou plis, ou bezwen aksè espesyal."); return; }
     const code = generateUniqueCode(stores);
-    const store: StoreItem = { id: `st-${Date.now()}`, name: newName.trim(), location: newLocation.trim(), code, createdAt: new Date().toISOString() };
+    const store: StoreItem = { id: mintId(), name: newName.trim(), location: newLocation.trim(), code, createdAt: new Date().toISOString() };
     setStores(prev => [...prev, store]);
     setActiveStoreId(store.id);
     setJustSwitched(store.id);
@@ -68,10 +72,10 @@ export default function AccountCenter({
   const todayStr = new Date().toLocaleDateString("fr-HT", { year: "numeric", month: "long", day: "numeric" });
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, paddingBottom: 24, alignItems: isTablet ? "center" : undefined }}>
+    <KeyboardSafeScrollView style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, paddingBottom: 24, alignItems: isTablet ? "center" : undefined }}>
       <View style={{ width: "100%", gap: 0 }}>
       {/* Hero card — charcoal luxury */}
-      <View style={{ backgroundColor: palette.ink2, borderRadius: radius.lg, padding: 16, ...shadow.elevated }}>
+      <View style={{ backgroundColor: "#1c1c1e", borderRadius: radius.lg, padding: 16, ...shadow.elevated }}>
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -91,7 +95,7 @@ export default function AccountCenter({
               <Text style={{ color: "#fff", fontSize: 10, fontWeight: "700" }}>Aktif: {active?.name ?? "—"}</Text>
             </View>
           </View>
-          <View style={{ flex: 1, backgroundColor: palette.inkSoft, borderRadius: radius.sm, padding: 6, alignItems: "center" }}>
+          <View style={{ flex: 1, backgroundColor: "#3a3a3c", borderRadius: radius.sm, padding: 6, alignItems: "center" }}>
             <Text style={{ color: "#fff", fontSize: 10, fontWeight: "700" }}>{active?.location ?? ""}</Text>
           </View>
         </View>
@@ -114,7 +118,7 @@ export default function AccountCenter({
                     onPress={() => onBusinessTypeChange?.(t)}
                     style={{ flex: 1, paddingVertical: 10, borderRadius: radius.sm, borderWidth: 1, borderColor: active ? palette.ink2 : palette.hairline, backgroundColor: active ? palette.ink2 : palette.surface, alignItems: "center" }}
                   >
-                    <Text style={{ fontWeight: "800", fontSize: 12, color: active ? "#fff" : palette.ink }}>
+                    <Text style={{ fontWeight: "800", fontSize: 12, color: active ? "#000" : palette.ink }}>
                       {t === "retail" ? "Retail" : t === "bar" ? "Bar" : "Resto"}
                     </Text>
                   </Pressable>
@@ -155,8 +159,8 @@ export default function AccountCenter({
             onPress={() => { if (stores.length >= MAX_STORES) { Alert.alert("Limit rive", "Ou gen maksimòm 3 magazen. Pou kreye plis, ou bezwen aksè espesyal."); return; } setShowCreate(true); }}
             style={{ backgroundColor: palette.ink2, paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.sm, flexDirection: "row", alignItems: "center", gap: 5, ...shadow.soft }}
           >
-            <Ionicons name="add" size={16} color="#fff" />
-            <Text style={{ color: "#fff", fontSize: 11, fontWeight: "800" }}>Nouvo</Text>
+            <Ionicons name="add" size={16} color="#000" />
+            <Text style={{ color: "#000", fontSize: 11, fontWeight: "800" }}>Nouvo</Text>
           </Pressable>
         </View>
         {stores.map(s => {
@@ -226,8 +230,8 @@ export default function AccountCenter({
       <Modal visible={showCreate} transparent animationType="slide" onRequestClose={() => setShowCreate(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
           <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end", alignItems: isTablet ? "center" : undefined }}>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end", ...(isTablet && { alignItems: "center", width }) }}>
-              <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: palette.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: 16, ...shadow.elevated }}>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end", ...(isTablet && { alignItems: "center", width }) }}>
+              <View style={{ ...sheetBox(isTablet, width, 640), backgroundColor: palette.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: 16, paddingBottom: 16 + insets.bottom, ...shadow.elevated }}>
             <View style={{ width: 36, height: 4, backgroundColor: palette.separator, borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
             <Text style={{ fontWeight: "900", textAlign: "center", color: palette.ink, fontSize: 17, letterSpacing: -0.3 }}>Nouvo Magazen</Text>
             <Text style={{ textAlign: "center", color: palette.muted2, fontSize: 12, marginTop: 4 }}>{stores.length}/{MAX_STORES} kreye • Kòd sekrè 4 karaktè ap généré otomatikman</Text>
@@ -241,10 +245,10 @@ export default function AccountCenter({
             {error ? <Text style={{ fontSize: 12, color: palette.danger, fontWeight: "700", marginTop: 8, textAlign: "center" }}>{error}</Text> : null}
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
               <Pressable onPress={() => { setShowCreate(false); setError(""); }} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontWeight: "700", color: palette.ink }}>Anile</Text></Pressable>
-              <Pressable onPress={createStore} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", ...shadow.soft }}><Text style={{ color: "#fff", fontWeight: "800" }}>Kreye magazen</Text></Pressable>
+              <Pressable onPress={createStore} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", ...shadow.soft }}><Text style={{ color: "#000", fontWeight: "800" }}>Kreye magazen</Text></Pressable>
             </View>
               </View>
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -258,13 +262,13 @@ export default function AccountCenter({
             </View>
             <Text style={{ fontWeight: "900", fontSize: 16, marginTop: 12, textAlign: "center", color: palette.ink, letterSpacing: -0.3 }}>Kòd sekrè — Sere li kounye a</Text>
             <Text style={{ textAlign: "center", color: palette.muted2, fontSize: 12, marginTop: 6 }}>Sa se sèl fwa ou pral wè kòd sa a nan app la. Ekri li epi sere li deyò app la (kaye, nòt an sekirite).</Text>
-            <View style={{ marginTop: 14, backgroundColor: palette.ink2, borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 24, alignItems: "center", alignSelf: "stretch" }}>
+            <View style={{ marginTop: 14, backgroundColor: "#1c1c1e", borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 24, alignItems: "center", alignSelf: "stretch" }}>
               <Text style={{ color: palette.muted3, fontSize: 10, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase" }}>Kòd magazen</Text>
               <Text style={{ color: "#fff", fontWeight: "900", fontSize: 24, letterSpacing: 4, marginTop: 4 }}>{createdCode}</Text>
             </View>
             <Text style={{ textAlign: "center", color: palette.danger, fontSize: 11, fontWeight: "700", marginTop: 12 }}>Apre ou fèmen, kòd la p ap janm parèt ankò — menm pwopriyetè pa ka wè li.</Text>
             <Pressable onPress={() => { setCreatedCode(null); setTimeout(onClose, 350); }} style={{ marginTop: 14, backgroundColor: palette.ink2, borderRadius: radius.sm, paddingVertical: 12, paddingHorizontal: 24, minHeight: 48, alignItems: "center", justifyContent: "center", alignSelf: "stretch", ...shadow.soft }}>
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Mwen sere li deyò app la ✓</Text>
+              <Text style={{ color: "#000", fontWeight: "800" }}>Mwen sere li deyò app la ✓</Text>
             </Pressable>
           </View>
         </View>
@@ -274,7 +278,7 @@ export default function AccountCenter({
       <Modal visible={!!verifyStore} transparent animationType="fade" onRequestClose={() => setVerifyStore(null)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
           <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", padding: 24, alignItems: "center" }}>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "center", ...(isTablet && { alignItems: "center", width }) }}>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "center", ...(isTablet && { alignItems: "center", width }) }}>
               <View style={{ ...dialogBox(isTablet, width, 480), width: "100%", backgroundColor: palette.surface, borderRadius: radius.lg, padding: 16, ...shadow.elevated }}>
             <Text style={{ fontWeight: "900", textAlign: "center", color: palette.ink, fontSize: 17, letterSpacing: -0.3 }}>Chanje magazen</Text>
             <Text style={{ textAlign: "center", color: palette.muted2, fontSize: 12, marginTop: 4 }}>Ou pral chanje nan <Text style={{ fontWeight: "800", color: palette.ink }}>{verifyStore?.name}</Text>. Antre kòd sekrè magazen sa a.</Text>
@@ -291,14 +295,14 @@ export default function AccountCenter({
             {codeError ? <Text style={{ fontSize: 12, color: palette.danger, fontWeight: "700", marginTop: 8, textAlign: "center" }}>{codeError}</Text> : null}
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
               <Pressable onPress={() => { setVerifyStore(null); setVerifyCode(""); setCodeError(""); }} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontWeight: "700", color: palette.ink }}>Anile</Text></Pressable>
-              <Pressable onPress={confirmSwitch} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", ...shadow.soft }}><Text style={{ color: "#fff", fontWeight: "800" }}>Chanje</Text></Pressable>
+              <Pressable onPress={confirmSwitch} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", ...shadow.soft }}><Text style={{ color: "#000", fontWeight: "800" }}>Chanje</Text></Pressable>
             </View>
               </View>
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
       </View>
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

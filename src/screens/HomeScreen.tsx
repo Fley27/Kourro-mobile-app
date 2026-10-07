@@ -8,6 +8,7 @@ import React from "react";
 import AnalyticsScreen from "./AnalyticsScreen";
 import SalesReportScreen from "./SalesReportScreen";
 import PickupsScreen from "./PickupsScreen";
+import { FALLBACK_STORE_ID } from "../db/ids";
 
 type StoreItem = { id: string; name: string; location: string; code: string; createdAt: string };
 
@@ -38,7 +39,7 @@ export { type RangeKey } from "./home/types";
 export default function HomeScreen({
   role = "cashier",
   currentUser,
-  storeId = "demo-store-id",
+  storeId = FALLBACK_STORE_ID,
   storeName,
   userStoreIds = [],
   deviceId = "device-unknown",

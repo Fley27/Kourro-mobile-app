@@ -20,6 +20,7 @@ import MissingPricesSheet from "../components/MissingPricesSheet";
 import { ProfileMenu } from "../components/CustomerProfile";
 import type { StepKey } from "./catalogFlow/CatalogFlowModal";
 import { uploadSuccess, uploadError } from "../components/UploadTransition";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export default function ProductDetail({
   product, categories, catIds, v2, supplierList,
@@ -135,7 +136,7 @@ export default function ProductDetail({
 
   return (
     <View style={{ flex: 1, width: "100%" }}>
-      <ScrollView
+      <KeyboardSafeScrollView
         style={{ flex: 1, width: "100%" }}
         contentContainerStyle={{ padding: 16, paddingBottom: 96, gap: 12 }}
         showsVerticalScrollIndicator={false}
@@ -344,7 +345,7 @@ export default function ProductDetail({
           onSaved={() => { setShowPrices(false); onChanged(); }}
         />
 
-      </ScrollView>
+      </KeyboardSafeScrollView>
     </View>
   );
 }

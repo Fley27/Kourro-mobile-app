@@ -4,12 +4,17 @@
 // whole chain (parents first, then links); X discards all. A blank open form
 // is ignored when temps exist; a touched form must be fully valid.
 import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, Pressable, TextInput, Modal, ScrollView, Alert, SafeAreaView } from "react-native";
+import { View, Text, Pressable, TextInput, Modal, ScrollView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { radius, shadow, topIconBtn } from "../theme";
 import { getDb, insertOutbox } from "../db";
 import { type Category, categoryDisplayIcon, categoryIonicon, matchCategoryIconNames, slugify } from "../screens/CatalogShared";
 import { uploadError } from "./UploadTransition";
+import { SafeScreen } from "./SafeScreen";
+import { KeyboardSafeView } from "./KeyboardSafe";
+import { KeyboardSafeScrollView } from "./KeyboardSafe";
+import { FALLBACK_STORE_ID } from "../db/ids";
+import { mintId } from "../db/ids";
 
 type Glyph = keyof typeof Ionicons.glyphMap;
 
@@ -33,19 +38,17 @@ type Draft = {
 
 function freshDraft(): Draft {
   return {
-    key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    key: mintId(),
     name: "", icon: null, parentIds: [],
     collapsed: false, provisionalId: null,
   };
 }
 
-function uniqueSlug(base: string, taken: Set<string>): string {
-  let slug = base;
-  let n = 2;
-  while (!slug || slug === "all" || taken.has(slug)) {
-    slug = `${base}-${n++}`;
-  }
-  return slug;
+function uniqueSlug(_base: string, taken: Set<string>): string {
+  let id = mintId();
+  while (taken.has(id)) id = mintId();
+  taken.add(id);
+  return id;
 }
 
 /** "" = valid, otherwise the reason. Icon is required, name unique, slug free. */
@@ -178,24 +181,24 @@ function CategoryFields({
             {suggestions.length > 0 && (
               <View>
                 <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>SIJERE</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 8, paddingRight: 12 }}>
+                <KeyboardSafeScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 8, paddingRight: 12 }}>
                   {suggestions.map(g => (
                     <Pressable key={g} onPress={() => onIcon(g)} style={{ width: 52, height: 52, borderRadius: 14, borderWidth: icon === g ? 0 : 1, borderColor: "#2b2b2b", backgroundColor: icon === g ? "#fff" : "#1C1C1E", alignItems: "center", justifyContent: "center" }}>
                       <Ionicons name={g} size={24} color={icon === g ? "#000" : "#fff"} />
                     </Pressable>
                   ))}
-                </ScrollView>
+                </KeyboardSafeScrollView>
               </View>
             )}
             <View>
               <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", letterSpacing: 0.6 }}>TOUT IKON</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 8, paddingRight: 12 }}>
+              <KeyboardSafeScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 8, paddingRight: 12 }}>
                 {ALL_ICONS.filter(g => !suggestions.includes(g)).map(g => (
                   <Pressable key={g} onPress={() => onIcon(g)} style={{ width: 52, height: 52, borderRadius: 14, borderWidth: icon === g ? 0 : 1, borderColor: "#2b2b2b", backgroundColor: icon === g ? "#fff" : "#1C1C1E", alignItems: "center", justifyContent: "center" }}>
                     <Ionicons name={g} size={24} color={icon === g ? "#000" : "#fff"} />
                   </Pressable>
                 ))}
-              </ScrollView>
+              </KeyboardSafeScrollView>
             </View>
           </View>
         )}
@@ -251,7 +254,7 @@ function CategoryFields({
 }
 
 export default function CategoryFormModal({
-  visible, onClose, onSaved, categories, storeId = "demo-store-id",
+  visible, onClose, onSaved, categories, storeId = FALLBACK_STORE_ID,
   editCategory, editParentIds, allLinks,
 }: {
   visible: boolean;
@@ -601,7 +604,8 @@ export default function CategoryFormModal({
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
+      <KeyboardSafeView>
+      <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
         {editCategory ? (
           <>
             {/* Edit-existing: like the add-one, minus the add-more chain */}
@@ -615,7 +619,7 @@ export default function CategoryFormModal({
               </Pressable>
             </View>
             <View style={{ height: 1, backgroundColor: "#262626" }} />
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <CategoryFields
                 name={exName}
                 icon={exIcon}
@@ -628,7 +632,7 @@ export default function CategoryFormModal({
                 nameError={exError}
                 touched={exTouched}
               />
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </>
         ) : editDraft ? (
           <>
@@ -641,7 +645,7 @@ export default function CategoryFormModal({
               <View style={{ width: topIconBtn.size }} />
             </View>
             <View style={{ height: 1, backgroundColor: "#262626" }} />
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <CategoryFields
                 name={editName}
                 icon={editIcon}
@@ -654,7 +658,7 @@ export default function CategoryFormModal({
                 nameError={editError}
                 touched={editTouched}
               />
-            </ScrollView>
+            </KeyboardSafeScrollView>
             <View style={{ padding: 16, borderTopWidth: 0.5, borderColor: "#262626", gap: 10 }}>
               <Pressable onPress={commitEdit} disabled={!editValid || busy} style={{ paddingVertical: 14, borderRadius: 12, backgroundColor: editValid && !busy ? "#fff" : "#2b2b2b", alignItems: "center", ...shadow.card }}>
                 <Text style={{ fontWeight: "800", fontSize: 14, color: editValid && !busy ? "#000" : "#636366" }}>Mete ajou</Text>
@@ -680,7 +684,7 @@ export default function CategoryFormModal({
             </View>
             <View style={{ height: 1, backgroundColor: "#262626" }} />
 
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               {/* Collapsed temps — tap opens the edit screen */}
               {temps.map(t => (
                 <Pressable key={t.key} onPress={() => openEdit(t)} style={{ backgroundColor: "transparent", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, flexDirection: "row", alignItems: "center", gap: 12 }}>
@@ -713,7 +717,7 @@ export default function CategoryFormModal({
               {drafts.length > 1 && !openBlank ? (
                 <Text style={{ fontSize: 12, color: "#8e8e93", textAlign: "center" }}>Fòm {drafts.length}/{MAX_CHAIN} — Kreye ap sove tout lis la.</Text>
               ) : null}
-            </ScrollView>
+            </KeyboardSafeScrollView>
 
             {/* Footer — outside the form: chain one more (hidden at cap) */}
             {drafts.length < MAX_CHAIN ? (
@@ -723,7 +727,9 @@ export default function CategoryFormModal({
             ) : null}
           </>
         )}
-      </SafeAreaView>
+      </SafeScreen>
+    
+      </KeyboardSafeView>
     </Modal>
   );
 }

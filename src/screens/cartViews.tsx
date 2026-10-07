@@ -13,6 +13,7 @@ import { CustomerProfileBody, fullVisitDate, NoteCard } from "../components/Cust
 export { CustomerProfileBody };
 import { PAYMENT_LABELS, fmtDateTime } from "../receipts";
 import { saleLineLabel } from "../labels";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export function CartMenuView({ onLouvriFakti, onClearCart, onDismiss }: {
   onLouvriFakti: () => void;
@@ -90,7 +91,7 @@ export function CartCustomersView({ search, onSearch, results, onPick, onOpenNew
             </Pressable>
           ) : null}
         </View>
-        <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
           {sorted.length === 0 ? (
             <View style={{ padding: 32, alignItems: "center" }}>
               <Text style={{ color: "#fff", fontSize: 15, fontWeight: "600" }}>Pa gen kliyan</Text>
@@ -112,7 +113,7 @@ export function CartCustomersView({ search, onSearch, results, onPick, onOpenNew
               </Pressable>
             ))
           )}
-        </ScrollView>
+        </KeyboardSafeScrollView>
       </View>
     );
   }
@@ -123,7 +124,7 @@ export function CartCustomersView({ search, onSearch, results, onPick, onOpenNew
         <TextInput value={search} onChangeText={onSearch} placeholder="Chèche kliyan (non, NIF, telefòn)" placeholderTextColor="#94A3B8" style={{ flex: 1, fontSize: 13, color: "#0F172A" }} />
         {search.length > 0 && <Pressable onPress={() => onSearch("")} hitSlop={8} style={{ padding: 4 }}><Text style={{ color: "#94A3B8", fontSize: 12, fontWeight: "600" }}>✕</Text></Pressable>}
       </View>
-      <ScrollView style={{ flex: 1, marginTop: 12 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+      <KeyboardSafeScrollView style={{ flex: 1, marginTop: 12 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         {!search.trim() ? (
           <Text style={{ fontSize: 12, color: "#fff", fontWeight: "800", letterSpacing: 0.6, marginBottom: 8 }}>Apèn Kreye</Text>
         ) : null}
@@ -144,7 +145,7 @@ export function CartCustomersView({ search, onSearch, results, onPick, onOpenNew
             </Pressable>
           ))
         )}
-      </ScrollView>
+      </KeyboardSafeScrollView>
     </View>
   );
 }

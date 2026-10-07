@@ -4,7 +4,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { fmtG, fmt, monoStyle } from "../format";
 import { formatCheckoutRow } from "../catalogModel";
 import { useResponsive } from "../responsive";
-import { palette, radius } from "../theme";
+import { blackPalette as palette, radius } from "../theme";
+import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 // ---- Cross-device primitives + types (device sets live in ../picker/phone
 // and ../picker/tablet; cart/total/empty markup is identical on both) ----
@@ -87,6 +88,19 @@ export type SaleRow = {
   maxQ: number;
   variantCountForItem: number;
   isTop: boolean;
+  /** Units sold in the last 30 days for this exact (unit, variant). */
+  salesQty: number;
+};
+
+// ---- One product group for the checkout list: the product identity stated
+// once in the header, its sellable variants as sub-rows underneath. ----
+export type SaleGroup = {
+  product: Product;
+  categoryName: string;
+  rows: SaleRow[];
+  variantCount: number;
+  /** Row key of the best-selling variant in the group (30-day trend), null if none. */
+  bestKey: string | null;
 };
 
 export function ProductsEmpty() {
@@ -241,7 +255,7 @@ export function CartLinesList(props: {
 }) {
   const { cart, editingQtyId, editingQtyVal, onDec, onInc, onRemove, onEditStart, onEditChange, onEditBlur, style } = props;
   return (
-    <ScrollView style={[{ flex: 1 }, style]} showsVerticalScrollIndicator={false}>
+    <KeyboardSafeScrollView style={[{ flex: 1 }, style]} showsVerticalScrollIndicator={false}>
       {cart.map(c => (
         <CartLineRow
           key={c.key}
@@ -256,7 +270,7 @@ export function CartLinesList(props: {
           onEditBlur={onEditBlur}
         />
       ))}
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }
 

@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import { View, Text, Pressable, TextInput, Modal, ScrollView, KeyboardAvoidingView, Platform } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { palette, radius, shadow } from "../../theme";
+import { blackPalette as palette, radius, shadow } from "../../theme";
 import { useResponsive, centerBox, dialogBox } from "../../responsive";
 import { generateUniqueCode, isSoftwareOwner, type StoreItem } from "./storeCodes";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
 
 type Props = {
   stores: StoreItem[];
@@ -52,7 +53,7 @@ export default function SecurityCenter({ stores, setStores, activeStoreId, setAc
   if (result) {
     const s = stores.find(x => x.id === result.storeId);
     return (
-      <ScrollView style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, gap: 12, alignItems: isTablet ? "center" : undefined }}>
+      <KeyboardSafeScrollView style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, gap: 12, alignItems: isTablet ? "center" : undefined }}>
         <View style={{ width: "100%", backgroundColor: palette.surface, borderRadius: radius.lg, padding: 20, alignItems: "center", borderWidth: 0.5, borderColor: palette.hairline, ...shadow.card }}>
           <View style={{ width: 56, height: 56, borderRadius: radius.md, backgroundColor: palette.successBg, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="shield-checkmark" size={28} color={palette.success} />
@@ -68,25 +69,25 @@ export default function SecurityCenter({ stores, setStores, activeStoreId, setAc
                 : `${s?.name} ka fonksyone ankò.`}
           </Text>
           {result.newCode && (
-            <View style={{ marginTop: 14, backgroundColor: palette.ink2, borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 24, alignItems: "center", alignSelf: "stretch" }}>
+            <View style={{ marginTop: 14, backgroundColor: "#1c1c1e", borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 24, alignItems: "center", alignSelf: "stretch" }}>
               <Text style={{ color: palette.muted3, fontSize: 10, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase" }}>Nouvo kòd (yon sèl fwa)</Text>
               <Text style={{ color: "#fff", fontWeight: "900", fontSize: 24, letterSpacing: 4, marginTop: 4 }}>{result.newCode}</Text>
             </View>
           )}
           <Pressable onPress={() => { setResult(null); }} style={{ marginTop: 16, backgroundColor: palette.ink2, borderRadius: radius.sm, paddingVertical: 12, paddingHorizontal: 24, minHeight: 48, alignItems: "center", justifyContent: "center", alignSelf: "stretch", ...shadow.soft }}>
-            <Text style={{ color: "#fff", fontWeight: "800" }}>Fèmen</Text>
+            <Text style={{ color: "#000", fontWeight: "800" }}>Fèmen</Text>
           </Pressable>
         </View>
-      </ScrollView>
+      </KeyboardSafeScrollView>
     );
   }
 
   // ---- Locked: require software-owner key ----
   if (!unlocked) {
     return (
-      <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 48, alignItems: isTablet ? "center" : undefined }}>
+      <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 48, alignItems: isTablet ? "center" : undefined }}>
         <View style={{ width: "100%", gap: 12 }}>
-        <View style={{ backgroundColor: palette.ink2, borderRadius: radius.lg, padding: 16, ...shadow.elevated }}>
+        <View style={{ backgroundColor: "#1c1c1e", borderRadius: radius.lg, padding: 16, ...shadow.elevated }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <Ionicons name="shield-checkmark-outline" size={18} color={palette.warningDot} />
             <Text style={{ color: "#fff", fontWeight: "900", fontSize: 16, letterSpacing: -0.3 }}>Konsole Sipò (Software Owner)</Text>
@@ -112,17 +113,17 @@ export default function SecurityCenter({ stores, setStores, activeStoreId, setAc
           />
           {authError ? <Text style={{ fontSize: 12, color: palette.danger, fontWeight: "700", marginTop: 8 }}>{authError}</Text> : null}
           <Pressable onPress={authenticate} style={{ marginTop: 12, backgroundColor: palette.ink2, borderRadius: radius.sm, paddingVertical: 13, alignItems: "center", ...shadow.soft }}>
-            <Text style={{ color: "#fff", fontWeight: "800" }}>Verifye aksè</Text>
+            <Text style={{ color: "#000", fontWeight: "800" }}>Verifye aksè</Text>
           </Pressable>
         </View>
         </View>
-      </ScrollView>
+      </KeyboardSafeScrollView>
     );
   }
 
   // ---- Unlocked: manage stores ----
   return (
-    <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 48, alignItems: isTablet ? "center" : undefined }}>
+    <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, backgroundColor: palette.bg }} contentContainerStyle={{ padding: padH, gap: 12, paddingBottom: 48, alignItems: isTablet ? "center" : undefined }}>
       <View style={{ width: "100%", gap: 12 }}>
       {/* Status banner */}
       <View style={{ backgroundColor: palette.warningBg, borderWidth: 1, borderColor: palette.warningBd, borderRadius: radius.md, padding: 12 }}>
@@ -173,8 +174,8 @@ export default function SecurityCenter({ stores, setStores, activeStoreId, setAc
               </View>
               <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
                 <Pressable onPress={() => { setTargetStore(s); setAction("rotate"); setConfirmKey(""); setConfirmError(""); }} style={{ flex: 1, backgroundColor: palette.ink2, borderRadius: radius.sm, paddingVertical: 10, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6, ...shadow.soft }}>
-                  <Ionicons name="refresh" size={14} color="#fff" />
-                  <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>Chanje kòd</Text>
+                  <Ionicons name="refresh" size={14} color="#000" />
+                  <Text style={{ color: "#000", fontWeight: "800", fontSize: 12 }}>Chanje kòd</Text>
                 </Pressable>
                 <Pressable onPress={() => { setTargetStore(s); setAction("toggle"); setConfirmKey(""); setConfirmError(""); }} style={{ flex: 1, backgroundColor: s.disabled ? palette.success : palette.danger, borderRadius: radius.sm, paddingVertical: 10, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6, ...shadow.soft }}>
                   <Ionicons name={s.disabled ? "play" : "stop-circle"} size={14} color="#fff" />
@@ -190,7 +191,7 @@ export default function SecurityCenter({ stores, setStores, activeStoreId, setAc
       <Modal visible={!!targetStore} transparent animationType="fade" onRequestClose={() => { setTargetStore(null); setConfirmError(""); }}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
           <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "center", padding: 24, alignItems: "center" }}>
-            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "center", ...(isTablet && { alignItems: "center", width }) }}>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" showsVerticalScrollIndicator={false} bounces={false} contentContainerStyle={{ flexGrow: 1, justifyContent: "center", ...(isTablet && { alignItems: "center", width }) }}>
               <View style={{ ...dialogBox(isTablet, width, 480), width: "100%", backgroundColor: palette.surface, borderRadius: radius.lg, padding: 16, ...shadow.elevated }}>
             <View style={{ alignItems: "center" }}>
               <View style={{ width: 48, height: 48, borderRadius: radius.md, backgroundColor: action === "rotate" ? palette.warningBg : palette.dangerBg, alignItems: "center", justifyContent: "center" }}>
@@ -217,14 +218,14 @@ export default function SecurityCenter({ stores, setStores, activeStoreId, setAc
             {confirmError ? <Text style={{ fontSize: 12, color: palette.danger, fontWeight: "700", marginTop: 8, textAlign: "center" }}>{confirmError}</Text> : null}
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
               <Pressable onPress={() => { setTargetStore(null); setConfirmKey(""); setConfirmError(""); }} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.surfaceGrouped, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: palette.hairline }}><Text style={{ fontWeight: "700", color: palette.ink }}>Anile</Text></Pressable>
-              <Pressable onPress={confirmed} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", ...shadow.soft }}><Text style={{ color: "#fff", fontWeight: "800" }}>Konfime</Text></Pressable>
+              <Pressable onPress={confirmed} style={{ flex: 1, minHeight: 48, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: palette.ink2, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", ...shadow.soft }}><Text style={{ color: "#000", fontWeight: "800" }}>Konfime</Text></Pressable>
             </View>
               </View>
-            </ScrollView>
+            </KeyboardSafeScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
       </View>
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

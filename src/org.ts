@@ -8,6 +8,7 @@
 import type { BusinessType, User } from "./users";
 import { USERS } from "./users";
 import { insertOutbox } from "./db";
+import { FALLBACK_STORE_ID, STORE_IDS } from "./db/ids";
 
 export type { BusinessType };
 
@@ -28,11 +29,11 @@ export async function setBusinessType(db: any, t: BusinessType): Promise<void> {
   await db.runAsync("INSERT OR REPLACE INTO _meta (key, value) VALUES (?,?)", [BUSINESS_TYPE_KEY, t]);
 }
 
-// Location name ("Petyonvil") -> store id ("st-petyonvil"), mirroring the
-// legacy convention. Unknown locations fall back to the given store id.
-export function storeIdForLocation(location?: string | null, fallback = "demo-store-id"): string {
-  if (location === "Dèlma") return "st-delma";
-  if (location === "Petyonvil") return "st-petyonvil";
+// Location name ("Petyonvil") -> store uuid, mirroring the legacy convention
+// (st-petyonvil / st-delma). Unknown locations fall back to the given store id.
+export function storeIdForLocation(location?: string | null, fallback = FALLBACK_STORE_ID): string {
+  if (location === "Dèlma") return STORE_IDS.delmas;
+  if (location === "Petyonvil") return STORE_IDS.petionVille;
   return fallback;
 }
 
@@ -62,7 +63,7 @@ async function linkEmployeeStore(db: any, employeeId: string, storeId: string): 
 }
 
 /** One-time migration of legacy single-store assignments into the join table. */
-export async function ensureEmployeeStores(db: any, fallbackStoreId = "demo-store-id"): Promise<void> {
+export async function ensureEmployeeStores(db: any, fallbackStoreId = FALLBACK_STORE_ID): Promise<void> {
   await ensureEmployeeStoresTable(db);
   try {
     const flagged = (await db.getAllAsync("SELECT * FROM _meta WHERE key = ?", [EMP_STORES_SEED_KEY])) as any[];
@@ -86,7 +87,7 @@ export async function ensureEmployeeStores(db: any, fallbackStoreId = "demo-stor
 }
 
 /** Store ids this user works in. Falls back to their legacy single store. */
-export async function loadUserStoreIds(db: any, user: Pick<User, "id" | "store"> | null, fallbackStoreId = "demo-store-id"): Promise<string[]> {
+export async function loadUserStoreIds(db: any, user: Pick<User, "id" | "store"> | null, fallbackStoreId = FALLBACK_STORE_ID): Promise<string[]> {
   const fallback = [storeIdForLocation(user?.store, fallbackStoreId)];
   try {
     if (!user?.id) return fallback;

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Animated, BackHandler, Easing, FlatList, KeyboardAvoidingView, Platform, Pressable, Text, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -7,11 +7,14 @@ import { ht } from "../i18n";
 import { palette, radius, shadow } from "../theme";
 import { useResponsive } from "../responsive";
 import { PROD_DARK, CartTotalBar, CartPill, CartLinesList, CartEmptyCard, ProductsEmpty, type CartItem, type SaleRow, type SearchMode } from "../screens/POSShared";
-import { SearchHeader, PendingCard, VariantCard } from "../picker/phone";
-import { TabletSearchCard, TabletPendingHero, TabletProductCard, tabletCatFor } from "../picker/tablet";
-import { useSaleRows, usePendingLine, useCartLines, makePricing } from "../picker/hooks";
+import { SearchHeader, PendingCard } from "../picker/phone";
+import { TabletSearchCard, TabletPendingHero, tabletCatFor } from "../picker/tablet";
+import { VariantGroupCard, groupCardColumns, GROUP_CARD_MIN_W, GROUP_CARD_GAP } from "../picker/group";
+import { PendingVeil } from "../picker/PendingVeil";
+import { useSaleRows, usePendingLine, useCartLines, makePricing, groupSaleRows } from "../picker/hooks";
 import { useSaleCatalog } from "../picker/useSaleCatalog";
 import { ScanSheet } from "../components/ScanSheet";
+import { SkeletonGroupStack } from "../components/Skeleton";
 import { addRound } from "./store";
 import { orderCodeLabel } from "./OrderBoard";
 import type { Actor, Order, RoundLineInput } from "./types";
@@ -38,24 +41,28 @@ export default function AddItemsModal({
   onAdded: () => void;
 }) {
   const responsive = useResponsive();
-  const { isTablet, isLargeTablet, isLandscape, padH } = responsive;
+  const { isTablet, isLandscape, padH, width } = responsive;
   // Same split as checkout (POSScreen): tablet two-pane only in portrait;
   // landscape tablets get the phone layout (pill + cart sheet).
-  const showTablet = isTablet && !isLandscape;
+  const showTablet = isTablet;
   // Explicit root insets: inside this modal a view-level SafeAreaView comes
   // back with zero padding, so the header lands under the status bar. These
   // values are captured at the app root (SafeAreaProvider) and stay correct.
   const insets = useSafeAreaInsets();
 
   // Catalog loads lazily — only while this picker is on screen.
-  const { products, catNames, pricing, minFactorMap, getBaseCost } = useSaleCatalog(true);
+  const { products, catNames, pricing, minFactorMap, variantSales, loaded: catalogLoaded } = useSaleCatalog(true);
   const [search, setSearch] = useState("");
   const [searchMode, setSearchMode] = useState<SearchMode>("name");
   const [cat, setCat] = useState("all");
   const [busy, setBusy] = useState(false);
 
-  const rows = useSaleRows({ products, pricing, minFactorMap, catNames, search });
-  const visibleRows = showTablet && cat !== "all" ? rows.filter(r => tabletCatFor(r.product) === cat) : rows;
+  const rows = useSaleRows({ products, pricing, minFactorMap, catNames, search, variantSales });
+  const visibleRows = useMemo(
+    () => (showTablet && cat !== "all" ? rows.filter(r => tabletCatFor(r.product) === cat) : rows),
+    [rows, showTablet, cat],
+  );
+  const groups = useMemo(() => groupSaleRows(visibleRows, catNames), [visibleRows, catNames]);
 
   // The staged round — a plain checkout cart, committed as one addRound.
   const [round, setRound] = useState<CartItem[]>([]);
@@ -188,28 +195,32 @@ export default function AddItemsModal({
   const pendingActiveFor = (item: SaleRow) => !!pending && pending.product.id === item.product.id && pending.unitId === item.unitId && pending.variant === item.variant;
   const meteLabel = busy ? "Ap mete…" : qtyTotal ? `Mete • ${qtyTotal} atik` : "Mete atik";
 
-  const renderRow = ({ item }: { item: SaleRow }) => showTablet ? (
-    <TabletProductCard
-      row={item}
-      inCartQty={inCartQtyFor(item)}
-      pendingActive={pendingActiveFor(item)}
-      onPress={() => handleProductPress(item)}
-      getBaseCost={getBaseCost}
-    />
-  ) : (
-    <VariantCard
-      row={item}
-      inCartQty={inCartQtyFor(item)}
-      pendingActive={pendingActiveFor(item)}
-      flex={isTablet ? 1 : undefined}
-      onPress={() => handleProductPress(item)}
+  // Two-pane grid: column count follows the pane's real width so a card never
+  // drops below GROUP_CARD_MIN_W (otherwise the article name collapses to
+  // nothing in the header). Before onLayout lands, estimate the left pane
+  // (products flex 3, cart flex 2 with a 300pt floor).
+  const [measuredListW, setMeasuredListW] = useState(0);
+  const paneAvail = width - padH * 2 - 12;
+  const listW = measuredListW || paneAvail - Math.max(300, paneAvail * (2 / 5));
+  const cardCols = groupCardColumns(listW);
+  const cardMinW = showTablet && listW >= GROUP_CARD_MIN_W ? GROUP_CARD_MIN_W : undefined;
+
+  const renderRow = ({ item }: { item: ReturnType<typeof groupSaleRows>[number] }) => (
+    <VariantGroupCard
+      group={item}
+      inCartQtyFor={inCartQtyFor}
+      pendingActiveFor={pendingActiveFor}
+      flex={showTablet || isTablet ? 1 : undefined}
+      minWidth={cardMinW}
+      onRowPress={handleProductPress}
+      onDecQty={decQty}
     />
   );
 
   const listHeader = (marginBottom: number) => (
     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom, marginTop: 4 }}>
-      <Text style={{ color: "#fff", fontSize: 15, fontWeight: "800" }}>Varyant disponib</Text>
-      <Text style={{ color: "#8e8e93", fontSize: 12, fontWeight: "600" }}>{visibleRows.length} rezilta</Text>
+      <Text style={{ color: "#71717a", fontSize: 11, fontWeight: "700", letterSpacing: 1.2 }}>PWODWI DISPONIB</Text>
+      <Text style={{ color: "#8e8e93", fontSize: 11.5, fontWeight: "700", letterSpacing: 0.4 }}>{groups.length} PWODWI</Text>
     </View>
   );
 
@@ -297,22 +308,28 @@ export default function AddItemsModal({
                 onBarcodeSubmit={onBarcodeSubmit}
                 onOpenScanner={() => setShowScan(true)}
                 onCatChange={setCat}
-                visibleCount={visibleRows.length}
-                totalCount={rows.length}
+                visibleCount={groups.length}
+                totalCount={visibleRows.length}
               />
               {pendingHero}
-              <FlatList
-                style={{ flex: 1 }}
-                data={visibleRows}
-                keyExtractor={i => i.key}
-                numColumns={isLargeTablet ? 3 : 2}
-                columnWrapperStyle={{ gap: 10 }}
-                contentContainerStyle={{ gap: 10, paddingTop: 2, paddingBottom: 12 }}
-                keyboardShouldPersistTaps="handled"
+              <View style={{ flex: 1 }} onLayout={e => setMeasuredListW(e.nativeEvent.layout.width)}>
+                <FlatList
+                  style={{ flex: 1 }}
+                  data={groups}
+                  keyExtractor={g => g.product.id}
+                  key={`group-grid-${cardCols}`}
+                  numColumns={cardCols}
+                  // RN throws on a wrapper style with numColumns 1 — keep the
+                  // gap wrapper only when the pane is wide enough for a row.
+                  columnWrapperStyle={cardCols > 1 ? { gap: GROUP_CARD_GAP } : undefined}
+                  contentContainerStyle={{ gap: GROUP_CARD_GAP, paddingTop: 2, paddingBottom: 12 }}
+                  keyboardShouldPersistTaps="handled"
                 ListHeaderComponent={listHeader(2)}
                 renderItem={renderRow}
-                ListEmptyComponent={<ProductsEmpty />}
-              />
+                ListEmptyComponent={catalogLoaded ? <ProductsEmpty /> : <SkeletonGroupStack gap={10} />}
+                />
+                {pending ? <PendingVeil /> : null}
+              </View>
             </View>
 
             {/* Right sticky cart card — checkout tablet parity */}
@@ -361,18 +378,21 @@ export default function AddItemsModal({
               onOpenScanner={() => setShowScan(true)}
             />
             {pendingHero}
-            <FlatList
-              style={{ flex: 1 }}
-              data={visibleRows}
-              keyExtractor={i => i.key}
-              numColumns={isTablet ? 2 : 1}
-              columnWrapperStyle={isTablet ? { gap: 8 } : undefined}
-              contentContainerStyle={{ padding: isTablet ? 20 : 12, paddingBottom: 110, gap: 8 }}
-              keyboardShouldPersistTaps="handled"
-              ListHeaderComponent={listHeader(8)}
-              renderItem={renderRow}
-              ListEmptyComponent={<ProductsEmpty />}
-            />
+            <View style={{ flex: 1 }}>
+              <FlatList
+                style={{ flex: 1 }}
+                data={groups}
+                keyExtractor={g => g.product.id}
+                numColumns={isTablet ? 2 : 1}
+                columnWrapperStyle={isTablet ? { gap: 8 } : undefined}
+                contentContainerStyle={{ padding: isTablet ? 20 : 12, paddingBottom: 110, gap: 8 }}
+                keyboardShouldPersistTaps="handled"
+                ListHeaderComponent={listHeader(8)}
+                renderItem={renderRow}
+                ListEmptyComponent={catalogLoaded ? <ProductsEmpty /> : <SkeletonGroupStack />}
+              />
+              {pending ? <PendingVeil /> : null}
+            </View>
             {round.length > 0 ? (
               <View style={{ position: "absolute", bottom: 16, left: 16, right: 16, alignItems: "center", pointerEvents: "box-none" }}>
                 <CartPill qty={qtyTotal} subtotal={subtotal} onPress={() => setShowCart(true)} />

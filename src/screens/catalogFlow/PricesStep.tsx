@@ -12,6 +12,7 @@ import type { FlowCtx } from "./types";
 import { canManageCatalog, uniqueId } from "./types";
 import { uploadError } from "../../components/UploadTransition";
 import { MoneyInput } from "../../components/maskedInput";
+import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
 
 function todayStr(): string {
   const d = new Date();
@@ -212,7 +213,7 @@ export default function PricesStep({
   const itemName = (id: string) => items.find(i => i.id === id)?.name ?? "?";
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+    <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {productName ? <Text style={{ fontWeight: "800", fontSize: 17, color: "#fff" }} numberOfLines={1}>{productName}</Text> : null}
       {registerNext && (
         <View style={{ borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 6 }}>
@@ -260,6 +261,6 @@ export default function PricesStep({
         </Pressable>
       ) : null}
 
-    </ScrollView>
+    </KeyboardSafeScrollView>
   );
 }

@@ -1,10 +1,15 @@
-import React from "react";
-import { View, Text, Pressable, TextInput, Animated } from "react-native";
-import { palette, radius, shadow } from "../theme";
+import React, { useMemo, useState } from "react";
+import { View, Text, Pressable, TextInput, Animated, FlatList } from "react-native";
+import { blackPalette as palette, radius, shadow } from "../theme";
 import { ht } from "../i18n";
 import { fmtG, fmt, monoStyle } from "../format";
 import { formatCheckoutRow } from "../catalogModel";
-import { PROD_DARK, type Product, type SaleRow, type PendingState, type PriceLine, type SearchMode } from "../screens/POSShared";
+import { PROD_DARK, ProductsEmpty, type Product, type SaleRow, type PendingState, type PriceLine, type SearchMode } from "../screens/POSShared";
+import { useResponsive } from "../responsive";
+import { VariantGroupCard, groupCardColumns, GROUP_CARD_MIN_W, GROUP_CARD_GAP } from "./group";
+import { PendingVeil } from "./PendingVeil";
+import { groupSaleRows } from "./hooks";
+import { SkeletonGroupStack } from "../components/Skeleton";
 
 // ---- Tablet-set picker components: shared by checkout-tablet (POSTablet) and
 // the Orders in-screen item picker. One edit here updates both screens. ----
@@ -26,7 +31,7 @@ export function tabletCatFor(p: Product): string {
   return "food";
 }
 
-// ---- Tablet search card: white radius-20 card with field + mode pills + category chips ----
+// ---- Tablet search card: dark radius-20 card with field + mode pills + category chips ----
 export function TabletSearchCard(props: {
   entrance: Animated.Value;
   search: string;
@@ -75,7 +80,7 @@ export function TabletSearchCard(props: {
             </Pressable>
           )}
         </View>
-        <Pressable accessibilityLabel="Scan QR" accessibilityHint="Eskane yon pwodwi" onPress={onOpenScanner} style={{ width: 48, height: 48, borderRadius: 14, backgroundColor: palette.ink2, alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(255,255,255,0.08)", ...shadow.soft }}>
+        <Pressable accessibilityLabel="Scan QR" accessibilityHint="Eskane yon pwodwi" onPress={onOpenScanner} style={{ width: 48, height: 48, borderRadius: 14, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(255,255,255,0.08)", ...shadow.soft }}>
           <Text style={{ fontSize: 19, color: "white" }}>▣</Text>
         </Pressable>
       </View>
@@ -95,7 +100,7 @@ export function TabletSearchCard(props: {
                 borderRadius: radius.pill,
               }}
             >
-              <Text style={{ color: active ? "white" : palette.ink, fontWeight: "700", fontSize: 11.5 }}>{m === "name" ? "Nom" : m === "barcode" ? "Bakod" : "Kategori"}</Text>
+              <Text style={{ color: active ? "#000" : palette.ink, fontWeight: "700", fontSize: 11.5 }}>{m === "name" ? "Nom" : m === "barcode" ? "Bakod" : "Kategori"}</Text>
             </Pressable>
           );
         })}
@@ -117,11 +122,11 @@ export function TabletSearchCard(props: {
                 borderRadius: radius.pill,
               }}
             >
-              <Text style={{ color: active ? "white" : palette.ink, fontSize: 12.5, fontWeight: active ? "700" : "500" }}>{c.label}</Text>
+              <Text style={{ color: active ? "#000" : palette.ink, fontSize: 12.5, fontWeight: active ? "700" : "500" }}>{c.label}</Text>
             </Pressable>
           );
         })}
-        <Text style={{ marginLeft: "auto", fontSize: 11, color: palette.muted2 }}>{visibleCount} varyant • {totalCount} total</Text>
+        <Text style={{ marginLeft: "auto", fontSize: 11, color: palette.muted2 }}>{visibleCount} pwodwi • {totalCount} varyant</Text>
       </View>
     </Animated.View>
   );
@@ -184,9 +189,9 @@ export function TabletPendingHero(props: {
             <Text style={{ color: "#16130c", fontWeight: "700", fontSize: 16 }}>+</Text>
           </Pressable>
         </View>
-        <Pressable onPress={onCommit} style={{ flex: 1, backgroundColor: PROD_DARK.green, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 14, alignItems: "center", justifyContent: "center" }}>
-          <Text style={{ color: "#052e16", fontWeight: "800", fontSize: 13 }}>Ajoute • {pending.qty} {pending.unitName} • {pending.remaining}s</Text>
-          <Text style={{ color: "rgba(5,46,22,0.7)", fontWeight: "600", fontSize: 11, marginTop: 1 }}>Tape pou konfime</Text>
+        <Pressable onPress={onCommit} style={{ flex: 1, backgroundColor: "rgba(251,191,36,0.07)", borderWidth: 1, borderColor: "rgba(251,191,36,0.55)", borderRadius: 999, paddingVertical: 11, paddingHorizontal: 14, alignItems: "center", justifyContent: "center" }}>
+          <Text style={{ color: "#FBBF24", fontWeight: "800", fontSize: 13 }}>Ajoute • {pending.qty} {pending.unitName} • {pending.remaining}s</Text>
+          <Text style={{ color: "rgba(251,191,36,0.65)", fontWeight: "600", fontSize: 11, marginTop: 1 }}>Tape pou konfime</Text>
         </Pressable>
         <Pressable onPress={onCancel} hitSlop={10} style={{ paddingVertical: 6, paddingHorizontal: 4 }}>
           <Text style={{ color: PROD_DARK.muted, fontWeight: "600", fontSize: 13 }}>Anile</Text>
@@ -204,58 +209,122 @@ export function TabletPendingHero(props: {
   );
 }
 
-// ---- Tablet variant grid card (one sellable variant per tile: status pill
-// row, sale line, sku • cost, right mono price) ----
-export function TabletProductCard(props: {
-  row: SaleRow;
-  inCartQty: number;
-  pendingActive: boolean;
-  onPress: () => void;
-  getBaseCost?: (productId: string) => number;
+// ---- Shared two-pane LEFT column: search card + pending hero + group grid.
+// Extracted from POSTablet so checkout and the proforma builder render the
+// exact same browse pane — one edit here updates both screens, and neither
+// can drift. The caller owns the right pane (their flows differ). ----
+export function TabletProductPane(props: {
+  entrance: Animated.Value;
+  search: string;
+  searchMode: SearchMode;
+  rows: SaleRow[];
+  catNames: Record<string, string>;
+  catalogLoaded: boolean;
+  pending: PendingState | null;
+  pendingInput: string;
+  pendingLine: PriceLine | null;
+  pendingMaxQ: number;
+  onSearchChange: (v: string) => void;
+  onSearchModeChange: (m: SearchMode) => void;
+  onBarcodeSubmit: () => void;
+  onOpenScanner: () => void;
+  onAdjustPending: (delta: number) => void;
+  onPendingCustom: (val: string) => void;
+  onPendingBlurClear: () => void;
+  onCommitPending: () => void;
+  onCancelPending: () => void;
+  onProductPress: (row: SaleRow) => void;
+  onDecQty: (key: string) => void;
+  inCartQtyFor: (row: SaleRow) => number;
 }) {
-  const { row, inCartQty, pendingActive, onPress, getBaseCost } = props;
-  const item = row.product;
-  const baseCost = getBaseCost ? getBaseCost(item.id) : Number((item as any).cost_price ?? 0);
-  const isSvc = item.item_type === "service";
-  const svcAvail = !isSvc || (item.is_available !== 0 && (item.is_available as any) !== false);
-  const isOut = !isSvc && row.maxQ <= 0;
-  const isLow = !isSvc && !isOut && row.maxQ <= 5;
-  const status = isSvc
-    ? (svcAvail ? { label: "Dispo", text: "#4ade80" } : { label: "Koupe", text: "#FBBF24" })
-    : isOut
-    ? { label: "Epuize", text: "#F87171" }
-    : isLow
-    ? { label: "Fèb", text: "#FBBF24" }
-    : { label: "Dispo", text: "#4ade80" };
-  const title = formatCheckoutRow(row.unitName, item.name, row.variant);
+  const { width, padH } = useResponsive();
+  const {
+    entrance, search, searchMode, rows, catNames, catalogLoaded, pending, pendingInput, pendingLine, pendingMaxQ,
+    onSearchChange, onSearchModeChange, onBarcodeSubmit, onOpenScanner,
+    onAdjustPending, onPendingCustom, onPendingBlurClear, onCommitPending, onCancelPending,
+    onProductPress, onDecQty, inCartQtyFor,
+  } = props;
+  const [cat, setCat] = useState("all");
+  const visibleRows = useMemo(() => (cat === "all" ? rows : rows.filter(r => tabletCatFor(r.product) === cat)), [rows, cat]);
+  const groups = useMemo(() => groupSaleRows(visibleRows, catNames), [visibleRows, catNames]);
+  const pendingActiveFor = (row: SaleRow) => !!pending && pending.product.id === row.product.id && pending.unitId === row.unitId && pending.variant === row.variant;
+
+  // Product-grid column count follows the pane's real width, not the device
+  // class: cards never drop below GROUP_CARD_MIN_W, so the article name in the
+  // header always has room. onLayout is the source of truth; until it lands we
+  // estimate the left pane (products flex 3, cart flex 2 with a 300pt floor).
+  const [measuredListW, setMeasuredListW] = useState(0);
+  const paneAvail = width - padH * 2 - 12;
+  const listW = measuredListW || paneAvail - Math.max(300, paneAvail * (2 / 5));
+  const cardCols = groupCardColumns(listW);
+  const cardMinW = listW >= GROUP_CARD_MIN_W ? GROUP_CARD_MIN_W : undefined;
+
   return (
-    <Pressable
-      onPress={onPress}
-      style={{
-        flex: 1,
-        backgroundColor: PROD_DARK.card,
-        borderWidth: pendingActive ? 2 : 1,
-        borderColor: pendingActive ? PROD_DARK.select : PROD_DARK.hair,
-        borderRadius: 18,
-        padding: 12,
-        opacity: isOut || (isSvc && !svcAvail) ? 0.62 : 1,
-      }}
-    >
-      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <View style={{ backgroundColor: "rgba(74,222,128,0.12)", borderWidth: 0.5, borderColor: "rgba(74,222,128,0.4)", paddingHorizontal: 7, paddingVertical: 3, borderRadius: radius.pill }}>
-          <Text style={{ fontSize: 11, fontWeight: "700", letterSpacing: 0.4, color: status.text }}>{status.label} • {isSvc ? row.unitName : `${row.maxQ} ${row.unitName}`}</Text>
-        </View>
-        {inCartQty > 0 && (
-          <View style={{ backgroundColor: "#fff", paddingHorizontal: 7, paddingVertical: 3, borderRadius: radius.pill }}>
-            <Text style={{ fontSize: 11, fontWeight: "800", color: "#16130c" }}>×{inCartQty}</Text>
-          </View>
-        )}
+    <View style={{ flex: 3, minWidth: 0, gap: 12 }}>
+      {/* Search card — mirrors web search card: dark radius-20 card, field + mode + category tinted rows */}
+      <TabletSearchCard
+        entrance={entrance}
+        search={search}
+        searchMode={searchMode}
+        cat={cat}
+        onSearchChange={onSearchChange}
+        onSearchModeChange={onSearchModeChange}
+        onBarcodeSubmit={onBarcodeSubmit}
+        onOpenScanner={onOpenScanner}
+        onCatChange={setCat}
+        visibleCount={groups.length}
+        totalCount={visibleRows.length}
+      />
+
+      {pending && (
+        <TabletPendingHero
+          pending={pending}
+          pendingInput={pendingInput}
+          pendingLine={pendingLine}
+          pendingMaxQ={pendingMaxQ}
+          onAdjust={onAdjustPending}
+          onCustom={onPendingCustom}
+          onBlurClear={onPendingBlurClear}
+          onCommit={onCommitPending}
+          onCancel={onCancelPending}
+        />
+      )}
+      {/* List + focus veil: pending item blurs/dims the list (WhatsApp
+          long-press style) and blocks other selections. */}
+      <View style={{ flex: 1 }} onLayout={e => setMeasuredListW(e.nativeEvent.layout.width)}>
+        <FlatList
+          style={{ flex: 1 }}
+          data={groups}
+          keyExtractor={g => g.product.id}
+          key={`group-grid-${cardCols}`}
+          numColumns={cardCols}
+          // RN hard-throws when a single-column list gets a wrapper
+          // style — a pane below GROUP_CARD_MIN_W legitimately renders
+          // one column (portrait / split-view), so the gap wrapper only
+          // exists when there's actually a row to space.
+          columnWrapperStyle={cardCols > 1 ? { gap: GROUP_CARD_GAP } : undefined}
+          contentContainerStyle={{ gap: GROUP_CARD_GAP, paddingTop: 2, paddingBottom: 12 }}
+          ListHeaderComponent={
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 2 }}>
+              <Text style={{ color: "#71717a", fontSize: 11, fontWeight: "700", letterSpacing: 1.2 }}>PWODWI DISPONIB</Text>
+              <Text style={{ color: "#8e8e93", fontSize: 11.5, fontWeight: "700", letterSpacing: 0.4 }}>{groups.length} PWODWI</Text>
+            </View>
+          }
+          renderItem={({ item }) => (
+            <VariantGroupCard
+              group={item}
+              inCartQtyFor={inCartQtyFor}
+              pendingActiveFor={pendingActiveFor}
+              flex={1}
+              minWidth={cardMinW}
+              onRowPress={onProductPress}
+              onDecQty={onDecQty}
+            />
+          )}
+          ListEmptyComponent={catalogLoaded ? <ProductsEmpty /> : <SkeletonGroupStack gap={10} />}
+        />
+        {pending ? <PendingVeil /> : null}
       </View>
-      <Text style={{ fontWeight: "700", fontSize: 13.5, color: PROD_DARK.ink, marginTop: 8, letterSpacing: -0.1 }} numberOfLines={2}>{title}</Text>
-      <Text style={{ fontSize: 11, color: PROD_DARK.muted, marginTop: 2 }} numberOfLines={1}>
-        {item.sku ? `${item.sku} • ` : ""}Kout {baseCost > 0 ? fmtG(baseCost) : "—"}
-      </Text>
-      <Text style={{ fontWeight: "800", fontSize: 14, color: PROD_DARK.ink, marginTop: 8, textAlign: "right", ...monoStyle }}>{fmtG(row.price)}</Text>
-    </Pressable>
+    </View>
   );
 }

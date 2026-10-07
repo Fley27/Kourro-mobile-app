@@ -1,3 +1,6 @@
+import { FALLBACK_STORE_ID } from "./ids";
+import { mintId } from "./ids";
+
 // Catalog v2 full cutover — option (a): migrate old rows, repoint readers,
 // no parallel system. One transaction, guarded by _meta flag
 // `cutover_catalog_v2` (idempotent: deterministic ids + OR REPLACE).
@@ -18,7 +21,7 @@ async function putOutbox(db: any, table: string, operation: string, rec: any) {
   try {
     await db.runAsync(
       "INSERT INTO outbox (id, table_name, operation, payload, created_at) VALUES (?,?,?,?,?)",
-      [`${table}-${rec.id ?? Date.now()}-${Date.now()}`, table, operation, JSON.stringify(rec), new Date().toISOString()]
+      [mintId(), table, operation, JSON.stringify(rec), new Date().toISOString()]
     );
   } catch {}
 }
@@ -27,10 +30,9 @@ function slug(s: string): string {
   return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-function uniq(base: string, taken: Set<string>): string {
-  let id = base;
-  let n = 2;
-  while (!id || taken.has(id)) id = `${base}-${n++}`;
+function uniq(_base: string, taken: Set<string>): string {
+  let id = mintId();
+  while (taken.has(id)) id = mintId();
   taken.add(id);
   return id;
 }
@@ -107,9 +109,9 @@ export async function migrateInventoryBatches(db: any): Promise<void> {
           try {
             await db.runAsync(
               "INSERT OR REPLACE INTO suppliers (id, store_id, name, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?)",
-              [id, "demo-store-id", nm, now, now, 0, 1]
+              [id, FALLBACK_STORE_ID, nm, now, now, 0, 1]
             );
-            await putOutbox(db, "suppliers", "create", { id, store_id: "demo-store-id", name: nm, created_at: now, updated_at: now, is_deleted: false });
+            await putOutbox(db, "suppliers", "create", { id, store_id: FALLBACK_STORE_ID, name: nm, created_at: now, updated_at: now, is_deleted: false });
           } catch {}
           supByName.set(norm(nm), id);
           return id;
@@ -118,9 +120,9 @@ export async function migrateInventoryBatches(db: any): Promise<void> {
           try {
             await db.runAsync(
               "INSERT OR REPLACE INTO suppliers (id, store_id, name, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?)",
-              ["sup-legacy-import", "demo-store-id", "Enpòte", now, now, 0, 1]
+              ["sup-legacy-import", FALLBACK_STORE_ID, "Enpòte", now, now, 0, 1]
             );
-            await putOutbox(db, "suppliers", "create", { id: "sup-legacy-import", store_id: "demo-store-id", name: "Enpòte", created_at: now, updated_at: now, is_deleted: false });
+            await putOutbox(db, "suppliers", "create", { id: "sup-legacy-import", store_id: FALLBACK_STORE_ID, name: "Enpòte", created_at: now, updated_at: now, is_deleted: false });
           } catch {}
           supByName.set("", "sup-legacy-import");
         }

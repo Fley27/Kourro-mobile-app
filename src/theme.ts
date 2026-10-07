@@ -209,6 +209,26 @@ export const darkPalette = {
   emeraldSoft: "rgba(76,174,127,0.2)",
 } as const;
 
+// ── Pure black (phone CustomersPhone/SuppliersPhone language) ──────────
+// Same key shape as `palette`. Flat #000 canvas + iOS grays — for tablet
+// list screens that must match their phone originals exactly.
+export const blackPalette = {
+  ...darkPalette,
+  bg: "#000",
+  bgWarm: "#000",
+  surface: "#000",
+  surface2: "#000",
+  surfaceGrouped: "#1c1c1e",
+  ink: "#fff",
+  ink2: "#fff",
+  inkSoft: "#c7c7cc",
+  muted: "#8e8e93",
+  muted2: "#8e8e93",
+  muted3: "#8e8e93",
+  separator: "#262626",
+  separatorSoft: "#1c1c1e",
+} as const;
+
 // Text scale applied to navbar + menu labels (+15% readability bump).
 export const NAV_MENU_TEXT_SCALE = 1.15;
 
