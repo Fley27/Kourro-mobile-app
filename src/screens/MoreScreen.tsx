@@ -260,6 +260,7 @@ export default function MoreScreen({
             role={role}
             currentUser={currentUser}
             storeId={storeId}
+            storeName={storeName}
             onBack={back}
             showBack={!isTablet}
           />

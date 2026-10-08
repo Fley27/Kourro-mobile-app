@@ -45,7 +45,7 @@ export function TabletSearchCard(props: {
   visibleCount: number;
   totalCount: number;
 }) {
-  const { entrance, search, searchMode, cat, onSearchChange, onSearchModeChange, onBarcodeSubmit, onOpenScanner, onCatChange, visibleCount, totalCount } = props;
+  const { entrance, search, cat, onSearchChange, onBarcodeSubmit, onOpenScanner, onCatChange, visibleCount, totalCount } = props;
   return (
     <Animated.View
       style={
@@ -83,28 +83,6 @@ export function TabletSearchCard(props: {
         <Pressable accessibilityLabel="Scan QR" accessibilityHint="Eskane yon pwodwi" onPress={onOpenScanner} style={{ width: 48, height: 48, borderRadius: 14, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(255,255,255,0.08)", ...shadow.soft }}>
           <Text style={{ fontSize: 19, color: "white" }}>▣</Text>
         </Pressable>
-      </View>
-      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        {(["name", "barcode", "category"] as SearchMode[]).map(m => {
-          const active = searchMode === m;
-          return (
-            <Pressable
-              key={m}
-              onPress={() => { onSearchModeChange(m); onSearchChange(""); }}
-              style={{
-                backgroundColor: active ? palette.ink : palette.surfaceGrouped,
-                borderWidth: 0.5,
-                borderColor: active ? palette.ink : palette.hairline,
-                paddingHorizontal: 12,
-                paddingVertical: 6,
-                borderRadius: radius.pill,
-              }}
-            >
-              <Text style={{ color: active ? "#000" : palette.ink, fontWeight: "700", fontSize: 11.5 }}>{m === "name" ? "Nom" : m === "barcode" ? "Bakod" : "Kategori"}</Text>
-            </Pressable>
-          );
-        })}
-        <Text style={{ marginLeft: "auto", fontSize: 11, color: palette.muted2 }}>Mòd: {searchMode}</Text>
       </View>
       <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {TABLET_CATS.map(c => {

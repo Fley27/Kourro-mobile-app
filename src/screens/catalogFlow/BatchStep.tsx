@@ -8,8 +8,8 @@
 import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { getDb, insertOutbox } from "../../db";
-import { fmtG } from "../../format";
+import { getDb, insertOutbox, recomputeItemCosts } from "../../db";
+import { fmt, fmtG } from "../../format";
 import type { Batch, Item } from "../../catalogModel";
 import { itemFactor, previewBatchUnitCost, mergeV2Batch, receiveV2Batch } from "../../catalogModel";
 import type { FlowCtx } from "./types";
@@ -55,6 +55,9 @@ export default function BatchStep({
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [linkedSupplierIds, setLinkedSupplierIds] = useState<string[] | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
+  // Product status gates receive/deny: a draft (flow not finished) can never
+  // receive — receiveV2Batch throws — so the buttons must not even show.
+  const [pStatus, setPStatus] = useState("");
   const [itemId, setItemId] = useState("");
   const [supplierId, setSupplierId] = useState("");
   const [qty, setQty] = useState("");
@@ -80,11 +83,13 @@ export default function BatchStep({
     try {
       if (!productId) return;
       const db = await getDb();
-      const [its, ss, bs] = await Promise.all([
+      const [its, ss, bs, prs] = await Promise.all([
         db.getAllAsync("SELECT * FROM items WHERE product_id = ?", [productId]).catch(() => []),
         db.getAllAsync("SELECT id, name FROM suppliers WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY name COLLATE NOCASE").catch(() => []),
         db.getAllAsync("SELECT * FROM batches").catch(() => []),
+        db.getAllAsync("SELECT status FROM products WHERE id = ?", [productId]).catch(() => []),
       ]);
+      setPStatus(String((((prs ?? []) as any[])[0]?.status) ?? ""));
       const list = (((its ?? []) as any[]).filter((i: any) => !i.is_deleted) as Item[])
         .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
       setItems(list);
@@ -248,6 +253,9 @@ export default function BatchStep({
       const now = new Date().toISOString();
       const taken = new Set(batches.map(b => b.id));
       taken.add(await mergeV2Batch(db, now, taken, { itemId, supplierId, qty: qty.trim(), total: total.trim(), date }));
+      // A batch was just saved — republish this product's unit costs so every
+      // other container prices off it immediately (pending included).
+      try { await recomputeItemCosts(db, productId); } catch {}
       setQty(""); setTotal(""); setDate(todayStr()); setTouched(false);
       await load();
       ctx.reload();
@@ -286,6 +294,9 @@ export default function BatchStep({
       await db.runAsync("UPDATE batches SET status = ?, denied_by = ?, denied_at = ?, reason = ?, updated_at = ?, dirty = 1 WHERE id = ?",
         ["denied", ctx.currentUser?.id ?? "system", now, denyReason.trim(), now, b.id]);
       try { await insertOutbox("batches", "update", { id: b.id, status: "denied", denied_by: ctx.currentUser?.id ?? "system", denied_at: now, reason: denyReason.trim(), updated_at: now, is_deleted: 0 }); } catch {}
+      // The denied pending row no longer prices anything — republish so the
+      // other units fall back to received history / stored cost.
+      try { await recomputeItemCosts(db, productId); } catch {}
       setDenyId(null);
       setDenyReason("");
       await load();
@@ -374,7 +385,7 @@ export default function BatchStep({
           <View key={b.id} style={{ backgroundColor: "transparent", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 14, gap: 8 }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <View style={{ flex: 1 }}>
-                <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }} numberOfLines={1}>{it?.name ?? "?"} · {fmtG(Number(b.quantity))}</Text>
+                <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }} numberOfLines={1}>{it?.name ?? "?"} · {fmt(Number(b.quantity))}</Text>
                 <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{sup?.name ?? "?"} · {b.date} · {fmtG(Number(b.total_paid))}</Text>
               </View>
               <View style={{ backgroundColor: st.bg, borderWidth: 0.5, borderColor: st.bd, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4 }}>
@@ -384,7 +395,7 @@ export default function BatchStep({
             {f > 0 && Number(b.quantity) > 0 ? (
               <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "600" }}>≈ {fmtG(Math.round((Number(b.total_paid) / Number(b.quantity)) * 100) / 100)} / {it?.name} · {fmtG(Math.round((Number(b.total_paid) / Number(b.quantity) / f) * 100) / 100)} / baz</Text>
             ) : null}
-            {b.status === "pending" && canHandleBatches(ctx.role) ? (
+            {!stageMode && pStatus !== "draft" && b.status === "pending" && canHandleBatches(ctx.role) ? (
               denyId === b.id ? (
                 <View style={{ gap: 8 }}>
                   <TextInput value={denyReason} onChangeText={setDenyReason} placeholder="Rezon refi a (obligatwa)" placeholderTextColor="#636366"
@@ -423,8 +434,8 @@ export default function BatchStep({
             {!isEditing ? (
               <Pressable onPress={() => openStagedEdit(s)} style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
                 <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }} numberOfLines={1}>{itemName(s.itemId)} · {fmtG(Number(s.qty) || 0)}</Text>
-                  <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{supName(s.supplierId)} · {s.date} · poko sove</Text>
+                  <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }} numberOfLines={1}>{itemName(s.itemId)} · {fmt(Number(s.qty) || 0)}</Text>
+                  <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{supName(s.supplierId)} · {s.date} · {fmtG(Number(s.total) || 0)} · poko sove</Text>
                 </View>
                 <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
                   <Ionicons name="pencil" size={17} color="#fff" />

@@ -411,6 +411,11 @@ export function OrderBoard({
             <View style={{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.07)", borderWidth: 1, borderColor: PROD_DARK.hair }}>
               <Text style={{ color: "#fff", fontFamily: "Inter_700Bold", fontSize: 11 }}>{ORDER_STATUS_LABELS[order.status]}</Text>
             </View>
+            {/* Ready / waiting-for-payment: the amount due rides with the
+                status so it stays visible without scrolling to the stats card. */}
+            {order.status === "ready" || order.status === "settling" ? (
+              <Text style={{ color: "#4ade80", fontFamily: "Inter_700Bold", fontSize: 15, ...monoStyle }}>{fmtG(deliveredSubtotal(lines))}</Text>
+            ) : null}
             {headerRight}
           </View>
         </View>

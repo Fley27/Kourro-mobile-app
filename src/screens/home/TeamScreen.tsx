@@ -2,7 +2,7 @@ import React, { useMemo, useState, useRef, useEffect } from "react";
 import { View, Text, Pressable, TextInput, Alert, Modal, ScrollView, StyleSheet, Animated, Easing, KeyboardAvoidingView, Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { palette, shadow } from "../../theme";
+import { palette, radius, shadow } from "../../theme";
 import { useResponsive, centerBox, sheetBox } from "../../responsive";
 import { storeIdForLocation } from "../../org";
 import { getDb } from "../../db";
@@ -248,247 +248,11 @@ export default function TeamScreen({
     </Pressable>
   );
 
-  return (
-    <View style={{ flex: 1, backgroundColor: "#000" }}>
-      {/* Title + add */}
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: padH, paddingTop: 18, paddingBottom: 14 }}>
-        <Text style={{ color: "#fff", fontSize: 28, fontWeight: "800", letterSpacing: -0.5 }}>Ekip</Text>
-        {canManageEmployees ? (
-          <Pressable
-            onPress={() => setShowAdd(true)}
-            style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}
-          >
-            <Ionicons name="add" size={26} color="#fff" />
-          </Pressable>
-        ) : null}
-      </View>
-      {/* Search + filter */}
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: padH, marginBottom: 8 }}>
-        <View style={{ flex: 1, height: 56, flexDirection: "row", alignItems: "center", backgroundColor: "transparent", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 28, paddingHorizontal: 16 }}>
-          <Ionicons name="search" size={20} color="#fff" style={{ marginRight: 10 }} />
-          <TextInput
-            value={search}
-            onChangeText={setSearch}
-            placeholder="Chèche non, wòl, telefon…"
-            placeholderTextColor="#8e8e93"
-            returnKeyType="search"
-            style={{ flex: 1, paddingVertical: 10, fontSize: 16, color: "#fff" }}
-          />
-          {search ? (
-            <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ padding: 4 }}>
-              <Ionicons name="close-circle" size={18} color="#8e8e93" />
-            </Pressable>
-          ) : null}
-        </View>
-        <Pressable
-          onPress={() => { setDraftFilter(filter); setShowFilters(true); }}
-          style={{
-            width: 52, height: 52, borderRadius: 14, alignItems: "center", justifyContent: "center",
-            backgroundColor: filter !== "all" ? "#fff" : "#000",
-            borderWidth: 1, borderColor: filter !== "all" ? "#fff" : "#3a3a3c",
-          }}
-        >
-          <Ionicons name="filter" size={20} color={filter !== "all" ? "#000" : "#fff"} />
-        </Pressable>
-      </View>
-      <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
-      {/* Employee rows — customers-list style */}
-      {list.length === 0 ? (
-        <View style={{ padding: 32, alignItems: "center" }}>
-          <Text style={{ fontSize: 15, fontWeight: "600", color: "#fff" }}>{search || filter !== "all" ? "Pa gen rezilta" : "Pa gen anplwaye"}</Text>
-          <Text style={{ fontSize: 13, color: "#8e8e93", marginTop: 4 }}>Eseye chanje rechèch oswa filtè.</Text>
-        </View>
-      ) : (
-        [...list].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))).map((e) => {
-          const meta = ROLE_META[e.role] ?? ROLE_META.cashier;
-          const isSelf = e.id === currentUser?.id;
-          return (
-            <Pressable
-              key={e.id}
-              onPress={() => { setSelectedEmp(e); setModalView("detail"); }}
-              style={{ opacity: e.active ? 1 : 0.55 }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: padH, paddingVertical: 14 }}>
-                <View>
-                  <View style={{ width: 52, height: 52, borderRadius: 12, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
-                    <Text style={{ color: "#8e8e93", fontSize: 17, fontWeight: "700" }}>{e.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
-                  </View>
-                  <View style={{
-                    position: "absolute", right: -2, bottom: -2,
-                    width: 14, height: 14, borderRadius: 7,
-                    backgroundColor: e.isOnline ? "#34C759" : "#3a3a3c",
-                    borderWidth: 2, borderColor: "#000",
-                  }} />
-                </View>
-                <View style={{ flex: 1, marginLeft: 12 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                    <Text style={{ fontWeight: "600", fontSize: 17, color: "#fff", flexShrink: 1 }} numberOfLines={1}>{e.name}</Text>
-                    {isSelf ? <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", backgroundColor: "#2b2b2b", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>OU</Text> : null}
-                  </View>
-                  <Text style={{ fontSize: 14, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{meta.label} · {e.phone ?? "—"}</Text>
-                  <Text style={{ fontSize: 13, color: "#8e8e93", marginTop: 1 }} numberOfLines={1}>{canSeeSalary(e) ? `${e.salary} / mwa` : "Konfidansyèl"}</Text>
-                </View>
-                {canToggle(e) ? (
-                  <IOSToggle value={e.active} onToggle={() => toggleActive(e)} />
-                ) : null}
-              </View>
-              <View style={{ height: 1, backgroundColor: "#262626", marginLeft: padH + 64 }} />
-            </Pressable>
-          );
-        })
-      )}
-      </KeyboardSafeScrollView>
-
-      {/* Filters sheet — Transactions style */}
-      <Modal visible={showFilters} transparent animationType="slide" onRequestClose={() => setShowFilters(false)}>
-        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
-          <Pressable style={{ flex: 1 }} onPress={() => setShowFilters(false)} />
-          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 + insets.bottom, maxHeight: "85%" }}>
-            <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-              <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff" }}>Filters</Text>
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <Pressable
-                  onPress={() => setDraftFilter("all")}
-                  style={{ paddingHorizontal: 20, paddingVertical: 13, borderRadius: 26, backgroundColor: "#2b2b2b" }}
-                >
-                  <Text style={{ fontWeight: "700", fontSize: 14, color: draftFilter !== "all" ? "#fff" : "#6e6e73" }}>Clear All</Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => { setFilter(draftFilter); setShowFilters(false); }}
-                  style={{ paddingHorizontal: 26, paddingVertical: 13, borderRadius: 26, backgroundColor: "#fff" }}
-                >
-                  <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>Apply</Text>
-                </Pressable>
-              </View>
-            </View>
-            {(["all", "active", "inactive"] as const).map(key => {
-              const checked = draftFilter === key;
-              const label = key === "all" ? "Tout" : key === "active" ? "Aktif" : "Inaktif";
-              return (
-                <Pressable
-                  key={key}
-                  onPress={() => setDraftFilter(key)}
-                  style={{ flexDirection: "row", alignItems: "center", gap: 14, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, paddingVertical: 15, paddingHorizontal: 16, marginBottom: 10 }}
-                >
-                  <View style={{ width: 24, height: 24, borderRadius: 7, borderWidth: 1.5, borderColor: checked ? "#fff" : "#6e6e73", backgroundColor: checked ? "#fff" : "transparent", alignItems: "center", justifyContent: "center" }}>
-                    {checked ? <Ionicons name="checkmark" size={16} color="#000" /> : null}
-                  </View>
-                  <Text style={{ fontSize: 16, fontWeight: "600", color: "#fff" }}>{label}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        </View>
-      </Modal>
-
-      {/* Add member modal */}
-      <Modal visible={showAdd} transparent animationType="slide" onRequestClose={() => setShowAdd(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.32)", justifyContent: "flex-end", alignItems: isTablet ? "center" : undefined }}>
-            <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: "#efe7d2", borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: "94%", overflow: "hidden" }}>
-            <View style={{ backgroundColor: "white", paddingHorizontal: 16, paddingTop: 10, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#e5e5ea" }}>
-              <View style={{ width: 36, height: 4, backgroundColor: "#d1d1d6", borderRadius: 2, marginBottom: 12, alignSelf: "center" }} />
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
-                <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center", shadowColor: "#16130c", shadowOpacity: 0.25, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, borderWidth: 1.5, borderColor: GOLD }}>
-                  <Ionicons name="person-add" size={24} color="#fff" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "800", fontSize: 19, color: "#16130c", letterSpacing: -0.4 }}>Nouvo Manb</Text>
-                  <Text style={{ fontSize: 12, color: "#837b69", marginTop: 2 }}>{role === "owner" ? "Admin · Manager · Cashier" : "Manager · Cashier"}</Text>
-                </View>
-              </View>
-            </View>
-            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ padding: 16 }} contentContainerStyle={{ gap: 16, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
-              {/* Informasyon pèsonèl */}
-              <View style={{ gap: 6 }}>
-                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Enfòmasyon pèsonèl</Text>
-                <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="person-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Non konplè" placeholderTextColor="#a1967f" value={newEmpName} onChangeText={v => { setNewEmpName(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="call-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Telefon" placeholderTextColor="#a1967f" value={newEmpPhone} onChangeText={v => { setNewEmpPhone(v); if(newEmpError) setNewEmpError(""); }} keyboardType="phone-pad" style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="home-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Adrès" placeholderTextColor="#a1967f" value={newEmpAddress} onChangeText={v => { setNewEmpAddress(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                </View>
-              </View>
-
-              {/* Wòl */}
-              <View style={{ gap: 6 }}>
-                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Wòl</Text>
-                <View style={{ flexDirection: "row", backgroundColor: "#E9E9EB", borderRadius: 14, padding: 4, gap: 4 }}>
-                  {addRoleOptions.map(r => {
-                    const active = newEmpRole === r;
-                    return (
-                      <Pressable key={r} onPress={() => setNewEmpRole(r)} style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: active ? "white" : "transparent", alignItems: "center", shadowColor: active ? "#000" : "transparent", shadowOpacity: active ? 0.1 : 0, shadowRadius: 4, elevation: active ? 2 : 0 }}>
-                        <Text style={{ fontSize: 12, fontWeight: "700", color: active ? "#16130c" : "#837b69", letterSpacing: 0.3 }}>{r.toUpperCase()}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-
-              {/* Kontak ijans */}
-              <View style={{ gap: 6 }}>
-                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Kontak ijans</Text>
-                <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="person-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Non ijans" placeholderTextColor="#a1967f" value={newEmpEmergName} onChangeText={v => { setNewEmpEmergName(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="call-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Telefon ijans" placeholderTextColor="#a1967f" value={newEmpEmergPhone} onChangeText={v => { setNewEmpEmergPhone(v); if(newEmpError) setNewEmpError(""); }} keyboardType="phone-pad" style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="home-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Adrès ijans" placeholderTextColor="#a1967f" value={newEmpEmergAddress} onChangeText={v => { setNewEmpEmergAddress(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                </View>
-              </View>
-
-              {newEmpError ? <View style={{ backgroundColor: "#FFF1F2", borderWidth: 0.5, borderColor: "#FECDD3", borderRadius: 12, padding: 12 }}><Text style={{ fontSize: 13, fontWeight: "600", color: "#B00020", textAlign: "center" }}>{newEmpError}</Text></View> : null}
-            </KeyboardSafeScrollView>
-            <View style={{ padding: 16, paddingBottom: 16 + insets.bottom, backgroundColor: "white", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#e5e5ea", gap: 8 }}>
-              <Pressable
-                onPress={() => {
-                  setNewEmpError("");
-                  if (!newEmpName.trim()) { setNewEmpError("Non obligatwa."); return; }
-                  if (!newEmpPhone.trim()) { setNewEmpError("Telefon obligatwa."); return; }
-                  if (!newEmpAddress.trim()) { setNewEmpError("Adrès obligatwa."); return; }
-                  if (!newEmpEmergName.trim() || !newEmpEmergPhone.trim() || !newEmpEmergAddress.trim()) { setNewEmpError("Kontak ijans konplè obligatwa: non, telefon, adrès."); return; }
-                  if (!canAddRole(newEmpRole)) { setNewEmpError("Ou pa gen dwa kreye wòl sa a — se sèlman siperyè strik ka kreye (pa menm nivo, pa Owner)."); return; }
-                  const id = mintId();
-                  const secret = String(employees.length + 1);
-                  setEmployees(prev => [...prev, { id, name: newEmpName.trim(), role: newEmpRole as any, phone: newEmpPhone.trim(), address: newEmpAddress.trim(), store: currentStore, emergency: { name: newEmpEmergName.trim(), phone: newEmpEmergPhone.trim(), address: newEmpEmergAddress.trim() }, secret, password: `pass-${Math.random().toString(36).slice(2, 8)}`, lastAction: "Nouvo manm", kpi: "—", salary: newEmpRole === "admin" ? "G 32 000" : newEmpRole === "manager" ? "G 25 000" : "G 12 000", isOnline: false, active: true } as any]);
-                  setNewEmpName(""); setNewEmpPhone(""); setNewEmpAddress(""); setNewEmpEmergName(""); setNewEmpEmergPhone(""); setNewEmpEmergAddress(""); setNewEmpRole("cashier"); setNewEmpError("");
-                  setShowAdd(false);
-                }}
-                style={{ backgroundColor: "#16130c", borderRadius: 14, paddingVertical: 15, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, shadowColor: "#16130c", shadowOpacity: 0.15, shadowRadius: 14, shadowOffset: { width: 0, height: 8 }, borderWidth: 1, borderColor: "rgba(200,162,74,0.35)" }}>
-                <Ionicons name="add" size={20} color="#fff" />
-                <Text style={{ color: "white", fontWeight: "700", fontSize: 15 }}>Ajoute anplwaye</Text>
-              </Pressable>
-              <Pressable onPress={() => setShowAdd(false)} style={{ paddingVertical: 6, alignItems: "center" }}><Text style={{ fontSize: 13, color: "#837b69", fontWeight: "500" }}>Fèmen</Text></Pressable>
-            </View>
-          </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* Detail modal — full-screen dark profile */}
-      <Modal visible={!!selectedEmp} transparent={false} animationType="slide" onRequestClose={() => setSelectedEmp(null)}>
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 24 + insets.bottom }}>
+  // Shared employee-detail body (profile / edit-role / self-edit / reset).
+  // Phone shows it inside the full-screen detail Modal below; the tablet
+  // two-panel layout renders the same content in the right pane instead.
+  const detailContent = (
+    <>
             {modalView === "detail" ? (
               <>
                 <View style={{ flexDirection: "row", alignItems: "center" }}>
@@ -641,9 +405,278 @@ export default function TeamScreen({
                 </KeyboardSafeScrollView>
               </>
             )}
+    </>
+  );
+
+  return (
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
+      {/* Title + add */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: padH, paddingTop: 18, paddingBottom: 14 }}>
+        <Text style={{ color: "#fff", fontSize: 28, fontWeight: "800", letterSpacing: -0.5 }}>Ekip</Text>
+        {canManageEmployees ? (
+          <Pressable
+            onPress={() => setShowAdd(true)}
+            style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}
+          >
+            <Ionicons name="add" size={26} color="#fff" />
+          </Pressable>
+        ) : null}
+      </View>
+      {/* Tablet two panels: list left (flex 3), employee detail right (flex 2). */}
+      <View style={{ flexDirection: isTablet ? "row" : "column", flex: 1, gap: isTablet ? 12 : 0, paddingHorizontal: isTablet ? padH : 0, paddingBottom: isTablet ? 10 : 0 }}>
+        <View style={{ flex: isTablet ? 3 : 1, minWidth: 0 }}>
+      {/* Search + filter */}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: isTablet ? 0 : padH, marginBottom: 8 }}>
+        <View style={{ flex: 1, height: 56, flexDirection: "row", alignItems: "center", backgroundColor: "transparent", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 28, paddingHorizontal: 16 }}>
+          <Ionicons name="search" size={20} color="#fff" style={{ marginRight: 10 }} />
+          <TextInput
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Chèche non, wòl, telefon…"
+            placeholderTextColor="#8e8e93"
+            returnKeyType="search"
+            style={{ flex: 1, paddingVertical: 10, fontSize: 16, color: "#fff" }}
+          />
+          {search ? (
+            <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ padding: 4 }}>
+              <Ionicons name="close-circle" size={18} color="#8e8e93" />
+            </Pressable>
+          ) : null}
+        </View>
+        <Pressable
+          onPress={() => { setDraftFilter(filter); setShowFilters(true); }}
+          style={{
+            width: 52, height: 52, borderRadius: 14, alignItems: "center", justifyContent: "center",
+            backgroundColor: filter !== "all" ? "#fff" : "#000",
+            borderWidth: 1, borderColor: filter !== "all" ? "#fff" : "#3a3a3c",
+          }}
+        >
+          <Ionicons name="filter" size={20} color={filter !== "all" ? "#000" : "#fff"} />
+        </Pressable>
+      </View>
+      <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+      {/* Employee rows — customers-list style */}
+      {list.length === 0 ? (
+        <View style={{ padding: 32, alignItems: "center" }}>
+          <Text style={{ fontSize: 15, fontWeight: "600", color: "#fff" }}>{search || filter !== "all" ? "Pa gen rezilta" : "Pa gen anplwaye"}</Text>
+          <Text style={{ fontSize: 13, color: "#8e8e93", marginTop: 4 }}>Eseye chanje rechèch oswa filtè.</Text>
+        </View>
+      ) : (
+        [...list].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""))).map((e) => {
+          const meta = ROLE_META[e.role] ?? ROLE_META.cashier;
+          const isSelf = e.id === currentUser?.id;
+          return (
+            <Pressable
+              key={e.id}
+              onPress={() => { setSelectedEmp(e); setModalView("detail"); }}
+              style={{ opacity: e.active ? 1 : 0.55 }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: isTablet ? 0 : padH, paddingVertical: 14, backgroundColor: isTablet && selectedEmp?.id === e.id ? "#1c1c1e" : "transparent" }}>
+                <View>
+                  <View style={{ width: 52, height: 52, borderRadius: 12, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+                    <Text style={{ color: "#8e8e93", fontSize: 17, fontWeight: "700" }}>{e.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
+                  </View>
+                  <View style={{
+                    position: "absolute", right: -2, bottom: -2,
+                    width: 14, height: 14, borderRadius: 7,
+                    backgroundColor: e.isOnline ? "#34C759" : "#3a3a3c",
+                    borderWidth: 2, borderColor: "#000",
+                  }} />
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Text style={{ fontWeight: "600", fontSize: 17, color: "#fff", flexShrink: 1 }} numberOfLines={1}>{e.name}</Text>
+                    {isSelf ? <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "700", backgroundColor: "#2b2b2b", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>OU</Text> : null}
+                  </View>
+                  <Text style={{ fontSize: 14, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{meta.label} · {e.phone ?? "—"}</Text>
+                  <Text style={{ fontSize: 13, color: "#8e8e93", marginTop: 1 }} numberOfLines={1}>{canSeeSalary(e) ? `${e.salary} / mwa` : "Konfidansyèl"}</Text>
+                </View>
+                {canToggle(e) ? (
+                  <IOSToggle value={e.active} onToggle={() => toggleActive(e)} />
+                ) : null}
+              </View>
+              <View style={{ height: 1, backgroundColor: "#262626", marginLeft: isTablet ? 64 : padH + 64 }} />
+            </Pressable>
+          );
+        })
+      )}
+      </KeyboardSafeScrollView>
+        </View>
+        {isTablet && (
+          <View style={{ flex: 2, minWidth: 300, backgroundColor: "#000", borderRadius: radius.lg, borderWidth: 1, borderColor: "#262626", overflow: "hidden" }}>
+            {selectedEmp ? (
+              <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }}>
+                <View style={{ flex: 1, backgroundColor: "#000", padding: 18 }}>
+                  {detailContent}
+                </View>
+              </KeyboardAvoidingView>
+            ) : (
+              <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 8 }}>
+                <Ionicons name="people-outline" size={44} color="#3a3a3c" />
+                <Text style={{ color: "#8e8e93", fontSize: 15, fontWeight: "600" }}>Chwazi yon anplwaye</Text>
+                <Text style={{ color: "#6e6e73", fontSize: 13 }}>Tape sou yon non pou wè detay li</Text>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+
+      {/* Filters sheet — Transactions style */}
+      <Modal visible={showFilters} transparent animationType="slide" onRequestClose={() => setShowFilters(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <Pressable style={{ flex: 1 }} onPress={() => setShowFilters(false)} />
+          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 + insets.bottom, maxHeight: "85%" }}>
+            <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff" }}>Filters</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <Pressable
+                  onPress={() => setDraftFilter("all")}
+                  style={{ paddingHorizontal: 20, paddingVertical: 13, borderRadius: 26, backgroundColor: "#2b2b2b" }}
+                >
+                  <Text style={{ fontWeight: "700", fontSize: 14, color: draftFilter !== "all" ? "#fff" : "#6e6e73" }}>Clear All</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => { setFilter(draftFilter); setShowFilters(false); }}
+                  style={{ paddingHorizontal: 26, paddingVertical: 13, borderRadius: 26, backgroundColor: "#fff" }}
+                >
+                  <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>Apply</Text>
+                </Pressable>
+              </View>
+            </View>
+            {(["all", "active", "inactive"] as const).map(key => {
+              const checked = draftFilter === key;
+              const label = key === "all" ? "Tout" : key === "active" ? "Aktif" : "Inaktif";
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => setDraftFilter(key)}
+                  style={{ flexDirection: "row", alignItems: "center", gap: 14, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, paddingVertical: 15, paddingHorizontal: 16, marginBottom: 10 }}
+                >
+                  <View style={{ width: 24, height: 24, borderRadius: 7, borderWidth: 1.5, borderColor: checked ? "#fff" : "#6e6e73", backgroundColor: checked ? "#fff" : "transparent", alignItems: "center", justifyContent: "center" }}>
+                    {checked ? <Ionicons name="checkmark" size={16} color="#000" /> : null}
+                  </View>
+                  <Text style={{ fontSize: 16, fontWeight: "600", color: "#fff" }}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add member modal */}
+      <Modal visible={showAdd} transparent animationType="slide" onRequestClose={() => setShowAdd(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.32)", justifyContent: "flex-end", alignItems: isTablet ? "center" : undefined }}>
+            <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: "#efe7d2", borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: "94%", overflow: "hidden" }}>
+            <View style={{ backgroundColor: "white", paddingHorizontal: 16, paddingTop: 10, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#e5e5ea" }}>
+              <View style={{ width: 36, height: 4, backgroundColor: "#d1d1d6", borderRadius: 2, marginBottom: 12, alignSelf: "center" }} />
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+                <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center", shadowColor: "#16130c", shadowOpacity: 0.25, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, borderWidth: 1.5, borderColor: GOLD }}>
+                  <Ionicons name="person-add" size={24} color="#fff" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontWeight: "800", fontSize: 19, color: "#16130c", letterSpacing: -0.4 }}>Nouvo Manb</Text>
+                  <Text style={{ fontSize: 12, color: "#837b69", marginTop: 2 }}>{role === "owner" ? "Admin · Manager · Cashier" : "Manager · Cashier"}</Text>
+                </View>
+              </View>
+            </View>
+            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ padding: 16 }} contentContainerStyle={{ gap: 16, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
+              {/* Informasyon pèsonèl */}
+              <View style={{ gap: 6 }}>
+                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Enfòmasyon pèsonèl</Text>
+                <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+                    <Ionicons name="person-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
+                    <TextInput placeholder="Non konplè" placeholderTextColor="#a1967f" value={newEmpName} onChangeText={v => { setNewEmpName(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                  </View>
+                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
+                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+                    <Ionicons name="call-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
+                    <TextInput placeholder="Telefon" placeholderTextColor="#a1967f" value={newEmpPhone} onChangeText={v => { setNewEmpPhone(v); if(newEmpError) setNewEmpError(""); }} keyboardType="phone-pad" style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                  </View>
+                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
+                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+                    <Ionicons name="home-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
+                    <TextInput placeholder="Adrès" placeholderTextColor="#a1967f" value={newEmpAddress} onChangeText={v => { setNewEmpAddress(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                  </View>
+                </View>
+              </View>
+
+              {/* Wòl */}
+              <View style={{ gap: 6 }}>
+                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Wòl</Text>
+                <View style={{ flexDirection: "row", backgroundColor: "#E9E9EB", borderRadius: 14, padding: 4, gap: 4 }}>
+                  {addRoleOptions.map(r => {
+                    const active = newEmpRole === r;
+                    return (
+                      <Pressable key={r} onPress={() => setNewEmpRole(r)} style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: active ? "white" : "transparent", alignItems: "center", shadowColor: active ? "#000" : "transparent", shadowOpacity: active ? 0.1 : 0, shadowRadius: 4, elevation: active ? 2 : 0 }}>
+                        <Text style={{ fontSize: 12, fontWeight: "700", color: active ? "#16130c" : "#837b69", letterSpacing: 0.3 }}>{r.toUpperCase()}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Kontak ijans */}
+              <View style={{ gap: 6 }}>
+                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Kontak ijans</Text>
+                <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+                    <Ionicons name="person-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
+                    <TextInput placeholder="Non ijans" placeholderTextColor="#a1967f" value={newEmpEmergName} onChangeText={v => { setNewEmpEmergName(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                  </View>
+                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
+                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+                    <Ionicons name="call-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
+                    <TextInput placeholder="Telefon ijans" placeholderTextColor="#a1967f" value={newEmpEmergPhone} onChangeText={v => { setNewEmpEmergPhone(v); if(newEmpError) setNewEmpError(""); }} keyboardType="phone-pad" style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                  </View>
+                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
+                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+                    <Ionicons name="home-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
+                    <TextInput placeholder="Adrès ijans" placeholderTextColor="#a1967f" value={newEmpEmergAddress} onChangeText={v => { setNewEmpEmergAddress(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                  </View>
+                </View>
+              </View>
+
+              {newEmpError ? <View style={{ backgroundColor: "#FFF1F2", borderWidth: 0.5, borderColor: "#FECDD3", borderRadius: 12, padding: 12 }}><Text style={{ fontSize: 13, fontWeight: "600", color: "#B00020", textAlign: "center" }}>{newEmpError}</Text></View> : null}
+            </KeyboardSafeScrollView>
+            <View style={{ padding: 16, paddingBottom: 16 + insets.bottom, backgroundColor: "white", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#e5e5ea", gap: 8 }}>
+              <Pressable
+                onPress={() => {
+                  setNewEmpError("");
+                  if (!newEmpName.trim()) { setNewEmpError("Non obligatwa."); return; }
+                  if (!newEmpPhone.trim()) { setNewEmpError("Telefon obligatwa."); return; }
+                  if (!newEmpAddress.trim()) { setNewEmpError("Adrès obligatwa."); return; }
+                  if (!newEmpEmergName.trim() || !newEmpEmergPhone.trim() || !newEmpEmergAddress.trim()) { setNewEmpError("Kontak ijans konplè obligatwa: non, telefon, adrès."); return; }
+                  if (!canAddRole(newEmpRole)) { setNewEmpError("Ou pa gen dwa kreye wòl sa a — se sèlman siperyè strik ka kreye (pa menm nivo, pa Owner)."); return; }
+                  const id = mintId();
+                  const secret = String(employees.length + 1);
+                  setEmployees(prev => [...prev, { id, name: newEmpName.trim(), role: newEmpRole as any, phone: newEmpPhone.trim(), address: newEmpAddress.trim(), store: currentStore, emergency: { name: newEmpEmergName.trim(), phone: newEmpEmergPhone.trim(), address: newEmpEmergAddress.trim() }, secret, password: `pass-${Math.random().toString(36).slice(2, 8)}`, lastAction: "Nouvo manm", kpi: "—", salary: newEmpRole === "admin" ? "G 32 000" : newEmpRole === "manager" ? "G 25 000" : "G 12 000", isOnline: false, active: true } as any]);
+                  setNewEmpName(""); setNewEmpPhone(""); setNewEmpAddress(""); setNewEmpEmergName(""); setNewEmpEmergPhone(""); setNewEmpEmergAddress(""); setNewEmpRole("cashier"); setNewEmpError("");
+                  setShowAdd(false);
+                }}
+                style={{ backgroundColor: "#16130c", borderRadius: 14, paddingVertical: 15, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, shadowColor: "#16130c", shadowOpacity: 0.15, shadowRadius: 14, shadowOffset: { width: 0, height: 8 }, borderWidth: 1, borderColor: "rgba(200,162,74,0.35)" }}>
+                <Ionicons name="add" size={20} color="#fff" />
+                <Text style={{ color: "white", fontWeight: "700", fontSize: 15 }}>Ajoute anplwaye</Text>
+              </Pressable>
+              <Pressable onPress={() => setShowAdd(false)} style={{ paddingVertical: 6, alignItems: "center" }}><Text style={{ fontSize: 13, color: "#837b69", fontWeight: "500" }}>Fèmen</Text></Pressable>
+            </View>
+          </View>
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Employee detail — phone: full-screen modal (tablet: right pane). */}
+      {!isTablet && selectedEmp && (
+        <Modal visible transparent={false} animationType="slide" onRequestClose={() => setSelectedEmp(null)}>
+          <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
+            <View style={{ flex: 1, backgroundColor: "#000", padding: 18, paddingTop: insets.top + 12, paddingBottom: 24 + insets.bottom }}>
+              {detailContent}
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+      )}
 
     </View>
   );

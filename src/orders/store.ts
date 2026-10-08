@@ -75,7 +75,28 @@ async function emit(msg: OrderBusMessage): Promise<void> {
 async function outbox(table: string, operation: "create" | "update" | "delete", payload: unknown): Promise<void> {
   if (!CLOUD_OUTBOX) return;
   try {
-    await insertOutbox(table, operation, payload);
+    // Patches are partial ({ id, ...fields }) but the cloud resolves LWW by
+    // lamport_clock FIRST — a patch without it compares as `undefined > n`
+    // → false, loses as `conflict_local_wins`, and pushToCloud then deletes
+    // the outbox row as if it had succeeded. That is how a paid tab's
+    // `status: "closed"` never left the device. Merge the row's fresh sync
+    // columns (syncStamp() already bumped them a line above in every caller)
+    // so the pushed record is full and can actually win.
+    const p = (payload ?? {}) as Record<string, unknown>;
+    let enriched: Record<string, unknown> = { ...p };
+    if (p.id) {
+      const db = await getDb();
+      const rows = (await db
+        .getAllAsync(`SELECT * FROM ${table} WHERE id = ?`, [p.id])
+        .catch(() => [])) as Record<string, any>[];
+      const row = rows?.[0];
+      if (row) {
+        for (const k of ["lamport_clock", "store_id", "created_at", "is_deleted"]) {
+          if (enriched[k] === undefined && row[k] !== undefined) enriched[k] = row[k];
+        }
+      }
+    }
+    await insertOutbox(table, operation, enriched);
   } catch {
     // Cloud backup is best-effort; the local row is already written.
   }
@@ -256,6 +277,36 @@ export async function createOrder(args: CreateOrderArgs): Promise<StoreResult<{ 
   return { ok: true, order };
 }
 
+/** Derived totals — refreshTotals keeps the stored columns fresh locally,
+ *  but its writes never ride the outbox (derived values), so a pull
+ *  overwrites them with the cloud's copy — which stays 0 for any order
+ *  whose lines changed after creation. Recompute both columns from
+ *  open_order_lines (the table that does sync) with the exact refreshTotals
+ *  formulas: delivered-only subtotal + non-cancelled line count. An order
+ *  with no live lines reads 0; a failed query falls back to stored values. */
+async function withTotals(db: any, orders: Order[]): Promise<Order[]> {
+  if (!orders.length) return orders;
+  let agg: { order_id: string; delivered_total: number | null; line_count: number | null }[] = [];
+  try {
+    const ph = orders.map(() => "?").join(",");
+    agg = (await db.getAllAsync(
+      `SELECT order_id, SUM(CASE WHEN status = 'delivered' THEN line_total ELSE 0 END) AS delivered_total, SUM(CASE WHEN status != 'cancelled' THEN 1 ELSE 0 END) AS line_count FROM open_order_lines WHERE order_id IN (${ph}) AND (is_deleted = 0 OR is_deleted IS NULL) GROUP BY order_id`,
+      orders.map(o => o.id),
+    )) as { order_id: string; delivered_total: number | null; line_count: number | null }[];
+  } catch {
+    return orders;
+  }
+  const map = new Map(agg.map(r => [String(r.order_id), r]));
+  return orders.map(o => {
+    const a = map.get(String(o.id));
+    return {
+      ...o,
+      delivered_total: a ? Number(a.delivered_total) || 0 : 0,
+      line_count: a ? Number(a.line_count) || 0 : 0,
+    };
+  });
+}
+
 export async function listOrders(storeId: string, opts?: { status?: string[] | null; limit?: number }): Promise<Order[]> {
   const db = await getDb();
   const statuses = opts?.status ?? ["open", "ready", "settling"];
@@ -264,14 +315,17 @@ export async function listOrders(storeId: string, opts?: { status?: string[] | n
     `SELECT * FROM open_orders WHERE store_id = ? AND status IN (${placeholders}) AND (is_deleted = 0 OR is_deleted IS NULL) ORDER BY created_at DESC LIMIT ?`,
     [storeId, ...statuses, opts?.limit ?? 200],
   ).catch(() => [])) as Order[];
-  return rows;
+  return withTotals(db, rows);
 }
 
 export async function getOrderBundle(orderId: string): Promise<{ order: Order; lines: OrderLine[]; requests: ChangeRequest[]; events: OrderEvent[] } | null> {
   const db = await getDb();
-  const order = await loadOrder(db, orderId);
-  if (!order) return null;
+  const stored = await loadOrder(db, orderId);
+  if (!stored) return null;
   const lines = await loadLines(db, orderId);
+  // Same stale-total story as withTotals: derive from the lines in hand
+  // (they already sync with the order) instead of the stored columns.
+  const order: Order = { ...stored, delivered_total: deliveredSubtotal(lines), line_count: liveLines(lines).length };
   const requests = (await db.getAllAsync(
     "SELECT * FROM order_change_requests WHERE order_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) ORDER BY created_at ASC",
     [orderId],

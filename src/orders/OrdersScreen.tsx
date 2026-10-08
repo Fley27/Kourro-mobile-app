@@ -5,10 +5,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { fmtG } from "../format";
+import { fmtG, monoStyle } from "../format";
 import { PROD_DARK } from "../screens/POSShared";
 import { getDb } from "../db";
 import { useSalesEvents } from "../salesEvents";
+import { setUrgentSync } from "../sync/autoSync";
 import type { BusinessType, User } from "../users";
 import {
   ORDER_STATUS_LABELS,
@@ -111,6 +112,12 @@ export default function OrdersScreen({
   // Live: reload whenever a pull lands (another register opened/billed an
   // order) or a local change commits.
   useSalesEvents(() => { reload().catch(() => {}); });
+  // Order/line status is time-critical: while this screen is open, sync runs
+  // on the fast lane (~150ms push, 1.5s pull) and pulls immediately on entry.
+  useEffect(() => {
+    setUrgentSync(true);
+    return () => setUrgentSync(false);
+  }, []);
 
   const { bundle: boardBundle, reload: reloadBoard } = useOrderBundle(boardOrderId);
   // The picker's order: prefer the live board bundle when both target the
@@ -174,6 +181,12 @@ export default function OrdersScreen({
     || orderCodeLabel(o).toLowerCase().includes(query)
   );
 
+  // Focus mode (tablet): the order preview lives in the second panel, but
+  // anything that writes — Nouvo Kòmand (creation) and Mete atik (adding a
+  // round) — drops the order-list pane and spans the full content area
+  // beside the permanent sidebar. The list returns the moment it closes.
+  const focusMode = isTablet && (showCreate || !!pickerOrderId);
+
   const boardView = (
     <>
           {!boardBundle ? (
@@ -200,6 +213,9 @@ export default function OrdersScreen({
                           {ORDER_STATUS_LABELS[boardBundle.order.status].toUpperCase()}
                         </Text>
                       </View>
+                      {boardBundle.order.status === "ready" || boardBundle.order.status === "settling" ? (
+                        <Text style={{ color: "#4ade80", fontFamily: "Inter_700Bold", fontSize: 15, ...monoStyle }}>{fmtG(boardBundle.order.delivered_total)}</Text>
+                      ) : null}
                     </View>
                     <Text style={{ color: PROD_DARK.muted, fontFamily: "Inter_400Regular", fontSize: 12, marginTop: 3 }} numberOfLines={1}>
                       <Text style={{ color: "#fff", fontFamily: "Inter_700Bold" }}>{boardBundle.order.created_by_name ?? "—"}</Text>
@@ -246,6 +262,7 @@ export default function OrdersScreen({
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000", flexDirection: isTablet ? "row" : "column" }}>
+      {!focusMode ? (
       <View style={{ width: isTablet ? paneW : undefined, flex: isTablet ? undefined : 1, borderRightWidth: isTablet ? 1 : 0, borderRightColor: "#1c1c1f" }}>
       <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10 }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
@@ -338,9 +355,24 @@ export default function OrdersScreen({
         </KeyboardSafeScrollView>
       )}
       </View>
+      ) : null}
       {isTablet ? (
         <View style={{ flex: 1, backgroundColor: "#000" }}>
-          {boardOrderId ? boardView : (
+          {/* Nouvo Kòmand takes the pane like a screen — inline, so the
+              permanent sidebar stays visible; in focus mode the list pane is
+              gone too, so the flow spans the full content area. */}
+          {showCreate ? (
+            <CreateOrderSheet
+              presentation="inline"
+              visible={showCreate}
+              hospitality={hospitality}
+              actor={actor}
+              deviceId={deviceId}
+              storeId={storeId}
+              onClose={() => setShowCreate(false)}
+              onCreated={(o) => { setShowCreate(false); setBoardOrderId(o.id); setPickerOrderId(o.id); }}
+            />
+          ) : boardOrderId ? boardView : (
             <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
               <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(47,128,237,0.12)", borderWidth: 1, borderColor: "rgba(47,128,237,0.3)", alignItems: "center", justifyContent: "center" }}>
                 <Ionicons name="reader-outline" size={28} color="#2f80ed" />
@@ -358,15 +390,18 @@ export default function OrdersScreen({
         </SafeScreen>
       </Modal>
 
-      <CreateOrderSheet
-        visible={showCreate}
-        hospitality={hospitality}
-        actor={actor}
-        deviceId={deviceId}
-        storeId={storeId}
-        onClose={() => setShowCreate(false)}
-        onCreated={(o) => { setShowCreate(false); setBoardOrderId(o.id); setPickerOrderId(o.id); }}
-      />
+      {/* Phone only — the tablet hosts the sheet inline in the right pane. */}
+      {!isTablet ? (
+        <CreateOrderSheet
+          visible={showCreate}
+          hospitality={hospitality}
+          actor={actor}
+          deviceId={deviceId}
+          storeId={storeId}
+          onClose={() => setShowCreate(false)}
+          onCreated={(o) => { setShowCreate(false); setBoardOrderId(o.id); setPickerOrderId(o.id); }}
+        />
+      ) : null}
 
       {/* Card quick print — same synthetic Fakti as the board's button. */}
       <ReceiptModal
@@ -428,9 +463,13 @@ type SheetView = "form" | "picker" | "profile" | "full" | "txn";
 type CustStats = { visits: number; spent: number; lastVisit: string | null; firstVisit: string | null };
 
 function CreateOrderSheet({
-  visible, hospitality, actor, deviceId, storeId, onClose, onCreated,
+  visible, presentation = "modal", hospitality, actor, deviceId, storeId, onClose, onCreated,
 }: {
   visible: boolean;
+  // modal  — phone: full-screen slide-up (covers everything, incl. the nav).
+  // inline — tablet: rendered by the caller inside the right detail pane so
+  //          the permanent MenuSidebar and the order list stay visible.
+  presentation?: "modal" | "inline";
   hospitality: boolean;
   actor: Actor;
   deviceId: string;
@@ -570,9 +609,8 @@ function CreateOrderSheet({
     : view === "txn" ? "Fakti"
     : "Nouvo Kòmand";
 
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={goBack}>
-      <KeyboardSafeView>
+  const content = (
+    <KeyboardSafeView>
       <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
         {/* Header: back top-left, title dead-center, Kreye top-right. */}
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 }}>
@@ -754,8 +792,18 @@ function CreateOrderSheet({
           </KeyboardSafeScrollView>
         ) : null}
       </SafeScreen>
-    
       </KeyboardSafeView>
+  );
+
+  // Tablet: no native Modal — the pane hosts this as a plain screen so the
+  // sidebar never gets covered.
+  if (presentation === "inline") {
+    return visible ? <View style={{ flex: 1, backgroundColor: "#000" }}>{content}</View> : null;
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={goBack}>
+      {content}
     </Modal>
   );
 }

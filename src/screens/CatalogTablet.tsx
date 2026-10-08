@@ -2,7 +2,7 @@ import React from "react";
 import { View, Text, FlatList, Pressable, TextInput, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { blackPalette as palette, radius, shadow, topIconBtn } from "../theme";
-import { fmtG, monoStyle } from "../format";
+import { fmt, fmtG, monoStyle } from "../format";
 import { useResponsive } from "../responsive";
 import type { Role } from "../users";
 import type { ProductUnit } from "../pricing";
@@ -40,6 +40,7 @@ export interface CatalogTabletProps {
   v2: CatalogModel;
   supplierList: { id: string; name: string }[];
   getBaseCost: (productId: string) => number;
+  getUnitCosts: (productId: string) => Map<string, number>;
   onManageProduct: (productId: string, section?: StepKey) => void;
   onOpenProduct: (productId: string) => void;
   onActivateProduct: (productId: string) => void;
@@ -83,7 +84,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
     setInfoProduct, tabletDetail,
     infoProduct,
     showNameEdit, setShowNameEdit, nameInput, setNameInput, handleChangeName,
-    v2, supplierList, getBaseCost, onManageProduct, onOpenProduct, onActivateProduct,
+    v2, supplierList, getBaseCost, getUnitCosts, onManageProduct, onOpenProduct, onActivateProduct,
   } = props;
 
   // Web Inventory KPIs — all derived from props already passed by the shell.
@@ -116,6 +117,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
     const tUnitName = defaultUnitOf(p.id)?.unit_name ?? p.unit ?? "pcs";
     const tPrice = displayPriceOf(p);
     const tCost = getBaseCost(p.id);
+    const tUnitCosts = getUnitCosts(p.id);
     const tMargin = tPrice > 0 && tCost > 0 ? ((tPrice - tCost) / tPrice) * 100 : null;
     const tRecent = tBatches.slice(0, 5);
     const tVariants = v2.variants.filter(v => tItemIds.has(String(v.item_id)) && !v.is_deleted);
@@ -157,7 +159,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
           <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
             <MetricTile label="PRI VANT" value={tPrice ? `${fmtG(tPrice)}` : "—"} />
             {canViewCost && (
-              <MetricTile label="KOUT" value={p.cost_price ? `${fmtG(p.cost_price)}` : "—"} valueColor="#8e8e93" />
+              <MetricTile label="KOUT" value={tCost > 0 ? `${fmtG(tCost)}` : "—"} valueColor="#8e8e93" />
             )}
           </View>
           <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
@@ -185,6 +187,29 @@ export function CatalogTablet(props: CatalogTabletProps) {
             </View>
           )}
         </View>
+        {/* KOUT — read-only: cost only changes through the unit the product
+            was bought (batch qty/total → recompute → chain → items.cost). */}
+        {canViewCost && (
+          <View style={{ backgroundColor: "#1C1C1E", borderRadius: radius.md, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 14, ...shadow.soft }}>
+            <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Kout</Text>
+            {tItems.length ? (
+              <View style={{ marginTop: 4, borderTopWidth: 0.5, borderColor: "#262626" }}>
+                {tItems.map(u => {
+                  const c = tUnitCosts.get(String(u.id)) ?? 0;
+                  return (
+                    <View key={u.id} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 9, borderBottomWidth: 0.5, borderColor: "#262626" }}>
+                      <Text style={{ fontSize: 12, fontWeight: "600", color: "#fff" }}>{u.name}</Text>
+                      <Text style={{ fontSize: 12, fontWeight: "800", color: "#fff", ...monoStyle }}>{c > 0 ? fmtG(c) : "—"}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 8 }}>Poko gen inite.</Text>
+            )}
+            <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 8 }}>Kout mete ajou otomatikman lè kantite oswa total yon batch chanje.</Text>
+          </View>
+        )}
         {/* Units & prices — hairline ledger rows */}
         <View style={{ backgroundColor: "#1C1C1E", borderRadius: radius.md, borderWidth: 0.5, borderColor: "#2b2b2b", padding: 14, ...shadow.soft }}>
           <Text style={{ fontWeight: "700", fontSize: 13, color: "#fff" }}>Inite ({tItems.length})</Text>
@@ -227,7 +252,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
             <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 8 }}>Poko gen batch pou pwodwi sa.</Text>
           ) : (
             <View style={{ marginTop: 8 }}>
-              <Text style={{ fontSize: 12, fontWeight: "700", color: "#fff" }} numberOfLines={1}>{itemName(String(tLast.item_id))} · {fmtG(Number(tLast.quantity))}</Text>
+              <Text style={{ fontSize: 12, fontWeight: "700", color: "#fff" }} numberOfLines={1}>{itemName(String(tLast.item_id))} · {fmt(Number(tLast.quantity))}</Text>
               <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{supName(String(tLast.supplier_id))} · {tLast.date} · {fmtG(Math.round(Number(tLast.total_paid)))}</Text>
             </View>
           )}

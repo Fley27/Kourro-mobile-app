@@ -26,7 +26,9 @@ function isHostedSupabaseUrl(raw: string): boolean {
   return !(privateNet && u.port === "54321");
 }
 
-export const isLiveSupabase = isHostedSupabaseUrl(supabaseUrl) && supabaseAnonKey !== "anon-key";
+export const isLiveSupabase =
+  (isHostedSupabaseUrl(supabaseUrl) || process.env.EXPO_PUBLIC_FORCE_LIVE_AUTH === "1") &&
+  supabaseAnonKey !== "anon-key";
 
 const SB_SESSION_KEY = "jm_supabase_session";
 

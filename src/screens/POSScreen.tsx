@@ -34,7 +34,7 @@ import { checkMin } from "../promos/promoMath";
 import { parseMin, type Coupon, type ProformatItem } from "../promos/types";
 import { saveCartDraft, loadCartDraft, clearCartDraft } from "../sales/cartDraft";
 import { CreditPayFlow } from "../components/CreditPayFlow";
-import { UploadTransition, minDelay, uploadSuccess, uploadError, type UploadPhase } from "../components/UploadTransition";
+import { UploadTransition, minDelay, uploadSuccess, uploadError, useUploadNotifyVisible, type UploadPhase } from "../components/UploadTransition";
 import CustomerForm, {
   EMPTY_CUSTOMER_FORM, fullNameOf, composeAddress,
   type CustomerFormData,
@@ -183,15 +183,35 @@ export default function POSScreen({
   const [akompte, setAkompte] = useState<string>("");
   const [lastReceipts, setLastReceipts] = useState<{ customer: ReceiptData; store: ReceiptData } | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
+  // Sale committed, receipt waiting for every other Modal to be off screen.
+  const [receiptQueued, setReceiptQueued] = useState(false);
   // Tender upload transition (shared reusable overlay — same as credit pay + suspend).
   const [payBusy, setPayBusy] = useState(false);
   const [payPhase, setPayPhase] = useState<UploadPhase>("loading");
   const [payTitle, setPayTitle] = useState("");
   const [payMsg, setPayMsg] = useState("");
+  const uploadNotifyVisible = useUploadNotifyVisible();
   // Receipt-open trace — "sale succeeded but no receipt" is invisible without it.
   useEffect(() => {
-    console.log("[pos] receipt state", { showReceipt, hasReceipts: !!lastReceipts, payBusy, payPhase });
-  }, [showReceipt, lastReceipts, payBusy, payPhase]);
+    console.log("[pos] receipt state", { showReceipt, hasReceipts: !!lastReceipts, payBusy, payPhase, receiptQueued, uploadNotifyVisible });
+  }, [showReceipt, lastReceipts, payBusy, payPhase, receiptQueued, uploadNotifyVisible]);
+  // iOS drops a Modal that presents while another presentation is in flight —
+  // and the receipt silently never appears. Open it only once the pay overlay
+  // AND the global toast overlay have fully unmounted (the old blind 1650ms
+  // timer could land while they were still up: the JS thread drifted ~1s past
+  // the intended 1500ms/1650ms ordering and the receipt modal's presentation
+  // was rejected at 23:56:31.68).
+  useEffect(() => {
+    if (!receiptQueued) return;
+    if (payBusy || uploadNotifyVisible) {
+      // Best-effort cap — a stuck overlay must never swallow the receipt.
+      const fallback = setTimeout(() => { console.log("[pos] receipt forced past overlay"); setShowReceipt(true); setReceiptQueued(false); }, 6000);
+      return () => clearTimeout(fallback);
+    }
+    console.log("[pos] receipt opening — overlays clear");
+    const t = setTimeout(() => { setShowReceipt(true); setReceiptQueued(false); }, 400);
+    return () => clearTimeout(t);
+  }, [receiptQueued, payBusy, uploadNotifyVisible]);
 
   // Catalog (products / pricing / cost + factor maps) — one loader shared
   // with the Orders in-screen item picker.
@@ -556,13 +576,16 @@ export default function POSScreen({
   // The discount only stays while its bundle does: the moment a
   // required item (or a min gate) breaks, the coupon drops immediately.
   useEffect(() => {
-    if (!appliedCoupon || pending) return;
+    // A checkout in flight rewrites the cart around this effect (the post-sale
+    // reset). Silently drop there — announcing "Koupon retire" then is wrong
+    // (the coupon WAS used) and its toast Modal collides with the receipt.
+    if (!appliedCoupon || pending || payBusy) return;
     const gap = bundleGap(cart, couponBundle);
     const gate = checkMin(cart, appliedCoupon.min);
     if (!gap && gate.ok) return;
     removeCoupon();
     uploadSuccess("Koupon retire", gap ?? (!gate.ok ? gate.reason : "Kondisyon an pa satisfè ankò."));
-  }, [cart, appliedCoupon, couponBundle, pending]);
+  }, [cart, appliedCoupon, couponBundle, pending, payBusy]);
   // The proformat link only describes the lines it seeded — drop it the moment
   // the cart empties by any path (bulk clear, removing lines one by one).
   useEffect(() => {
@@ -1378,13 +1401,11 @@ export default function POSScreen({
       setPayPhase("success");
       setPayMsg(`${fmtG(payable)} • vant anrejistre`);
       console.log("[pos] sale committed — receipt scheduled", { sale: paidSale?.id, hasReceipts: !!receipts, coupon: !!couponNow, discount: expectedDiscount });
-      // The sale is committed, so the receipt is scheduled HERE — before the
-      // cleanup below, which must never be able to swallow it. 1650ms = the
-      // 1500ms overlay hold + the 150ms hand-off (iOS drops same-tick swaps).
-      setTimeout(() => {
-        console.log("[pos] receipt timer fired", { coupon: !!couponNow });
-        setShowReceipt(true);
-      }, 1650);
+      // The sale is committed, so the receipt is queued HERE — before the
+      // cleanup below, which must never be able to swallow it. It opens from
+      // the effect above once every other Modal (pay overlay + global toast)
+      // is off screen; iOS drops a Modal that presents over one in flight.
+      setReceiptQueued(true);
       await new Promise(r => setTimeout(r, 1500));
       try {
         resetCheckoutForm();

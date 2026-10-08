@@ -3,7 +3,7 @@
 // Prices are never overwritten: a change is a new row (history preserved).
 import React, { useEffect, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-native";
-import { getDb, insertOutbox } from "../../db";
+import { getDb, insertOutbox, recomputeItemCosts } from "../../db";
 import { fmtG } from "../../format";
 import type { Item, Variant, VariantPrice } from "../../catalogModel";
 import { currentVariantPrice, itemFactor, minItemFactor, toCanonicalQty } from "../../catalogModel";
@@ -54,10 +54,17 @@ export default function PricesStep({
         const total = pend.reduce((s: number, b: any) => s + (Number(b.total_paid) || 0), 0);
         for (const b of pend) {
           const shr = Math.round((total > 0 ? t * ((Number(b.total_paid) || 0) / total) : t / pend.length) * 100) / 100;
-          await db.runAsync("UPDATE batches SET total_paid = total_paid + ?, transport_share = transport_share + ?, updated_at = ?, dirty = 1 WHERE id = ?",
-            [shr, shr, now, String(b.id)]);
-          try { await insertOutbox("batches", "update", { id: String(b.id), transport_share_added: shr, updated_at: now, is_deleted: false }); } catch {}
+          const newT = (Number(b.total_paid) || 0) + shr;
+          const newS = (Number(b.transport_share) || 0) + shr;
+          await db.runAsync("UPDATE batches SET total_paid = ?, transport_share = ?, updated_at = ?, dirty = 1 WHERE id = ?",
+            [newT, newS, now, String(b.id)]);
+          // Push the WHOLE cost row, never a delta: `transport_share_added` is
+          // not a server column, so the record bounced, the cloud kept the
+          // pre-fold total, and the next pull silently reverted the transport.
+          try { await insertOutbox("batches", "update", { id: String(b.id), quantity: b.quantity, total_paid: newT, transport_share: newS, updated_at: now, is_deleted: false }); } catch {}
         }
+        // Transport just re-priced every pending batch — republish unit costs.
+        try { await recomputeItemCosts(db, productId); } catch {}
         await load();
         ctx.reload();
       } catch (e: any) {

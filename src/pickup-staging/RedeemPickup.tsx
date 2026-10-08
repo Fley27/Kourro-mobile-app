@@ -1,6 +1,6 @@
 // STAGING-PICKUP: redemption across multiple future visits. Lookup by sale ID
 // (typed/scanned, id or VTE-...), plus lost-receipt search (customer/date/item).
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, Alert } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useResponsive, sheetBox } from "../responsive";
@@ -46,6 +46,12 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [openList, setOpenList] = useState<any[]>([]);
   const [saving, setSaving] = useState(false);
+
+  // A fresh open must never inherit a stale "Ap anrejistre…" lock (same guard
+  // as PickupSheet — a frozen prior attempt would disable the button forever).
+  useEffect(() => {
+    if (visible) setSaving(false);
+  }, [visible]);
 
   async function search() {
     const found = await findSaleForPickup(storeId, query).catch(() => null);
@@ -104,31 +110,32 @@ export default function RedeemPickup({ visible, storeId, cashierId, storeName, c
       const paid = Number(sale?.amount_paid ?? total);
       const due = Number(sale?.amount_due ?? 0);
       const pm = String(sale?.payment_method ?? "");
-      try {
-        await printPickupReceipt({
-          kind: "redeem",
-          storeName: storeName ?? "Jesyon Magazen",
-          saleNumber,
-          saleId,
-          createdAt: new Date().toISOString(),
-          cashierName: cashierName ?? "Kesye",
-          customerName: fresh?.customer?.name ?? null,
-          lines: receiptLines,
-          total,
-          change: Math.max(0, Math.round((paid - total) * 100) / 100),
-          balance: due,
-          saleType: PAYMENT_LABELS[pm] ?? pm ?? "—",
-          isCredit: pm === "credit",
-        });
-      } catch {}
       const still = touched.filter(t => t.remainingAfter > 0.000001);
+      // Close FIRST: printing opens the system share sheet and can sit there
+      // forever — never await it (same fix as PickupSheet).
+      setLines([]); setSaleId(null); setInputs({}); setQuery(""); onClose();
       uploadSuccess(
         "Rekipere ✓ • Resi enprime",
         still.length
           ? `${touched.map(t => `${saleLineLabel(t)}: achte ${toNum(t.quantity)}, pran ${t.takenNow}, rete ${t.remainingAfter}`).join("\n")}\nID: ${saleId}`
-          : `Tout pran. Balans 0.`,
-        () => { setLines([]); setSaleId(null); setInputs({}); setQuery(""); onClose(); }
+          : `Tout pran. Balans 0.`
       );
+      // Detached: the PDF share opens over whatever is on screen.
+      void printPickupReceipt({
+        kind: "redeem",
+        storeName: storeName ?? "Jesyon Magazen",
+        saleNumber,
+        saleId,
+        createdAt: new Date().toISOString(),
+        cashierName: cashierName ?? "Kesye",
+        customerName: fresh?.customer?.name ?? null,
+        lines: receiptLines,
+        total,
+        change: Math.max(0, Math.round((paid - total) * 100) / 100),
+        balance: due,
+        saleType: PAYMENT_LABELS[pm] ?? pm ?? "—",
+        isCredit: pm === "credit",
+      }).catch(() => {});
     } catch (e: any) {
       uploadError("Bloke", e?.message ?? "Rekipere echwe");
     } finally {

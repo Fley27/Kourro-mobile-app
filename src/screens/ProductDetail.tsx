@@ -1,12 +1,13 @@
 // ProductDetail — reusable black product details screen (same language as
 // the category details). Sections: identity, stock (+inline seuil edit),
-// prices, items, categories, batches, danger zone. All management jumps
-// into the catalog flow; threshold + availability + delete act inline.
+// prices, kout (read-only), items, categories, batches, danger zone. All
+// management jumps into the catalog flow; threshold + availability + delete
+// act inline.
 import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../db";
-import { fmtG } from "../format";
+import { fmt, fmtG } from "../format";
 import { formatCheckoutRow } from "../labels";
 import { palette, radius } from "../theme";
 import {
@@ -24,7 +25,7 @@ import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
 export default function ProductDetail({
   product, categories, catIds, v2, supplierList,
-  displayPriceOf, getBaseCost,
+  displayPriceOf, getBaseCost, getUnitCosts,
   canEdit, canViewCost, canToggleAvail, onToggleAvail, canDelete,
   onManage, onOpenCategory, onDeleteProduct, onDeleted, onChanged, onScrollY,
 }: {
@@ -35,6 +36,7 @@ export default function ProductDetail({
   supplierList: { id: string; name: string }[];
   displayPriceOf: (p: Product) => number;
   getBaseCost: (productId: string) => number;
+  getUnitCosts: (productId: string) => Map<string, number>;
   canEdit: boolean;
   canViewCost: boolean;
   canToggleAvail: boolean;
@@ -95,6 +97,7 @@ export default function ProductDetail({
   const supName = (id: string) => supplierList.find(s => s.id === id)?.name ?? "—";
   const itemName = (id: string) => v2.items.find(i => i.id === id)?.name ?? "?";
   const baseCost = getBaseCost(product.id);
+  const unitCosts = getUnitCosts(product.id);
   const price = displayPriceOf(product);
   const margin = price > 0 && baseCost > 0 ? Math.round((1 - baseCost / price) * 100) : null;
 
@@ -230,6 +233,30 @@ export default function ProductDetail({
           ) : null}
         </View>
 
+        {/* KOUT — read-only: cost only changes through the unit the product
+            was bought (batch qty/total → recompute → chain → items.cost). */}
+        {canViewCost ? (
+          <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: 16, padding: 14 }}>
+            <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Kout</Text>
+            {items.length ? (
+              <View style={{ marginTop: 4, borderTopWidth: 0.5, borderColor: "#262626" }}>
+                {items.map(u => {
+                  const c = unitCosts.get(String(u.id)) ?? 0;
+                  return (
+                    <View key={u.id} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 9, borderBottomWidth: 0.5, borderColor: "#262626" }}>
+                      <Text style={{ fontSize: 12, fontWeight: "600", color: "#fff" }}>{u.name}</Text>
+                      <Text style={{ fontSize: 12, fontWeight: "800", color: "#fff" }}>{c > 0 ? fmtG(c) : "—"}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 8 }}>Poko gen inite.</Text>
+            )}
+            <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 8 }}>Kout mete ajou otomatikman lè kantite oswa total yon batch chanje.</Text>
+          </View>
+        ) : null}
+
         {/* Bundles */}
         <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: 16, padding: 14 }}>
           <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Bundle (of espesyal)</Text>
@@ -246,7 +273,7 @@ export default function ProductDetail({
                         {formatCheckoutRow(itemName(String(v?.item_id ?? "")), product.name, v?.name ?? null)}
                       </Text>
                       <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }}>
-                        min {fmtG(Number(b.min_quantity) || 0)} → {live ? fmtG(Number(live.price)) : "—"}
+                        min {fmt(Number(b.min_quantity) || 0)} → {live ? fmtG(Number(live.price)) : "—"}
                       </Text>
                     </View>
                     {canEdit ? (
@@ -321,7 +348,7 @@ export default function ProductDetail({
               {batches.slice(0, 5).map(b => (
                 <View key={b.id} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 9, borderBottomWidth: 0.5, borderColor: "#262626" }}>
                   <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#fff" }} numberOfLines={1}>{itemName(String(b.item_id))} · {fmtG(Number(b.quantity))}</Text>
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#fff" }} numberOfLines={1}>{itemName(String(b.item_id))} · {fmt(Number(b.quantity))}</Text>
                     <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>{supName(String(b.supplier_id))} · {b.date} · {String(b.status) === "received" ? "RISEVWA" : String(b.status) === "denied" ? "REFIZE" : "AP TANN"}</Text>
                   </View>
                   <Text style={{ fontSize: 12, fontWeight: "800", color: "#fff" }}>{fmtG(Number(b.total_paid))}</Text>

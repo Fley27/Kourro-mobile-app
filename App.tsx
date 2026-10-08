@@ -82,6 +82,9 @@ function empFromRow(r: any): any {
   } as any;
 }
 
+// Armed once fontsLoaded (see AppShell) — never while the family is in flight.
+let fontDefaultsArmed = false;
+
 function AppShell() {
   const [fontsLoaded, fontError] = useFonts({
     Inter_300Light,
@@ -100,10 +103,20 @@ function AppShell() {
   }, []);
   const fontsReady = fontsLoaded || !!fontError || fontTimedOut;
 
-  (Text as any).defaultProps = (Text as any).defaultProps || {};
-  (Text as any).defaultProps.style = [{ fontFamily: "Inter_500Medium" }, (Text as any).defaultProps.style];
-  (TextInput as any).defaultProps = (TextInput as any).defaultProps || {};
-  (TextInput as any).defaultProps.style = [{ fontFamily: "Inter_400Regular" }, (TextInput as any).defaultProps.style];
+  // Arm the Inter defaults exactly once — and only after useFonts actually
+  // finished. Arming them on every render while the family is still in
+  // flight is what trips expo-font's "You started loading the font
+  // Inter_500Medium, but used it before it finished loading" warning
+  // (styleless Texts — LogBox/overlays included — pick the default up),
+  // and re-nesting the style array on every render grows it unboundedly.
+  // fontError / timeout keep the system-font fallback promised above.
+  if (fontsLoaded && !fontDefaultsArmed) {
+    fontDefaultsArmed = true;
+    (Text as any).defaultProps = (Text as any).defaultProps || {};
+    (Text as any).defaultProps.style = [{ fontFamily: "Inter_500Medium" }, (Text as any).defaultProps.style];
+    (TextInput as any).defaultProps = (TextInput as any).defaultProps || {};
+    (TextInput as any).defaultProps.style = [{ fontFamily: "Inter_400Regular" }, (TextInput as any).defaultProps.style];
+  }
 
   const [tab, setTab] = useState<Tab>("pos");
   // Bumping remounts MoreScreen, back to the hub (the Retounen button is gone).
@@ -746,7 +759,18 @@ function AppShell() {
   // Deliberate opens (taps) are sacred: only a stale, non-deliberate overlay
   // may ever be closed automatically (login decision below).
   const userOpenedShift = useRef(false);
-  const openShiftDeliberate = useCallback(() => { userOpenedShift.current = true; setShowShift(true); }, []);
+  // The three overlay screens are mutually exclusive: the content area renders
+  // them by fixed priority (Store → Team → Shift), so opening one MUST clear
+  // the others or the tap looks dead (Team stayed on screen when Shift was
+  // opened from it — you had to navigate elsewhere first).
+  const openShiftDeliberate = useCallback(() => {
+    userOpenedShift.current = true;
+    setShowStore(false);
+    setShowTeam(false);
+    setShowShift(true);
+  }, []);
+  const openTeam = useCallback(() => { setShowStore(false); setShowShift(false); setShowTeam(true); }, []);
+  const openStore = useCallback(() => { setShowShift(false); setShowTeam(false); setShowStore(true); }, []);
   React.useEffect(() => {
     if (!loginUserId) { shiftAutoLandedFor.current = null; userOpenedShift.current = false; return; }
     if (role !== "cashier") { shiftAutoLandedFor.current = null; return; }
@@ -897,8 +921,11 @@ function AppShell() {
         <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", padding: 6 }}>
           <Image source={require("./assets/kourro-logo.png")} style={{ width: 34, height: 34, resizeMode: "contain" }} />
         </View>
-        <Text style={{ fontFamily: "Inter_600SemiBold", fontSize: 13, color: palette.ink, marginTop: 10, letterSpacing: -0.2 }}>Kourro</Text>
-        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
+        {/* System font (fontWeight, no Inter family) — these render BEFORE
+            useFonts finishes, so requesting Inter here would be the very
+            "used it before it finished loading" case the warning describes. */}
+        <Text style={{ fontWeight: "600", fontSize: 13, color: palette.ink, marginTop: 10, letterSpacing: -0.2 }}>Kourro</Text>
+        <Text style={{ fontWeight: "400", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
       </SafeAreaView>
     );
   }
@@ -913,7 +940,7 @@ function AppShell() {
         <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", padding: 6 }}>
           <Image source={require("./assets/kourro-logo.png")} style={{ width: 34, height: 34, resizeMode: "contain" }} />
         </View>
-        <Text style={{ fontFamily: "Inter_400Regular", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
+        <Text style={{ fontWeight: "400", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
       </SafeAreaView>
     );
   }
@@ -946,9 +973,10 @@ function AppShell() {
           onTab={onMenuTab}
           onTool={onMenuTool}
           onPosOpen={onTabFABOpen}
-          onOpenStore={() => setShowStore(true)}
-          onOpenTeam={() => setShowTeam(true)}
+          onOpenStore={openStore}
+          onOpenTeam={openTeam}
           onOpenShift={() => openShiftDeliberate()}
+          openOverlay={showTeam ? "team" : showShift ? "shift" : null}
           onLogout={logoutFlow}
         />
       )}
@@ -1221,7 +1249,7 @@ function AppShell() {
           </View>
         ) : (
           <>
-            {tab === "home" && <HomeScreen onGoPos={() => setTab("pos")} onGoShift={() => openShiftDeliberate()} onOpenStore={() => setShowStore(true)} onOpenTeam={() => setShowTeam(true)} role={role} currentUser={currentUser} employees={employees} stores={stores} setStores={setStores} activeStoreId={activeStoreId} setActiveStoreId={setActiveStoreId} appDisabled={appDisabled} setAppDisabled={setAppDisabled} onOpenAccountCenter={() => setShowAccountCenter(true)} onShiftResolved={() => setShiftVersion(v=>v+1)} storeId={STORE_ID} storeName={activeStore?.name ?? "Pétion-Ville"} userStoreIds={userStoreIds} deviceId={deviceId} />}
+            {tab === "home" && <HomeScreen onGoPos={() => setTab("pos")} onGoShift={() => openShiftDeliberate()} onOpenStore={openStore} onOpenTeam={openTeam} role={role} currentUser={currentUser} employees={employees} stores={stores} setStores={setStores} activeStoreId={activeStoreId} setActiveStoreId={setActiveStoreId} appDisabled={appDisabled} setAppDisabled={setAppDisabled} onOpenAccountCenter={() => setShowAccountCenter(true)} onShiftResolved={() => setShiftVersion(v=>v+1)} storeId={STORE_ID} storeName={activeStore?.name ?? "Pétion-Ville"} userStoreIds={userStoreIds} deviceId={deviceId} />}
             {tab === "pos" && (
               !canSell ? (
                 // Shift-flow gate — same dark language as the Shift screen:
@@ -1291,8 +1319,8 @@ function AppShell() {
                 storeName={activeStore?.name ?? "Pétion-Ville"}
                 inventoryVersion={inventoryVersion}
                 onInventorySaved={() => setInventoryVersion(v => v + 1)}
-                onOpenStore={() => setShowStore(true)}
-                onOpenTeam={() => setShowTeam(true)}
+                onOpenStore={openStore}
+                onOpenTeam={openTeam}
                 onOpenShift={() => openShiftDeliberate()}
                 onLogout={logoutFlow}
                 userStoreIds={userStoreIds}

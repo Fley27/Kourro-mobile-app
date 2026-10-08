@@ -13,7 +13,7 @@ import {
 } from "../pricing";
 import { fmtG } from "../format";
 import { uploadSuccess, uploadError } from "../components/UploadTransition";
-import { useResponsive, sheetBox } from "../responsive";
+import { useResponsive, sheetBox, IS_TABLET_DEVICE } from "../responsive";
 import { CatalogPhone } from "./CatalogPhone";
 import { CatalogTablet } from "./CatalogTablet";
 import CategoryFormModal from "../components/CategoryFormModal";
@@ -22,6 +22,7 @@ import CatalogFlowModal, { type StepKey } from "./catalogFlow/CatalogFlowModal";
 import BulkProductFlowModal from "./catalogFlow/BulkProductFlowModal";
 import ProductDetail from "./ProductDetail";
 import { loadCatalogModel, currentBaseCost, currentVariantPrice, unpricedVariantRows, type CatalogModel, type Item, type Batch, type Variant, type VariantPrice } from "../catalogModel";
+import { itemCostsFor } from "../analytics/metrics";
 import { FALLBACK_STORE_ID } from "../db/ids";
 import {
   DEFAULT_CATEGORIES, getCategoryForProduct, slugify, isGoods, isService, isAvailable, categoryDisplayIcon, statusForProduct, ProductCard, normName,
@@ -66,6 +67,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
   const [modelVariants, setModelVariants] = useState<Variant[]>([]);
   const [modelPrices, setModelPrices] = useState<VariantPrice[]>([]);
   const [modelSuppliers, setModelSuppliers] = useState<{ product_id: string; supplier_id: string }[]>([]);
+  const [modelCostRows, setModelCostRows] = useState<any[]>([]);
   const [supplierList, setSupplierList] = useState<{ id: string; name: string }[]>([]);
 
   const [showAddCategory, setShowAddCategory] = useState(false);
@@ -151,7 +153,11 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
         } catch { setModelSuppliers([]); }
         const ss = ((await db.getAllAsync("SELECT id, name FROM suppliers WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY name COLLATE NOCASE").catch(() => [])) ?? []) as any[];
         setSupplierList(ss.map((s: any) => ({ id: String(s.id), name: String(s.name ?? "—") })));
-      } catch { setModelItems([]); setModelBatches([]); setModelVariants([]); setModelPrices([]); setSupplierList([]); }
+        try {
+          const sc = ((await db.getAllAsync("SELECT * FROM product_supplier_costs").catch(() => [])) ?? []) as any[];
+          setModelCostRows(sc.filter((r: any) => !r.is_deleted));
+        } catch { setModelCostRows([]); }
+      } catch { setModelItems([]); setModelBatches([]); setModelVariants([]); setModelPrices([]); setSupplierList([]); setModelCostRows([]); }
     } catch {}
     } catch (e) { console.log("[Stock load] failed:", e); }
     finally { setLoading(false); }
@@ -227,6 +233,18 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
     return map;
   }, [products, modelItems, modelBatches]);
   const getBaseCost = (pid: string) => costMap.get(pid) ?? 0;
+  // Per-unit derived costs (batch → quote → stored, spread by the ratio
+  // chain) — the read-only Cost section of product details reads these.
+  const unitCostMap = useMemo(() => itemCostsFor(modelItems, modelBatches, modelCostRows), [modelItems, modelBatches, modelCostRows]);
+  const getUnitCosts = (pid: string) => {
+    const out = new Map<string, number>();
+    for (const it of modelItems) {
+      if (it.is_deleted || it.product_id !== pid) continue;
+      const c = unitCostMap.get(String(it.id));
+      if (c != null) out.set(String(it.id), c);
+    }
+    return out;
+  };
   const v2: CatalogModel = useMemo(() => ({
     items: modelItems,
     productSuppliers: modelSuppliers,
@@ -434,13 +452,37 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
   }
   const detailProduct: Product | null = detailProductId ? (products.find(p => p.id === detailProductId) ?? null) : null;
 
-  void padH; void lowCount; void totalValue;
+  void lowCount; void totalValue;
   void getUnitsForProduct; void getPricesForUnit;
+
+  // TABLET-SCREEN: both add-product flows run as inline content-area screens
+  // (sidebar stays visible) — flag must match the flows' IS_TABLET_DEVICE.
+  if (IS_TABLET_DEVICE && (showFlow || showBulk)) {
+    return showFlow ? (
+      <CatalogFlowModal
+        visible
+        onClose={() => { setShowFlow(false); setFlowProductId(null); setFlowSection(null); }}
+        onDone={() => { load(); }}
+        categories={categories}
+        role={role}
+        currentUser={currentUser}
+        initialProductId={flowProductId}
+        initialSection={flowSection}
+      />
+    ) : (
+      <BulkProductFlowModal
+        visible
+        onClose={() => setShowBulk(false)}
+        onDone={() => { load(); }}
+        ctx={{ role, currentUser, categories, reload: () => { load(); } }}
+      />
+    );
+  }
 
   if (view === "hub") {
     return (
       <View style={{ flex: 1, backgroundColor: "#000" }}>
-        <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 8 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: padH, paddingTop: 8 }}>
           {onBack ? (
             <Pressable onPress={onBack} accessibilityLabel="Back" style={{ width: topIconBtn.size, height: topIconBtn.size, borderRadius: topIconBtn.radius, backgroundColor: topIconBtn.bg, alignItems: "center", justifyContent: "center" }}>
               <Ionicons name="chevron-back" size={topIconBtn.iconSize} color={topIconBtn.icon} />
@@ -453,7 +495,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
         </View>
         <View style={{ height: 1, backgroundColor: "#262626", marginTop: 14 }} />
         {missingPrices.length > 0 && canEdit && (
-          <Pressable onPress={() => setShowMissing(true)} style={{ flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 16, marginTop: 14, backgroundColor: "rgba(217,154,43,0.12)", borderWidth: 1, borderColor: "rgba(217,154,43,0.4)", borderRadius: 16, padding: 14 }}>
+          <Pressable onPress={() => setShowMissing(true)} style={{ flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: padH, marginTop: 14, backgroundColor: "rgba(217,154,43,0.12)", borderWidth: 1, borderColor: "rgba(217,154,43,0.4)", borderRadius: 16, padding: 14 }}>
             <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: "rgba(217,154,43,0.2)", alignItems: "center", justifyContent: "center" }}>
               <Ionicons name="pricetag-outline" size={18} color="#d99a2b" />
             </View>
@@ -464,11 +506,11 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
             <Ionicons name="chevron-forward" size={18} color="#8e8e93" />
           </Pressable>
         )}
-        <Pressable onPress={() => setView("products")} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 20, borderBottomWidth: 0.5, borderBottomColor: "#262626" }}>
+        <Pressable onPress={() => setView("products")} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: padH, paddingVertical: 20, borderBottomWidth: 0.5, borderBottomColor: "#262626" }}>
           <Text style={{ flex: 1, fontWeight: "800", fontSize: 17, color: "#fff" }}>Pwodwi</Text>
           <Ionicons name="chevron-forward" size={20} color="#8e8e93" />
         </Pressable>
-        <Pressable onPress={() => setView("categories")} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 20, borderBottomWidth: 0.5, borderBottomColor: "#262626" }}>
+        <Pressable onPress={() => setView("categories")} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: padH, paddingVertical: 20, borderBottomWidth: 0.5, borderBottomColor: "#262626" }}>
           <Text style={{ flex: 1, fontWeight: "800", fontSize: 17, color: "#fff" }}>Kategori</Text>
           <Ionicons name="chevron-forward" size={20} color="#8e8e93" />
         </Pressable>
@@ -483,8 +525,8 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: "#000", alignItems: showTablet ? "center" : undefined }}>
-      <View style={{ width: "100%", maxWidth: showTablet ? 880 : undefined, flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8 }}>
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
+      <View style={{ width: "100%", flexDirection: "row", alignItems: "center", paddingHorizontal: padH, paddingTop: 8, paddingBottom: 8 }}>
         {view === "categoryDetail" && detailCat ? (
           <Pressable onPress={() => setView("categories")} accessibilityLabel="Back" style={{ width: topIconBtn.size, height: topIconBtn.size, borderRadius: topIconBtn.radius, backgroundColor: topIconBtn.bg, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="chevron-back" size={topIconBtn.iconSize} color={topIconBtn.icon} />
@@ -538,7 +580,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
           <View style={{ width: topIconBtn.size }} />
         )}
       </View>
-      <View style={{ height: 1, backgroundColor: "#262626", width: "100%", maxWidth: showTablet ? 880 : undefined }} />
+      <View style={{ height: 1, backgroundColor: "#262626", width: "100%" }} />
       {showDraftMenu && view === "productDetail" && detailProduct && String((detailProduct as any).status ?? "active") === "draft" ? (
         <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 50 }}>
           <Pressable style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }} onPress={() => setShowDraftMenu(false)} />
@@ -567,7 +609,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
         </View>
       ) : null}
       {view === "categories" ? (
-        <ScrollView style={{ flex: 1, width: "100%" }} contentContainerStyle={{ padding: 16, paddingBottom: 96, gap: 10, maxWidth: showTablet ? 880 : undefined, alignSelf: showTablet ? "center" : undefined, width: "100%" }} showsVerticalScrollIndicator={false}>
+        <ScrollView style={{ flex: 1, width: "100%" }} contentContainerStyle={{ padding: 16, paddingHorizontal: padH, paddingBottom: 96, gap: 10, width: "100%" }} showsVerticalScrollIndicator={false}>
           {catSections.map(sec => (
             <View key={sec.letter} style={{ gap: 10 }}>
               <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "800", letterSpacing: 1.2, marginTop: 6 }}>{sec.letter}</Text>
@@ -592,7 +634,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
       ) : view === "categoryDetail" && detailCat ? (
         <ScrollView
           style={{ flex: 1, width: "100%" }}
-          contentContainerStyle={{ padding: 16, paddingBottom: 96, gap: 12, maxWidth: showTablet ? 880 : undefined, alignSelf: showTablet ? "center" : undefined, width: "100%" }}
+          contentContainerStyle={{ padding: 16, paddingHorizontal: padH, paddingBottom: 96, gap: 12, width: "100%" }}
           showsVerticalScrollIndicator={false}
           scrollEventThrottle={16}
           onScroll={e => setDetailTitleVisible(e.nativeEvent.contentOffset.y > detailIdentityBottom)}
@@ -705,7 +747,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
           )}
         </ScrollView>
       ) : view === "productDetail" && detailProduct ? (
-        <View style={{ flex: 1, width: "100%", maxWidth: showTablet ? 880 : undefined, alignSelf: showTablet ? "center" : undefined, backgroundColor: "#000" }}>
+        <View style={{ flex: 1, width: "100%", backgroundColor: "#000" }}>
           <ProductDetail
             product={detailProduct}
             categories={categories}
@@ -714,6 +756,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
             supplierList={supplierList}
             displayPriceOf={displayPriceOf}
             getBaseCost={getBaseCost}
+            getUnitCosts={getUnitCosts}
             canEdit={canEdit}
             canViewCost={canViewCost}
             canToggleAvail={canToggleAvail}
@@ -739,7 +782,7 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
           tabletDetail={tabletDetail}
           showNameEdit={showNameEdit} setShowNameEdit={setShowNameEdit} nameInput={nameInput} setNameInput={setNameInput}
           handleChangeName={handleChangeName}
-          v2={v2} supplierList={supplierList} getBaseCost={getBaseCost} onManageProduct={openManage}
+          v2={v2} supplierList={supplierList} getBaseCost={getBaseCost} getUnitCosts={getUnitCosts} onManageProduct={openManage}
           onOpenProduct={(id) => openProductDetail(id, "products")}
           onActivateProduct={activateProduct}
         />

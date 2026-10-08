@@ -184,11 +184,13 @@ export default function CatalogFlowModal({
   // Create steps stay mounted (display:none when inactive) so back-navigation
   // keeps typed state. Reset each render: only the active step re-registers.
   nextRef.current = null;
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={close}>
+  // TABLET-SCREEN: shell runs inline as a content-area screen (the sidebar
+  // stays visible); phone keeps the full-window Modal slide-up below.
+  const inner = (
+    <>
       <KeyboardSafeView>
       <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
-        <View style={{ flex: 1, width: IS_TABLET_DEVICE ? "100%" : undefined, maxWidth: IS_TABLET_DEVICE ? 940 : undefined, alignSelf: IS_TABLET_DEVICE ? "center" : undefined }}>
+        <View style={{ flex: 1 }}>
         <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 }}>
           <Pressable
             onPress={() => {
@@ -307,6 +309,15 @@ export default function CatalogFlowModal({
       </SafeScreen>
       </KeyboardSafeView>
       <UploadTransition visible={upBusy} phase={upPhase} title="Anrejistre pwodwi" detail={upMsg} />
+    </>
+  );
+
+  if (IS_TABLET_DEVICE) {
+    return visible ? <View style={{ flex: 1, backgroundColor: "#000" }}>{inner}</View> : null;
+  }
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={close}>
+      {inner}
     </Modal>
   );
 }

@@ -4,7 +4,7 @@
  * 2. LAN P2P sync via WebSocket hub (same WiFi, no internet)
  * 3. Local SQLite as source of truth when offline
  */
-import { getDb, getDirtyChanges, MAX_PUSH_ATTEMPTS } from "../db";
+import { getDb, getDirtyChanges, insertOutbox, MAX_PUSH_ATTEMPTS, recomputeItemCosts } from "../db";
 
 const MIDDLEWARE_URL = process.env.EXPO_PUBLIC_MIDDLEWARE_URL ?? "http://localhost:4000";
 
@@ -12,6 +12,12 @@ const MIDDLEWARE_URL = process.env.EXPO_PUBLIC_MIDDLEWARE_URL ?? "http://localho
 // used to write) so an existing device re-pulls from the epoch once instead of
 // starting from a poisoned cursor.
 const PULL_CURSOR_KEY = "pull_cursor";
+
+// Legacy categories carried text ids ("drinks") and their join rows carried
+// slugs ("dairy"). categories.id is uuid in the cloud, so a slug can never name
+// a real row — storing one only ever creates an orphan.
+const UUID_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v: any) => UUID_ID_RE.test(String(v ?? ""));
 
 // Assisted ordering tables ride whole-row upserts: the column lists are the
 // schema's, in order, so a pulled row lands complete and `dirty` clears to 0
@@ -267,6 +273,11 @@ export class SyncManager {
       // Simple LWW: overwrite if remote lamport/newer
       // For brevity, upsert directly; resolveLWW from sync-engine can be used here
       try {
+        // A join row keyed on a slug names a category that can never exist —
+        // the cloud carries those legacy rows, so refusing them here is what
+        // keeps them from coming back after the launch-time sweep.
+        if (ch.table === "category_links" && (!isUuid(r?.child_id) || !isUuid(r?.parent_id))) continue;
+        if (ch.table === "product_categories" && r?.category_id != null && !isUuid(r.category_id)) continue;
         if (ch.table === "suppliers") {
           if (r.is_deleted) {
             await db.runAsync("DELETE FROM suppliers WHERE id = ?", [r.id]);
@@ -475,6 +486,64 @@ export class SyncManager {
               vals
             );
           }
+        } else if (ch.table === "categories") {
+          // One live row per name per store (the UI enforces it). Any twin this
+          // device minted while offline — or a ghost the old id-remap pushed —
+          // must not stay: move every reference onto the surviving id and
+          // tombstone the twin, so the register stops showing it twice. The
+          // tombstone goes back out, so the cloud drops its copy too.
+          const repoint = async (fromId: string, toId: string) => {
+            await db.runAsync("UPDATE products SET category_id = ? WHERE category_id = ?", [toId, fromId]);
+            // A product already linked to both would violate the pair key.
+            await db.runAsync(
+              "DELETE FROM product_categories WHERE category_id = ? AND product_id IN (SELECT product_id FROM product_categories WHERE category_id = ?)",
+              [fromId, toId]
+            );
+            await db.runAsync("UPDATE product_categories SET category_id = ? WHERE category_id = ?", [toId, fromId]);
+            await db.runAsync("UPDATE category_links SET child_id = ? WHERE child_id = ?", [toId, fromId]);
+            await db.runAsync("UPDATE category_links SET parent_id = ? WHERE parent_id = ?", [toId, fromId]);
+          };
+          const nm = String(r.name ?? "").trim().toLowerCase();
+          const keepId = String(r.id ?? "");
+          if (nm && keepId) {
+            const twins = ((await db.getAllAsync(
+              "SELECT id FROM categories WHERE lower(trim(name)) = ? AND id <> ? AND (is_deleted = 0 OR is_deleted IS NULL)",
+              [nm, keepId]
+            ).catch(() => [])) as any[]) ?? [];
+            for (const t of twins) {
+              const tid = String(t.id);
+              try {
+                if (r.is_deleted) {
+                  // Cloud dropped this one (the 022 dedupe, or a rename elsewhere):
+                  // its references belong to the live twin under the same name.
+                  await repoint(keepId, tid);
+                  console.log(`[pull] category tombstone ${keepId} handed to ${tid}`);
+                } else {
+                  await repoint(tid, keepId);
+                  const tnow = new Date().toISOString();
+                  await db.runAsync("UPDATE categories SET is_deleted = 1, updated_at = ?, dirty = 1 WHERE id = ?", [tnow, tid]);
+                  const trow = ((await db.getAllAsync("SELECT * FROM categories WHERE id = ?", [tid]).catch(() => [])) as any[])?.[0];
+                  if (trow) {
+                    await insertOutbox("categories", "update", {
+                      id: tid, store_id: trow.store_id ?? r.store_id ?? null, name: trow.name ?? null,
+                      icon: trow.icon ?? null, updated_at: tnow, is_deleted: 1,
+                    }, db);
+                  }
+                  console.log(`[pull] category twin folded into ${keepId}:`, tid);
+                }
+              } catch (e) { console.warn("[pull] category twin merge failed:", tid, e); }
+            }
+          }
+          const ccols = CORE_SYNC_COLUMNS["categories"];
+          const cvals = ccols.map((c) => {
+            if (c === "dirty") return 0;
+            const v = r[c] ?? null;
+            return typeof v === "boolean" ? (v ? 1 : 0) : v;
+          });
+          await db.runAsync(
+            `INSERT OR REPLACE INTO categories (${ccols.join(",")}) VALUES (${ccols.map(() => "?").join(",")})`,
+            cvals
+          );
         } else if (CORE_SYNC_COLUMNS[ch.table]) {
           // Core rows: whole-row upsert keyed on id (see CORE_SYNC_COLUMNS).
           // Never hard-delete here: a soft-deleted cloud row stays as a local
@@ -493,6 +562,29 @@ export class SyncManager {
         // ... similar for other tables
       } catch (e) { console.warn("apply error", e); }
     }
+    // A pulled batch/quote row is a new fact about what the product cost:
+    // republish the affected products' unit costs now, or items.cost stays
+    // stale until the next launch (batches are the cost source of truth —
+    // see recomputeItemCosts).
+    try {
+      const pids = new Set<string>();
+      for (const ch of changes) {
+        const r = ch?.record;
+        if (ch?.table === "batches" && r?.item_id) pids.add(String(r.item_id));
+        if (ch?.table === "product_supplier_costs" && r?.product_id) pids.add(`p:${String(r.product_id)}`);
+      }
+      const itemIds = [...pids].filter(x => !x.startsWith("p:"));
+      const direct = [...pids].filter(x => x.startsWith("p:")).map(x => x.slice(2));
+      const fromItems = itemIds.length
+        ? (((await db.getAllAsync(
+            `SELECT DISTINCT product_id FROM items WHERE id IN (${itemIds.map(() => "?").join(",")})`,
+            itemIds
+          ).catch(() => [])) ?? []) as any[]).map((x: any) => String(x.product_id))
+        : [];
+      for (const pid of [...new Set([...direct, ...fromItems])]) {
+        try { await recomputeItemCosts(db, pid); } catch {}
+      }
+    } catch (e) { console.warn("pull recompute", e); }
   }
 
   // LAN P2P — connect to hub WebSocket (main register or middleware)

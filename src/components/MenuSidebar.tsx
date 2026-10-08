@@ -110,6 +110,7 @@ export function MenuSidebar({
   onOpenStore,
   onOpenTeam,
   onOpenShift,
+  openOverlay,
   onLogout,
 }: {
   role: string;
@@ -130,6 +131,8 @@ export function MenuSidebar({
   onOpenStore: () => void;
   onOpenTeam: () => void;
   onOpenShift: () => void;
+  /** Overlay currently masking the body (Team / Shift) — that row is the active one. */
+  openOverlay?: "team" | "shift" | null;
   onLogout: () => void;
 }) {
   const insets = useSafeAreaInsets();
@@ -307,7 +310,8 @@ export function MenuSidebar({
   }
   if (moun.length) sections.push({ header: "Moun", rows: moun });
 
-  // ZOUTI — overlays (nothing stays "active": they float above the content).
+  // ZOUTI — overlays. They float above the body: while one is open it lights
+  // its own row and masks every other active row (see overlayRow below).
   const zouti: Row[] = [];
   if (roleHas("shift")) {
     zouti.push({
@@ -324,6 +328,12 @@ export function MenuSidebar({
     zouti.push({ key: "store", title: titleOf("store"), subtitle: subOf("store"), icon: iconOf("store"), onPress: onOpenStore });
   }
   if (zouti.length) sections.push({ header: "Zouti", rows: zouti });
+
+  // An overlay (Team / Shift) replaces the body area: while it is open, exactly
+  // one row reads as selected — the overlay's own — so the tool/tab row behind
+  // it (e.g. Katalòg) must not stay highlighted.
+  const overlayRow = openOverlay === "team" ? "staff" : openOverlay === "shift" ? "shift" : null;
+  if (overlayRow) for (const s of sections) for (const r of s.rows) r.active = r.key === overlayRow;
 
   // No footer rows anymore — Dekonekte lives in the profile sheet (tap the
   // avatar) and the owner-only catalog wipe stays on the phone's Plis list.

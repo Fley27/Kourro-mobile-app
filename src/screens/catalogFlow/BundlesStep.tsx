@@ -7,7 +7,7 @@ import { View, Text, Pressable, TextInput, ScrollView, Alert } from "react-nativ
 import { Ionicons } from "@expo/vector-icons";
 import { getDb, insertOutbox } from "../../db";
 import { useSalesEvents } from "../../salesEvents";
-import { fmtG } from "../../format";
+import { fmt, fmtG } from "../../format";
 import type { Item, Variant } from "../../catalogModel";
 import { currentBundlePrice, upsertBundleRow } from "../../catalogModel";
 import { formatCheckoutRow } from "../../labels";
@@ -181,7 +181,7 @@ export default function BundlesStep({
               <View style={{ flex: 1 }}>
                 <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }} numberOfLines={1}>{bundleLabel(b)}</Text>
                 <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 2 }}>
-                  min {fmtG(Number(b.min_quantity) || 0)} → {live ? fmtG(Number(live.price)) : "—"}
+                  min {fmt(Number(b.min_quantity) || 0)} → {live ? fmtG(Number(live.price)) : "—"}
                 </Text>
               </View>
               {canEdit ? (

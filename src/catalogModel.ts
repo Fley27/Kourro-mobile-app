@@ -437,8 +437,10 @@ export function latestReceivedBatch(batches: Batch[], itemId: string): Batch | n
 }
 
 /**
- * Current base-unit cost for a product: latest received batch across its
- * items, converted down to base units. 0 when nothing received yet.
+ * Current base-unit cost for a product: the newest pending batch across its
+ * items (the delivery just entered is the freshest price — same rule as
+ * itemUnitCosts), else the latest received batch, converted down to base
+ * units. 0 when no priced batch yet.
  * (Replaces the dropped products.cost_price — same call shape, new source.)
  */
 export function currentBaseCost(
@@ -447,19 +449,21 @@ export function currentBaseCost(
   productId: string
 ): number {
   const items = itemsForProduct(allItems, productId);
-  let best: { date: string; created: string; base: number } | null = null;
-  for (const it of items) {
-    const b = latestReceivedBatch(batches, it.id);
-    if (!b || !(Number(b.quantity) > 0)) continue;
-    const f = itemFactor(allItems, it.id);
-    if (!(f > 0)) continue;
-    const base = Number(b.total_paid) / Number(b.quantity) / f;
-    const key = `${b.date} ${b.created_at ?? ""}`;
-    if (!best || key > `${best.date} ${best.created}`) {
-      best = { date: b.date, created: b.created_at ?? "", base };
-    }
-  }
-  return best ? Math.max(0, best.base) : 0;
+  const ids = new Set(items.map(i => i.id));
+  const live = (batches as Batch[]).filter(b =>
+    b && !b.is_deleted && ids.has(b.item_id) &&
+    Number(b.quantity) > 0 && Number(b.total_paid) > 0
+  );
+  const byRecency = (a: Batch, b: Batch) =>
+    String(b.date ?? "").localeCompare(String(a.date ?? "")) ||
+    String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""));
+  const pend = live.filter(b => b.status === "pending").sort(byRecency);
+  const pool = pend.length ? pend : live.filter(b => b.status === "received").sort(byRecency);
+  const b = pool[0];
+  if (!b) return 0;
+  const f = itemFactor(allItems, b.item_id);
+  if (!(f > 0)) return 0;
+  return Math.max(0, Number(b.total_paid) / Number(b.quantity) / f);
 }
 
 /** Cost at a specific item level, derived from the base cost. */
@@ -729,7 +733,12 @@ export async function receiveV2Batch(
     }
     await db.runAsync("UPDATE batches SET status = ?, received_by = ?, received_at = ?, updated_at = ?, dirty = 1 WHERE id = ?",
       ["received", args.receivedBy, now, now, args.batchId]);
-    try { await insertOutbox("batches", "update", { id: args.batchId, status: "received", received_by: args.receivedBy, received_at: now, ...(extra > 0 ? { extra_total: extra } : {}), updated_at: now, is_deleted: 0 }); } catch {}
+    // Push the WHOLE row, not a patch: the old payload carried `extra_total`
+    // (no such server column), so the record bounced and neither the receive
+    // nor the folded extra ever reached the cloud — the next pull reverted
+    // status AND total_paid locally.
+    const rw = (((await db.getAllAsync("SELECT * FROM batches WHERE id = ?", [args.batchId]).catch(() => [])) ?? []) as any[]);
+    if (rw[0]) { try { await insertOutbox("batches", "update", { ...rw[0], is_deleted: false }); } catch {} }
     await db.runAsync("UPDATE products SET stock_quantity = ?, updated_at = ?, dirty = 1 WHERE id = ?",
       [newTotal, now, args.productId]);
     try { await insertOutbox("products", "update", { id: args.productId, stock_quantity: newTotal, updated_at: now, is_deleted: 0 }); } catch {}

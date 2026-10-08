@@ -99,6 +99,15 @@ export function GlobalUploadTransition({ overlay }: { overlay?: boolean } = {}) 
   return <UploadTransition overlay={overlay} visible={s.visible} phase={s.phase} title={s.title} detail={s.detail} />;
 }
 
+/**
+ * True while a global uploadSuccess/uploadError toast is on screen. A toast is
+ * its own RN <Modal>, so anything else that has to present a Modal (the POS
+ * receipt) must wait for it — iOS silently drops the second presentation.
+ */
+export function useUploadNotifyVisible(): boolean {
+  return useSyncExternalStore(subscribeNotify, getNotifyState, getNotifyState).visible;
+}
+
 export function UploadTransition({ visible, phase, title, detail, overlay }: {
   visible: boolean;
   phase: UploadPhase;

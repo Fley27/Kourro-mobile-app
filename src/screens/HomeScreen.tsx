@@ -82,6 +82,7 @@ export default function HomeScreen({
       role={role}
       currentUser={currentUser}
       storeId={storeId}
+      storeName={name}
       showBack={false}
     />
   );

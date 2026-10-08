@@ -537,6 +537,14 @@ async function openDb(): Promise<any> {
           if (n) console.log(`[migrate] sale_item ids -> uuid: ${n} row(s)`);
         }
       } catch (e) { console.log("[migrate] sale_item id remap skipped:", String(e)); }
+      // --- every launch: legacy text category ids ("drinks") can never insert
+      // into the cloud's uuid column — they bounce, then get dropped (the
+      // "[sync] dropping record … categories" toast) and never sync. Re-key or
+      // fold them into their twin; idempotent, so no _meta flag needed.
+      try {
+        const n = await repairLegacyCategoryIds(db);
+        if (n) console.log(`[migrate] legacy category ids repaired: ${n} row(s)`);
+      } catch (e) { console.log("[migrate] legacy category ids skipped:", String(e)); }
       // --- demo customers/credits (credit flows need them; independent of catalog) ---
       try {
         const existing = await db.getAllAsync("SELECT id FROM customers LIMIT 1").catch(() => []);
@@ -2041,11 +2049,12 @@ async function openDb(): Promise<any> {
 /**
  * Persist each item's unit cost (items.cost) and queue it for upload.
  *
- * The price comes from itemCostsFor: the item's own received batches first,
- * else its supplier quote, else a cost already stored for it — then the ratio
- * chain prices the rest of the product (smaller divides, bigger multiplies).
- * When nothing can be derived the stored cost is left untouched (that is the
- * owner's own figure, typed in by hand).
+ * The price comes from itemCostsFor: the item's newest pending batch first
+ * (the delivery just entered prices everything), else its own received
+ * batches, else its supplier quote, else a cost already stored for it — then
+ * the ratio chain prices the rest of the product (smaller divides, bigger
+ * multiplies). When nothing can be derived the stored cost is left untouched
+ * (that is the owner's own figure, typed in by hand).
  *
  * Idempotent and cheap, so it runs on every launch, after every batch is
  * received/saved, and after every item edit. Returns how many rows changed.
@@ -2120,6 +2129,95 @@ export async function remapNonUuidSaleItemIds(db: any): Promise<number> {
     }, db);
     changed++;
   }
+  return changed;
+}
+
+const UUID_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Legacy categories carried text ids ("drinks"). The cloud column is uuid, so
+ * those rows bounce on every push (`invalid input syntax for type uuid`),
+ * retry MAX_PUSH_ATTEMPTS times and get dropped — that is the
+ * "[sync] dropping record … categories drinks" toast, and the category itself
+ * never leaves the device.
+ *
+ * Re-key the row when no twin exists; when the same name already lives under a
+ * real uuid (the copy the cloud sent down), move every reference onto it and
+ * drop the legacy row. Also purges outbox records whose id can never insert.
+ * Cheap (one small table) and idempotent, so it runs on every launch.
+ */
+export async function repairLegacyCategoryIds(db: any): Promise<number> {
+  const run = async (sql: string, params: any[] = []) => {
+    try { return await db.runAsync(sql, params); } catch { return null; }
+  };
+  const rows = ((await db.getAllAsync("SELECT * FROM categories").catch(() => [])) as any[]) ?? [];
+  const twinByName = new Map<string, any>();
+  for (const r of rows) {
+    if (r.is_deleted || !UUID_ID_RE.test(String(r.id))) continue;
+    const k = String(r.name ?? "").trim().toLowerCase();
+    if (k && !twinByName.has(k)) twinByName.set(k, r);
+  }
+  let changed = 0;
+  for (const r of rows) {
+    if (UUID_ID_RE.test(String(r.id))) continue;
+    const k = String(r.name ?? "").trim().toLowerCase();
+    const twin = k ? twinByName.get(k) : null;
+    const now = new Date().toISOString();
+    if (twin) {
+      const keepId = String(twin.id);
+      await run("UPDATE products SET category_id = ? WHERE category_id = ?", [keepId, r.id]);
+      await run(
+        "DELETE FROM product_categories WHERE category_id = ? AND product_id IN (SELECT product_id FROM product_categories WHERE category_id = ?)",
+        [r.id, keepId]
+      );
+      await run("UPDATE product_categories SET category_id = ? WHERE category_id = ?", [keepId, r.id]);
+      await run("UPDATE category_links SET child_id = ? WHERE child_id = ?", [keepId, r.id]);
+      await run("UPDATE category_links SET parent_id = ? WHERE parent_id = ?", [keepId, r.id]);
+      // The legacy row was never accepted by the cloud (uuid column), so there
+      // is nothing to tombstone remotely — drop it locally.
+      await run("DELETE FROM categories WHERE id = ?", [r.id]);
+      console.log(`[migrate] legacy category "${r.name}" folded into ${keepId}`);
+      changed++;
+    } else {
+      const newId = mintId();
+      await run("UPDATE products SET category_id = ? WHERE category_id = ?", [newId, r.id]);
+      await run(
+        "DELETE FROM product_categories WHERE category_id = ? AND product_id IN (SELECT product_id FROM product_categories WHERE category_id = ?)",
+        [r.id, newId]
+      );
+      await run("UPDATE product_categories SET category_id = ? WHERE category_id = ?", [newId, r.id]);
+      await run("UPDATE category_links SET child_id = ? WHERE child_id = ?", [newId, r.id]);
+      await run("UPDATE category_links SET parent_id = ? WHERE parent_id = ?", [newId, r.id]);
+      const res = await run("UPDATE categories SET id = ?, updated_at = ? WHERE id = ?", [newId, now, r.id]);
+      if (res && Number((res as any).changes ?? 1) === 0) continue;
+      twinByName.set(k, { ...r, id: newId });
+      try {
+        await insertOutbox("categories", "create", {
+          id: newId, store_id: r.store_id, name: r.name, icon: r.icon ?? null, color: r.color ?? null,
+          sort_order: r.sort_order ?? null, created_at: r.created_at ?? now, updated_at: now, is_deleted: 0,
+        }, db);
+      } catch {}
+      changed++;
+    }
+  }
+  // Outbox rows the uuid column will always reject — they burn 8 attempts and
+  // then drop, one toast each.
+  try {
+    const ob = ((await db.getAllAsync("SELECT id, payload FROM outbox WHERE table_name = 'categories'").catch(() => [])) as any[]) ?? [];
+    for (const o of ob) {
+      try {
+        const p = JSON.parse(String(o.payload ?? "{}"));
+        if (p && p.id != null && !UUID_ID_RE.test(String(p.id))) await run("DELETE FROM outbox WHERE id = ?", [o.id]);
+      } catch {}
+    }
+  } catch {}
+  // Join rows keyed on a slug ("dairy"): they name a category that can never
+  // exist (the cloud column is uuid) and the cloud carries them too, so they
+  // would come straight back on the next pull. Any link a legacy category row
+  // owned was re-pointed above — these are pure orphans.
+  const uuidGlob = "[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-*";
+  await run("DELETE FROM product_categories WHERE category_id NOT GLOB ?", [uuidGlob]);
+  await run("DELETE FROM category_links WHERE child_id NOT GLOB ? OR parent_id NOT GLOB ?", [uuidGlob, uuidGlob]);
   return changed;
 }
 

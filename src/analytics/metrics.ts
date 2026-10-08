@@ -11,8 +11,9 @@
 // Items never appear as a dimension: they only feed a variant's cost.
 //
 // Cost honesty: there is NO margin heuristic here. Every per-unit cost starts
-// from ONE item's own anchor — its received batches (Σ total_paid / Σ quantity
-// for that item alone), else that item's supplier quote, else the cost the
+// from ONE item's own anchor — its newest pending batch (the delivery just
+// entered), else its received batches (Σ total_paid / Σ quantity for that
+// item alone), else that item's supplier quote, else the cost the
 // owner typed in (items.cost) — and then walks the item's OWN ratio chain so
 // one known price tags every container of that product (a child is `ratio ×`
 // its reference: smaller divides, bigger multiplies). Costs are NEVER pooled
@@ -64,24 +65,46 @@ export function salesInRange(sales: any[], range: RangeKey, now: number): any[] 
 
 export type CostCoverage = { withCost: number; total: number; pct: number };
 
-/** Per-item unit cost — Σ(total_paid) / Σ(quantity) over ONE item's own
- *  received batches. A batch session records many items, each with its own
- *  quantity and its own total_paid: those are NEVER summed or averaged with
- *  each other (or with any other item in the catalog). 0 = no batch history. */
+/** Per-item unit cost — the NEWEST pending batch's rate for that item (the
+ *  delivery just entered is the freshest price and must price the whole
+ *  chain as soon as it is saved), else Σ(total_paid) / Σ(quantity) over ONE
+ *  item's own received batches (receive-time transport included — any update
+ *  to either re-prices every container of the product). A batch session
+ *  records many items, each with its own quantity and its own total_paid:
+ *  those are NEVER summed or averaged with each other (or with any other item
+ *  in the catalog). 0 = no batch history. */
 export function itemUnitCosts(batches: Batch[]): Map<string, number> {
   const agg = new Map<string, { paid: number; qty: number }>();
+  const pend = new Map<string, any>();
+  // Newest first — same recency rule BatchWizard/PricesStep use.
+  const byRecency = (a: any, b: any) =>
+    String(b.date ?? "").localeCompare(String(a.date ?? "")) ||
+    String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""));
   for (const b of batches as any[]) {
     if (!b || b.is_deleted) continue;
-    if (String(b.status ?? "") !== "received") continue;
+    const st = String(b.status ?? "");
+    if (st !== "received" && st !== "pending") continue;
     const qty = Number(b.quantity ?? 0);
     if (!(qty > 0)) continue;
-    const g = agg.get(String(b.item_id)) ?? { paid: 0, qty: 0 };
-    g.paid += Number(b.total_paid ?? 0);
-    g.qty += qty;
-    agg.set(String(b.item_id), g);
+    const id = String(b.item_id);
+    if (st === "pending") {
+      const cur = pend.get(id);
+      if (!cur || byRecency(cur, b) > 0) pend.set(id, b);
+    } else {
+      const g = agg.get(id) ?? { paid: 0, qty: 0 };
+      g.paid += Number(b.total_paid ?? 0);
+      g.qty += qty;
+      agg.set(id, g);
+    }
   }
   const out = new Map<string, number>();
   for (const [id, g] of agg) out.set(id, g.qty > 0 ? g.paid / g.qty : 0);
+  // A pending delivery overrides the received history for its own item:
+  // what you just entered is what everything chains from.
+  for (const [id, b] of pend) {
+    const rate = Number(b.total_paid ?? 0) / Number(b.quantity ?? 0);
+    if (rate > 0) out.set(id, rate);
+  }
   return out;
 }
 
@@ -179,8 +202,9 @@ function chainInLayers(items: Item[], layers: Map<string, number>[]): Map<string
 }
 
 /** What the product's containers cost, derived — no stored values read:
- *  own received batches first, then supplier quotes where a purchase never
- *  landed, each spread by the ratio chain across every item of the product. */
+ *  own batches (newest pending first, else received), then supplier quotes
+ *  where a purchase never landed, each spread by the ratio chain across
+ *  every item of the product. */
 export function deriveItemCosts(
   items: Item[], batches: Batch[], costRows: SupplierCostRow[]
 ): Map<string, number> {

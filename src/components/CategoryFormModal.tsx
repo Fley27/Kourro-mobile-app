@@ -457,9 +457,11 @@ export default function CategoryFormModal({
       const db = await getDb();
       const now = new Date().toISOString();
       const oldId = editCategory.id;
-      const taken = new Set(dbCats.map(c => c.id));
-      taken.delete(oldId);
-      const newId = uniqueSlug(slugify(exName.trim()), taken);
+      // The id NEVER changes on an edit. Re-keying here made every save push
+      // update(oldId) + update(newId); the cloud has no row for the fresh id,
+      // so sync.ts inserts it and the same name exists twice — then the pull
+      // hands that twin to every register ("kategori sove de fwa").
+      const newId = oldId;
       const finalParents = [...exParents];
       // Cycle check on the rewritten graph (old edges out, new edges in).
       const edges = (allLinks ?? [])
@@ -478,17 +480,6 @@ export default function CategoryFormModal({
         try {
           await insertOutbox("categories", "update", { id: oldId, store_id: storeId, name: exName.trim(), icon: exIcon, updated_at: now, is_deleted: 0 });
         } catch {}
-        if (newId !== oldId) {
-          // ID remap: the rename changes the slug, so every reference moves.
-          await db.runAsync("UPDATE categories SET id = ? WHERE id = ?", [newId, oldId]);
-          await db.runAsync("UPDATE products SET category_id = ? WHERE category_id = ?", [newId, oldId]);
-          await db.runAsync("UPDATE product_categories SET category_id = ? WHERE category_id = ?", [newId, oldId]);
-          await db.runAsync("UPDATE category_links SET child_id = ? WHERE child_id = ?", [newId, oldId]);
-          await db.runAsync("UPDATE category_links SET parent_id = ? WHERE parent_id = ?", [newId, oldId]);
-          try {
-            await insertOutbox("categories", "update", { id: newId, store_id: storeId, name: exName.trim(), icon: exIcon, updated_at: now, is_deleted: 0 });
-          } catch {}
-        }
         const oldSet = new Set(editParentIds ?? []);
         const newSet = new Set(finalParents);
         for (const pid of finalParents) {

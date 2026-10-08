@@ -342,6 +342,10 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
         const { insertOutbox } = await import("../db");
         await insertOutbox("batches", "update", { id: String(m.line.batch.id), quantity: qty, total_paid: total, reason: note || null, updated_at: now, is_deleted: false });
       } catch {}
+      try {
+        const { recomputeItemCosts } = await import("../db");
+        await recomputeItemCosts(db, m.line.productId);
+      } catch {}
       setLineModal(null);
       await load();
     } catch (e: any) {
@@ -366,6 +370,10 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
       try {
         const { insertOutbox } = await import("../db");
         await insertOutbox("batches", "update", { id: String(m.line.batch.id), status: "denied", denied_by: by, denied_at: now, reason: eReason.trim(), updated_at: now, is_deleted: false });
+      } catch {}
+      try {
+        const { recomputeItemCosts } = await import("../db");
+        await recomputeItemCosts(db, m.line.productId);
       } catch {}
       setLineModal(null);
       await load();

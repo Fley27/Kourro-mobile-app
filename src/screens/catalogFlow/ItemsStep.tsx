@@ -73,12 +73,6 @@ export default function ItemsStep({
   const [batches, setBatches] = useState<any[]>([]);
   const [costRows, setCostRows] = useState<any[]>([]);
   const [variants, setVariants] = useState<any[]>([]);
-  // Purchase cost — required: a product whose containers have no cost at all
-  // cannot save anything until the owner types one (it anchors the chain).
-  const [costInput, setCostInput] = useState("");
-  const [costTouched, setCostTouched] = useState(false);
-  // Cost entered before the product has its first item yet (create flow).
-  const [pendingCost, setPendingCost] = useState<number | null>(null);
   // Open form fields.
   const [name, setName] = useState("");
   const [refId, setRefId] = useState<string | null>(null);
@@ -140,55 +134,6 @@ export default function ItemsStep({
   // The product's cost map — the exact maths the analytics screen reads
   // (own batch, else supplier quote, else stored cost, then the ratio chain).
   const costs = useMemo(() => itemCostsFor(items, batches, costRows), [items, batches, costRows]);
-  // Not one container of this product is priced yet → the owner has to type a
-  // purchase cost; it anchors the chain and every sibling inherits from it.
-  const needsCost = pendingCost == null && !items.some(i => Number(costs.get(String(i.id)) ?? 0) > 0);
-  const costValue = parseFloat(String(costInput).replace(/[^\d.]/g, "")) || 0;
-  const costError = needsCost && costTouched && !(costValue > 0)
-    ? "Bay kout acha a (G) — obligatwa."
-    : "";
-
-  /** Hard gate: while the product has no cost at all, nothing may save. */
-  function costBlock(): boolean {
-    if (!needsCost) return false;
-    setCostTouched(true);
-    Alert.alert("Pa gen pri acha", "Chak inite dwe gen yon kout acha. Bay kout la anvan kontinye.");
-    return true;
-  }
-
-  /** Store the typed cost: onto the first item when one exists, otherwise
-   *  held for the first item this step writes (create flow). */
-  async function saveManualCost() {
-    if (!(costValue > 0)) { setCostTouched(true); return; }
-    if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
-    setBusy(true);
-    try {
-      const db = await getDb();
-      const now = new Date().toISOString();
-      const target = items[0];
-      if (target) {
-        await db.runAsync("UPDATE items SET cost = ?, updated_at = ?, dirty = 1 WHERE id = ?", [costValue, now, target.id]);
-        try {
-          await insertOutbox("items", "update", {
-            id: target.id, product_id: String(target.product_id), name: String(target.name ?? ""),
-            ref_item_id: target.ref_item_id ?? null, ratio: target.ratio ?? null,
-            sort_order: Number(target.sort_order ?? 0), cost: costValue,
-            created_at: target.created_at ?? now, updated_at: now, is_deleted: false,
-          });
-        } catch {}
-        await recomputeItemCosts(db, productId);
-      } else {
-        setPendingCost(costValue);
-      }
-      setCostInput(""); setCostTouched(false);
-      await load();
-      ctx.reload();
-    } catch (e: any) {
-      uploadError("Erè", e?.message ?? "Kout acha a pa sove");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   function refName(refIdVal: string | null, refKeyVal: string | null): string {
     if (refKeyVal) return staged.find(s => s.key === refKeyVal)?.name ?? "?";
@@ -341,7 +286,6 @@ export default function ItemsStep({
     }
     if (busy) return;
     if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
-    if (costBlock()) return;
     setBusy(true);
     try {
       const db = await getDb();
@@ -350,19 +294,15 @@ export default function ItemsStep({
       const ordered = orderStaged(pending);
       const keyToId = new Map<string, string>();
       let order = items.length;
-      let first = true;
       for (const s of ordered) {
         // First-ever item (no saved, first staged, no ref) becomes base.
         const isFirstEver = items.length === 0 && order === 0 && !s.refId && !s.refKey;
         const id = await insertStagedRow(db, now, taken, isFirstEver ? 0 : order,
           isFirstEver ? { ...s, refId: null, refKey: null } : s, keyToId,
-          // A cost typed before the first item existed anchors this chain.
-          first ? pendingCost : null);
+          null);
         keyToId.set(s.key, id);
         order++;
-        first = false;
       }
-      if (pendingCost != null) setPendingCost(null);
       // Chain the product's known cost into whatever was just written.
       try { await recomputeItemCosts(db, productId); } catch {}
       setStaged([]);
@@ -384,7 +324,6 @@ export default function ItemsStep({
     void err;
     if (!openValid || busy) { setTouched(true); if (openError) Alert.alert("Enkonplè", openError); return; }
     if (!canManageCatalog(ctx.role)) { Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè."); return; }
-    if (costBlock()) return;
     setBusy(true);
     try {
       const db = await getDb();
@@ -397,7 +336,7 @@ export default function ItemsStep({
         id, product_id: productId, name: name.trim(),
         ref_item_id: first ? null : refId,
         ratio: first ? null : ratioFor(relation, q),
-        sort_order: items.length, cost: Number(pendingCost) || 0,
+        sort_order: items.length, cost: 0,
         created_at: now, updated_at: now, is_deleted: 0,
       };
       await db.runAsync(
@@ -405,7 +344,6 @@ export default function ItemsStep({
         [rec.id, rec.product_id, rec.name, rec.ref_item_id, rec.ratio, rec.sort_order, rec.cost, rec.created_at, rec.updated_at, 0, 1]
       );
       try { await insertOutbox("items", "create", { ...rec, is_deleted: false }); } catch {}
-      if (pendingCost != null) setPendingCost(null);
       try { await recomputeItemCosts(db, productId); } catch {}
       setName(""); setQty(""); setTouched(false);
       await load();
@@ -492,7 +430,6 @@ export default function ItemsStep({
     if (!editingItem) return;
     if (!editValid) { setEditTouched(true); if (editError) Alert.alert("Enkonplè", editError); return; }
     if (editLocked && !editOverride) { setEditTouched(true); return; }
-    if (costBlock()) return;
     setBusy(true);
     try {
       const db = await getDb();
@@ -550,31 +487,6 @@ export default function ItemsStep({
   return (
     <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
       {productName ? <Text style={{ fontSize: 12, color: "#8e8e93" }}>{productName} · {items.length + staged.length} inite</Text> : null}
-
-      {/* Hard gate: a product with no purchase cost anywhere must get one
-          before anything here can be saved or uploaded. */}
-      {needsCost ? (
-        <View style={{ borderWidth: 1, borderColor: "#f0a63c", borderRadius: 16, padding: 14, gap: 10, backgroundColor: "rgba(240,166,60,0.08)" }}>
-          <Text style={{ fontWeight: "800", fontSize: 13, color: "#f0a63c" }}>Kout acha obligatwa</Text>
-          <Text style={{ fontSize: 12, color: "#9a9a9e", lineHeight: 17 }}>
-            Okenn inite nan pwodui sa a pa gen pri acha ankò. Bay kout 1 inite a (G) — tout lòt inite yo ap pran pri l nan rapò a.
-          </Text>
-          <TextInput
-            value={costInput}
-            onChangeText={v => { setCostTouched(true); setCostInput(v); }}
-            placeholder="ex. 4350" placeholderTextColor="#636366" keyboardType="decimal-pad"
-            style={{ height: 56, borderWidth: 1, borderColor: costError ? "#e06c5b" : "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 15, color: "#fff", backgroundColor: "transparent" }}
-          />
-          {costError ? <Text style={{ fontSize: 12, color: "#e06c5b" }}>{costError}</Text> : null}
-          <Pressable
-            onPress={saveManualCost}
-            disabled={busy}
-            style={{ paddingVertical: 13, borderRadius: 12, backgroundColor: costValue > 0 && !busy ? "#f0a63c" : "#2b2b2b", alignItems: "center" }}
-          >
-            <Text style={{ fontWeight: "800", fontSize: 13, color: costValue > 0 && !busy ? "#000" : "#636366" }}>Sove kout la</Text>
-          </Pressable>
-        </View>
-      ) : null}
 
       {/* Saved rows — tap pencil for the FULL unit form */}
       {items.map(it => {

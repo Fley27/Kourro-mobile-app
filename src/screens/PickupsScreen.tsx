@@ -13,8 +13,13 @@ import { View, Text, Pressable, ScrollView, TextInput, Alert } from "react-nativ
 import { Ionicons } from "@expo/vector-icons";
 import { fmt, monoStyle } from "../format";
 import { useResponsive } from "../responsive";
+import { radius, shadow } from "../theme";
 import { useSalesEvents } from "../salesEvents";
 import { listOpenPickups, findSaleForPickup, recordPickup, remainingOf, toNum } from "../pickup-staging/store";
+import type { PickupReceiptLine } from "../pickup-staging/receipt";
+import { buildReceipts, receiptItemsFrom, receiptLineLabels, PAYMENT_LABELS } from "../receipts";
+import ReceiptModal from "../components/ReceiptModal";
+import { getDb } from "../db";
 import { uploadError } from "../components/UploadTransition";
 import { saleLineLabel } from "../labels";
 import { SkeletonCardRow } from "../components/Skeleton";
@@ -57,12 +62,14 @@ export default function PickupsScreen({
   role = "cashier",
   currentUser,
   storeId,
+  storeName = "",
   onBack,
   showBack = true,
 }: {
   role?: string;
   currentUser?: any;
   storeId: string;
+  storeName?: string;
   onBack?: () => void;
   /** false when this screen IS the home (tab root) — no back chevron. */
   showBack?: boolean;
@@ -77,6 +84,9 @@ export default function PickupsScreen({
   const [detail, setDetail] = useState<Detail | null>(null);
   const [taken, setTaken] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  // Green receipt shown after a pickup — bought / taken / remaining.
+  const [receipt, setReceipt] = useState<{ customer: any; store: any } | null>(null);
+  const [pickupLines, setPickupLines] = useState<PickupReceiptLine[]>([]);
   const loadedOnce = useRef(false);
 
   const load = useCallback(async () => {
@@ -156,16 +166,86 @@ export default function PickupsScreen({
       setDetail(again);
       setTaken({});
       await load();
+      await showBalanceReceipt(again);
     } catch (e: any) {
       uploadError("Pa anrejistre", e?.message ?? String(e));
     } finally { setSaving(false); }
   }
 
-  // --- detail ---------------------------------------------------------------
-  if (detail) {
+  // The customer leaves with the same numbers as the printed pickup receipt:
+  // Achte / Pran / Rete per product, plus the normal sale receipt around them.
+  async function showBalanceReceipt(fresh: Detail | null) {
+    try {
+      const items = fresh?.items ?? [];
+      if (!fresh || !items.length) return;
+      const db = await getDb();
+      const labels = await receiptLineLabels(db, items);
+      const lines: PickupReceiptLine[] = items.map((it: any, i: number) => {
+        const bought = toNum(it.quantity);
+        const delivered = toNum(it.quantity_delivered ?? bought);
+        return {
+          name: labels[i] ?? saleLineLabel(it),
+          bought,
+          taken: Math.round(delivered * 100) / 100,
+          remaining: Math.max(0, Math.round(remainingOf(it) * 100) / 100),
+          unitPrice: Number(it.unit_price ?? 0) || undefined,
+          lineTotal: Number(it.line_total ?? 0) || undefined,
+        };
+      });
+      const s = fresh.sale;
+      const total = Number(s.total ?? 0);
+      const amountPaid = Number(s.amount_paid ?? total);
+      const pm = String(s.payment_method ?? "cash");
+      const credits = ((await db.getAllAsync("SELECT * FROM credits WHERE sale_id = ?", [s.id]).catch(() => [])) as any[]) ?? [];
+      setPickupLines(lines);
+      setReceipt(buildReceipts({
+        saleId: String(s.id),
+        saleNumber: String(s.sale_number ?? s.id),
+        storeName: storeName || "Jesyon Magazen",
+        createdAt: s.created_at ?? new Date().toISOString(),
+        cashier: {
+          id: currentUser?.id ?? null,
+          name: String(currentUser?.name ?? role),
+          role: String(currentUser?.role ?? role),
+        },
+        customer: fresh.customer
+          ? {
+              name: fresh.customer.name ?? "",
+              idCard: fresh.customer.id_card_number ?? null,
+              phone: fresh.customer.phone ?? null,
+              email: fresh.customer.email ?? null,
+            }
+          : null,
+        customerId: s.customer_id ?? null,
+        items: await receiptItemsFrom(db, items),
+        subtotal: Number(s.subtotal ?? total),
+        discount: Number(s.discount ?? 0),
+        total,
+        paymentMethod: pm,
+        amountPaid,
+        amountDue: Number(s.amount_due ?? 0),
+        change: pm === "cash" ? Math.max(0, amountPaid - total) : 0,
+        dueDate: credits.length ? (credits[0].due_date ?? null) : null,
+      }));
+    } catch {} // receipt is a nicety — the pickup itself is already saved
+  }
+
+  const receiptModal = (
+    <ReceiptModal
+      visible={!!receipt}
+      receipts={receipt}
+      pickupLines={pickupLines}
+      onClose={() => { setReceipt(null); setPickupLines([]); }}
+    />
+  );
+
+  // Detail body — phone renders it full-screen; the tablet right panel renders
+  // it inside the sticky card (the back button then just deselects).
+  function renderDetailInner() {
+    if (!detail) return null;
     const settled = remainingTotal(detail.items) <= 0;
     return (
-      <KeyboardSafeScrollView style={{ flex: 1, backgroundColor: "#000" }} contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 32 }}>
+      <>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingTop: 8, paddingBottom: 4 }}>
           <Pressable onPress={() => { setDetail(null); setTaken({}); }} hitSlop={10} style={{ width: 40, height: 40, alignItems: "center", justifyContent: "center" }}>
             <Ionicons name="chevron-back" size={24} color="#fff" />
@@ -287,13 +367,13 @@ export default function PickupsScreen({
             })}
           </>
         )}
-      </KeyboardSafeScrollView>
+      </>
     );
   }
 
-  // --- list -----------------------------------------------------------------
-  return (
-    <View style={{ flex: 1, backgroundColor: "#000" }}>
+  // --- list parts (shared by the phone list and the tablet left pane) -------
+  function renderListHeader() {
+    return (
       <View style={{ paddingHorizontal: padH, paddingTop: 8 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           {showBack ? (
@@ -326,8 +406,12 @@ export default function PickupsScreen({
           )}
         </View>
       </View>
+    );
+  }
 
-      <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: padH, paddingTop: 14, paddingBottom: 28 }}>
+  function renderListInner() {
+    return (
+      <>
         {settledHit && (
           <Pressable onPress={() => openSale(String(settledHit.sale.id))} style={{ flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "#2f80ed55", backgroundColor: "#0e1626", borderRadius: 16, padding: 16, marginBottom: 12 }}>
             <Ionicons name="receipt-outline" size={22} color="#2f80ed" />
@@ -361,11 +445,12 @@ export default function PickupsScreen({
         ) : (
           filtered.map(r => {
             const rem = remainingTotal(r.openItems);
+            const selected = !!detail && String(detail.sale.id) === String(r.sale.id);
             return (
               <Pressable
                 key={String(r.sale.id)}
                 onPress={() => openSale(String(r.sale.id))}
-                style={{ flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: "#2b2b2b", borderRadius: 16, padding: 16, marginBottom: 12 }}
+                style={{ flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: selected ? "#4a4a4c" : "#2b2b2b", backgroundColor: selected ? "#141414" : "transparent", borderRadius: 16, padding: 16, marginBottom: 12 }}
               >
                 <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#1c1c1e", alignItems: "center", justifyContent: "center" }}>
                   <Ionicons name="bag-handle-outline" size={20} color="#fff" />
@@ -380,12 +465,70 @@ export default function PickupsScreen({
                   <Text style={{ color: "#7bd88f", fontSize: 17, fontWeight: "800", ...monoStyle }}>{fmtQty(rem)}</Text>
                   <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 1 }}>rete</Text>
                 </View>
-                <Ionicons name="chevron-forward" size={20} color="#8e8e93" />
+                <Ionicons name="chevron-forward" size={20} color={selected ? "#fff" : "#8e8e93"} />
               </Pressable>
             );
           })
         )}
+      </>
+    );
+  }
+
+  // --- tablet: two panels — list left, detail right -------------------------
+  if (isTablet) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        {renderListHeader()}
+        <View style={{ flexDirection: "row", gap: 12, paddingHorizontal: padH, paddingTop: 8, paddingBottom: 12, flex: 1 }}>
+          {/* LEFT: every open balance */}
+          <View style={{ flex: 3, minWidth: 0 }}>
+            <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 14, paddingBottom: 28 }} keyboardShouldPersistTaps="handled">
+              {renderListInner()}
+            </KeyboardSafeScrollView>
+          </View>
+
+          {/* RIGHT: sticky detail card — same card token as checkout/proforma. */}
+          <View style={{ flex: 2, minWidth: 300, backgroundColor: "#000", borderRadius: radius.lg, borderWidth: 0.5, borderColor: "#262626", ...shadow.card, padding: 14 }}>
+            {detail ? (
+              <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
+                {renderDetailInner()}
+              </KeyboardSafeScrollView>
+            ) : (
+              <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24 }}>
+                <Ionicons name="bag-check-outline" size={46} color="#3a3a3c" />
+                <Text style={{ color: "#fff", fontSize: 17, fontWeight: "800", marginTop: 14 }}>Chwazi yon pickup</Text>
+                <Text style={{ color: "#8e8e93", fontSize: 14, marginTop: 8, textAlign: "center", lineHeight: 20 }}>
+                  Chwazi yon nimewo resi sou gòch la pou wè detay li epi antre kantite yo pran.
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
+        {receiptModal}
+      </View>
+    );
+  }
+
+  // --- detail (phone: full screen) ------------------------------------------
+  if (detail) {
+    return (
+      <View style={{ flex: 1 }}>
+        <KeyboardSafeScrollView style={{ flex: 1, backgroundColor: "#000" }} contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 32 }}>
+          {renderDetailInner()}
+        </KeyboardSafeScrollView>
+        {receiptModal}
+      </View>
+    );
+  }
+
+  // --- list (phone: full screen) --------------------------------------------
+  return (
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
+      {renderListHeader()}
+      <KeyboardSafeScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: padH, paddingTop: 14, paddingBottom: 28 }}>
+        {renderListInner()}
       </KeyboardSafeScrollView>
+      {receiptModal}
     </View>
   );
 }

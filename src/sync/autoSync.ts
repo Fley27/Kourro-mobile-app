@@ -15,14 +15,23 @@
  *     leaves within a second instead of "whenever a report is opened"
  *   - a pull that brought records emits salesEvents, so every subscribed list
  *     reloads itself without the screen knowing about sync
+ *   - a time-critical screen (order/line status) can call setUrgentSync(true)
+ *     to drop the whole loop onto a fast lane: ~150ms push, 1.5s pull, plus an
+ *     immediate catch-up pull the moment the screen opens
  */
 import { AppState, type AppStateStatus } from "react-native";
 import { SyncManager } from "./syncManager";
 
-const SYNC_INTERVAL_MS = 30_000;
+const SYNC_INTERVAL_MS = 6_000;
+// Order/line status is time-critical — who delivered what, right now. While a
+// time-critical screen holds the loop open it runs on this much tighter beat.
+const FAST_SYNC_INTERVAL_MS = 1_500;
 // A checkout writes ~a dozen outbox rows back to back — batch them into one push.
-const WRITE_DEBOUNCE_MS = 1_200;
+const WRITE_DEBOUNCE_MS = 400;
+// …but on the fast lane a status tap must leave almost immediately.
+const URGENT_WRITE_DEBOUNCE_MS = 150;
 const FAILURE_RETRY_MS = 8_000;
+const URGENT_RETRY_MS = 2_000;
 
 let storeId: string | null = null;
 let deviceId: string | null = null;
@@ -32,6 +41,7 @@ let timerDueAt = 0;
 let running = false;
 let pending = false;
 let started = false;
+let urgent = false;
 let subscription: { remove(): void } | null = null;
 
 const isPlaceholderId = (id?: string | null) => !id || id === "device-pending" || id === "device-unknown";
@@ -84,7 +94,7 @@ export async function syncNow(opts?: { quiet?: boolean; storeId?: string; device
     try {
       const received = await manager.pullFromCloud();
       // Only wake the screens when the pull actually brought something —
-      // otherwise every list would re-query SQLite every 30s for nothing.
+      // otherwise every list would re-query SQLite every cycle for nothing.
       if (received > 0) await emitPulled();
     } catch (e) {
       ok = false;
@@ -96,7 +106,11 @@ export async function syncNow(opts?: { quiet?: boolean; storeId?: string; device
       pending = false;
       schedule(0);
     } else {
-      schedule(ok ? SYNC_INTERVAL_MS : FAILURE_RETRY_MS);
+      schedule(
+        ok
+          ? urgent ? FAST_SYNC_INTERVAL_MS : SYNC_INTERVAL_MS
+          : urgent ? URGENT_RETRY_MS : FAILURE_RETRY_MS
+      );
     }
   }
   return ok;
@@ -105,6 +119,9 @@ export async function syncNow(opts?: { quiet?: boolean; storeId?: string; device
 /** Called after a local write: sync within ~a second, batching bursts. */
 export function requestSync(delayMs: number = WRITE_DEBOUNCE_MS): void {
   if (!manager || !started) return;
+  // Fast lane: a status change (line delivered, tab ready…) must leave almost
+  // immediately — collapse any longer debounce the caller asked for.
+  if (urgent && delayMs > URGENT_WRITE_DEBOUNCE_MS) delayMs = URGENT_WRITE_DEBOUNCE_MS;
   // A cycle is already running — it will pick the write up on the follow-up
   // pass rather than letting the finally-block swallow this request.
   if (running) {
@@ -113,6 +130,17 @@ export function requestSync(delayMs: number = WRITE_DEBOUNCE_MS): void {
   }
   if (timer && timerDueAt <= Date.now() + delayMs) return;
   schedule(delayMs);
+}
+
+/**
+ * Priority lane for time-critical screens (order/line status). While on:
+ * writes leave within ~150ms, a pull runs every FAST_SYNC_INTERVAL_MS instead
+ * of SYNC_INTERVAL_MS, failures retry sooner — and turning it on pulls
+ * immediately so the screen catches up the moment it opens.
+ */
+export function setUrgentSync(on: boolean): void {
+  urgent = on;
+  if (started) schedule(on ? 0 : SYNC_INTERVAL_MS);
 }
 
 async function emitPulled(): Promise<void> {

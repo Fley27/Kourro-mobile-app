@@ -9,9 +9,11 @@ import { printHtml, printToPdf } from "../print";
 import { buildReceiptHtml, receiptToText, receiptItemsFrom, attachLineLabels, type ReceiptData, type ReceiptCustomer } from "../receipts";
 import { getDb } from "../db";
 // STAGING-PICKUP: single gated import — delete this + the STAGING block below to remove.
-import { usePickupEnabled, PickupSheet, useOnline } from "../pickup-staging";
+import { useOnline } from "../pickup-staging";
 import { NewCustomerView, CustomerProfileBody, EditCustomerView, TxnDetailBody } from "../screens/cartViews";
-import { buildReceipts } from "../receipts";
+import { buildReceipts, PAYMENT_LABELS } from "../receipts";
+// STAGING-PICKUP: balans rendering — same data as the printed pickup receipt.
+import { buildPickupReceiptHtml, pickupReceiptToText, type PickupReceiptLine, type PickupReceiptInput } from "../pickup-staging";
 import { CustomerPicker } from "./CustomerPicker";
 import { EMPTY_CUSTOMER_FORM, fullNameOf, type CustomerFormData } from "./CustomerForm";
 import { insertCustomerRecord } from "../sales/customers";
@@ -53,18 +55,21 @@ function Pill({ icon, label, onPress, tone }: {  icon: keyof typeof Ionicons.gly
   );
 }
 
-export default function ReceiptModal({ visible, receipts, onClose, staging, locked }: {
+export default function ReceiptModal({ visible, receipts, onClose, staging, locked, pickupLines }: {
   visible: boolean;
   receipts: { customer: ReceiptData; store: ReceiptData } | null;
   onClose: () => void;
   staging?: { storeId: string; cashierId?: string | null; customerId?: string | null };
   locked?: boolean;
+  /** Bought/taken/remaining per product — the balans the customer keeps. */
+  pickupLines?: PickupReceiptLine[] | null;
 }) {
-  // STAGING-PICKUP: dormant when flag OFF. Delete block to remove.
   const insets = useSafeAreaInsets();
-  const stagingOn = usePickupEnabled(staging?.storeId ?? FALLBACK_STORE_ID);
   const online = useOnline();
-  const [showPickup, setShowPickup] = React.useState(false);
+  // Balans shown on the green receipt; set by the host (e.g. Pickups after
+  // recording a pickup). Reset per sale so a previous sale's balans never
+  // leaks into the next.
+  const [pickup, setPickup] = React.useState<PickupReceiptLine[]>(pickupLines ?? []);
   const [savedEmail, setSavedEmail] = React.useState<string | null>(null);
 
   const [altPair, setAltPair] = React.useState<{ customer: ReceiptData; store: ReceiptData } | null>(null);
@@ -124,8 +129,8 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
   }, [menuTxns, isSale, custDetail, saleId, r]);
 
   React.useEffect(() => {
-    setShowPickup(false);
     setSavedEmail(effReceipts?.customer?.customer?.email ?? null);
+    setPickup(pickupLines ?? []);
     resetCustomerMemory();
   }, [saleId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -165,8 +170,36 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
   }
   const pair = (altPair ?? receipts) as { customer: ReceiptData; store: ReceiptData };
   const st = statusLine(r);
+  // Non-null alias — closures below read the sale without re-narrowing `r`.
+  const sale = r;
+
+  /** The balans rendered exactly like the printed pickup receipt. */
+  function pickupInput(): PickupReceiptInput {
+    return {
+      kind: pickup.some(l => l.remaining > 0.000001) ? "partial" : "redeem",
+      storeName: sale.storeName,
+      saleNumber: sale.saleNumber,
+      saleId: sale.saleId,
+      createdAt: sale.createdAt,
+      cashierName: sale.cashier?.name ?? "Kesye",
+      customerName: customer?.name ?? null,
+      lines: pickup,
+      total: Number(sale.total ?? 0),
+      change: Number(sale.change ?? 0),
+      balance: Number(sale.amountDue ?? 0),
+      saleType: PAYMENT_LABELS[sale.paymentMethod] ?? String(sale.paymentMethod ?? "—"),
+      isCredit: sale.paymentMethod === "credit",
+    };
+  }
 
   async function printReceipt() {
+    // Balans wins while a pickup is on the receipt — that is the paper the
+    // customer still needs (bought / taken / remaining).
+    if (pickup.length) {
+      try { await printHtml(buildPickupReceiptHtml(pickupInput())); }
+      catch (e: any) { Alert.alert("Enpresyon", e?.message ?? "Enpresyon echwe"); }
+      return;
+    }
     try {
       // Thermal backend first when registered, else the platform print sheet.
       await printHtml(buildReceiptHtml(pair.customer));
@@ -176,6 +209,20 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
   }
 
   async function shareReceipt() {
+    if (pickup.length) {
+      try {
+        const file = await printToPdf(buildPickupReceiptHtml(pickupInput()));
+        if (!file.uri) throw new Error("no-file");
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", dialogTitle: "Resi balans (PDF)", UTI: "com.adobe.pdf" });
+          return;
+        }
+        throw new Error("share-unavailable");
+      } catch {
+        try { await Share.share({ title: `Resi balans ${sale.saleNumber}`, message: pickupReceiptToText(pickupInput()) }); } catch {}
+      }
+      return;
+    }
     const client = pair.customer;
     const title = `Resi ${client.receiptNumber} - ${client.storeName}`;
     try {
@@ -561,7 +608,6 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
       const db = await getDb();
       await db.runAsync("DELETE FROM receipts WHERE sale_id = ?", [saleId]);
     } catch {}
-    setShowPickup(false);
     handleClose();
   }
 
@@ -601,16 +647,6 @@ export default function ReceiptModal({ visible, receipts, onClose, staging, lock
 
         {/* Bottom action bar — thumb reach, one hand, all centered */}
         <View style={{ paddingHorizontal: 18, paddingTop: 10, paddingBottom: 34 + insets.bottom, gap: 10, borderTopWidth: 0.5, borderTopColor: palette.hairline, backgroundColor: "#16db65", alignItems: "stretch" }}>
-          {/* STAGING-PICKUP: partial pickup option, right above the question. Delete block to remove. */}
-          {isSale && stagingOn && staging?.storeId && !locked ? (
-            <Pressable onPress={() => setShowPickup(true)} style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, backgroundColor: palette.ink2, borderRadius: radius.pill, paddingVertical: 17, borderWidth: 0.5, borderColor: "rgba(47,125,91,0.4)" }}>
-              <Ionicons name="cube-outline" size={19} color="#fff" />
-              <Text style={{ fontWeight: "800", fontSize: 15, color: "#fff" }}>Partial pickup</Text>
-            </Pressable>
-          ) : null}
-          {isSale && stagingOn && staging?.storeId ? (
-            <PickupSheet visible={showPickup} saleId={r.saleId} storeId={staging.storeId} cashierId={staging.cashierId ?? null} storeName={r.storeName} cashierName={r.cashier.name} onClose={() => setShowPickup(false)} onSaved={handleClose} />
-          ) : null}
           <Text style={{ fontFamily: fonts.bold, fontSize: 13, color: palette.muted2, textAlign: "center", letterSpacing: 0.2 }}>
             {isBill ? "Kijan ou vle fakti a?" : "Kijan ou vle resi a?"}
           </Text>

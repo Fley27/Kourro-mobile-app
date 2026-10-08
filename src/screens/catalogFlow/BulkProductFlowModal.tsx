@@ -250,10 +250,12 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
   // Reset the header action every render — only the visible step registers.
   nextRef.current = null;
 
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+  // TABLET-SCREEN: shell runs inline as a content-area screen (the sidebar
+  // stays visible); phone keeps the full-window Modal slide-up below.
+  const inner = (
+    <>
       <SafeScreen style={{ flex: 1, backgroundColor: "#000" }}>
-        <View style={{ flex: 1, width: IS_TABLET_DEVICE ? "100%" : undefined, maxWidth: IS_TABLET_DEVICE ? 940 : undefined, alignSelf: IS_TABLET_DEVICE ? "center" : undefined }}>
+        <View style={{ flex: 1 }}>
         <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 }}>
           <Pressable
             onPress={() => {
@@ -387,7 +389,6 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
                 registerNext={registerNext}
                 active={stepKey === "product"}
                 showSkuField
-                allowSupplierCreate
                 onNext={onProductNext}
               />
             </View>
@@ -419,6 +420,15 @@ export default function BulkProductFlowModal({ visible, onClose, onDone, ctx }: 
         </View>
       </SafeScreen>
       <UploadTransition visible={upBusy} phase={upPhase} title="Soumèt pwodwi" detail={upMsg} />
+    </>
+  );
+
+  if (IS_TABLET_DEVICE) {
+    return visible ? <View style={{ flex: 1, backgroundColor: "#000" }}>{inner}</View> : null;
+  }
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      {inner}
     </Modal>
   );
 }

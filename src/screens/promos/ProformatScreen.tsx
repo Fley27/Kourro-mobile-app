@@ -5,7 +5,7 @@
 // the Customers big-title + circular add button; the build step is a full
 // POS checkout replica (ProformatCreateView) ending in upload transition +
 // receipt with no tender screen and no partial pickup.
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Pressable, ScrollView, TextInput, Alert, Share, SectionList, Modal } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDb } from "../../db";
@@ -67,7 +67,9 @@ export default function ProformatScreen({
   /** Hand the record's lines to the POS tab (frozen prices, customer attached). */
   onLoadIntoCart?: (proformat: Proformat, customerId: string | null) => void;
 }) {
-  const { padH } = useResponsive();
+  const { padH, width, isTablet } = useResponsive();
+  // Left list pane — Transactions' proportions (TransactionsScreen.tsx:62).
+  const paneW = Math.min(460, Math.max(340, Math.round(width * 0.38)));
   const insets = useSafeAreaInsets();
   const actor: PromoActor = { id: currentUser?.id ?? null, name: String(currentUser?.name ?? role), role: String(currentUser?.role ?? role) };
   const [view, setView] = useState<"list" | "create" | "detail">("list");
@@ -94,6 +96,9 @@ export default function ProformatScreen({
   useEffect(() => { load(); }, [load]);
   // Live: a proformat issued on another register appears after the pull.
   useSalesEvents(() => { load().catch(() => {}); });
+  // Tapping a different row on the tablet must start at the top of the pane.
+  const detailScroll = useRef<ScrollView>(null);
+  useEffect(() => { detailScroll.current?.scrollTo({ y: 0, animated: false }); }, [detail]);
 
   const filtered = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -222,7 +227,11 @@ export default function ProformatScreen({
   }
 
   // ── Detail ───────────────────────────────────────────────────────────────
-  if (view === "detail" && detail) {
+  // ── Detail: one tree, two hosts ──────────────────────────────────────────
+  // Phone returns it full-screen; the tablet parks it in the right pane
+  // (Transactions' detailPane shape).
+  const detailPane = (() => {
+    if (!detail) return null;
     const cust = detailCust;
     const wizardCustomer = {
       id: String(detail.customer_id),
@@ -238,11 +247,11 @@ export default function ProformatScreen({
     try { cvMin = typeof couponView?.min === "string" ? JSON.parse(String(couponView.min)) : (couponView?.min ?? null); } catch { cvMin = null; }
     return (
       <View style={{ flex: 1, backgroundColor: "#000" }}>
-        <KeyboardSafeScrollView contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 48 }}>
+        <KeyboardSafeScrollView ref={detailScroll} contentContainerStyle={{ paddingHorizontal: padH, paddingBottom: 48 }}>
           <PromoHeader
             title={detail.receipt_number}
             subtitle={fmtWhen(detail.created_at)}
-            onBack={() => setView("list")}
+            onBack={() => { setDetail(null); setDetailCust(null); setDetailCoupons([]); setView("list"); }}
             right={detail.paid ? null : (
               <Pressable
                 onPress={() => setMenuOpen(true)}
@@ -555,7 +564,7 @@ export default function ProformatScreen({
         </Modal>
       </View>
     );
-  }
+  })();
 
   // ── Create (POS checkout replica) ────────────────────────────────────────
   if (view === "create") return (
@@ -569,8 +578,11 @@ export default function ProformatScreen({
     />
   );
 
+  // Phone: the detail owns the whole screen (today's behavior).
+  if (!isTablet && detail) return detailPane;
+
   // ── List: Transactions sections + Customers header ───────────────────────
-  return (
+  const listPane = (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
       <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: padH, paddingTop: 8, paddingBottom: 4, gap: 8 }}>
         {onBack ? (
@@ -612,30 +624,33 @@ export default function ProformatScreen({
             <Text style={{ fontSize: 12, color: "#8e8e93", fontWeight: "800", letterSpacing: 0.8, textTransform: "uppercase" }}>{section.title}</Text>
           </View>
         )}
-        renderItem={({ item: p }) => (
-          <Pressable
-            onPress={() => openDetail(p)}
-            style={{ flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: "transparent", borderWidth: 1, borderColor: "rgba(255,255,255,0.25)", borderRadius: 14, padding: 12, marginBottom: 10 }}
-          >
-            <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}>
-              <Ionicons name="document-text-outline" size={20} color="#000" />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontWeight: "800", fontSize: 14, color: "#fff" }} numberOfLines={1}>{fmtG(Number(p.total ?? 0))} · {p.receipt_number}</Text>
-              <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>
-                {p.customer_name || "—"} · {shortDate(p.created_at)}
-              </Text>
-            </View>
-            {p.paid ? (
-              <View style={{ backgroundColor: p.paid.amount_due > 0 ? "#4a3a10" : "#10240f", borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 }}>
-                <Text style={{ color: p.paid.amount_due > 0 ? "#ffd60a" : "#7bd88f", fontSize: 11, fontWeight: "800" }}>
-                  {p.paid.amount_due > 0 ? "KREDI" : "PEYE"}
+        renderItem={({ item: p }) => {
+          const selected = detail?.id === p.id;
+          return (
+            <Pressable
+              onPress={() => openDetail(p)}
+              style={{ flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: selected ? "rgba(255,255,255,0.06)" : "transparent", borderWidth: 1, borderColor: selected ? "#fff" : "rgba(255,255,255,0.25)", borderRadius: 14, padding: 12, marginBottom: 10 }}
+            >
+              <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="document-text-outline" size={20} color="#000" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: "800", fontSize: 14, color: "#fff" }} numberOfLines={1}>{fmtG(Number(p.total ?? 0))} · {p.receipt_number}</Text>
+                <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>
+                  {p.customer_name || "—"} · {shortDate(p.created_at)}
                 </Text>
               </View>
-            ) : null}
-            <Ionicons name="chevron-forward" size={16} color="#8e8e93" />
-          </Pressable>
-        )}
+              {p.paid ? (
+                <View style={{ backgroundColor: p.paid.amount_due > 0 ? "#4a3a10" : "#10240f", borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 }}>
+                  <Text style={{ color: p.paid.amount_due > 0 ? "#ffd60a" : "#7bd88f", fontSize: 11, fontWeight: "800" }}>
+                    {p.paid.amount_due > 0 ? "KREDI" : "PEYE"}
+                  </Text>
+                </View>
+              ) : null}
+              <Ionicons name="chevron-forward" size={16} color="#8e8e93" />
+            </Pressable>
+          );
+        }}
         ListEmptyComponent={
           loading ? (
             <View style={{ paddingTop: 8 }}>
@@ -648,6 +663,27 @@ export default function ProformatScreen({
           )
         }
       />
+    </View>
+  );
+
+  if (!isTablet) return listPane;
+
+  return (
+    <View style={{ flex: 1, backgroundColor: "#000", flexDirection: "row" }}>
+      <View style={{ width: paneW, borderRightWidth: 1, borderRightColor: "#1c1c1f" }}>
+        {listPane}
+      </View>
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        {detailPane ?? (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
+              <Ionicons name="document-text-outline" size={28} color="#8e8e93" />
+            </View>
+            <Text style={{ color: "#fff", fontSize: 16, fontWeight: "800", marginTop: 14, textAlign: "center" }}>Chwazi yon proformat</Text>
+            <Text style={{ color: "#8e8e93", fontSize: 13, marginTop: 6, textAlign: "center", lineHeight: 19 }}>Tape yon proformat nan lis la pou wè detay li isit la.</Text>
+          </View>
+        )}
+      </View>
     </View>
   );
 }
