@@ -10,6 +10,8 @@ import {
 } from "./CatalogShared";
 import type { CatalogModel } from "../catalogModel";
 import { SkeletonProductCard } from "../components/Skeleton";
+import { useInitialDownloadActive } from "../sync/useSyncStatus";
+import { ht } from "../i18n";
 
 export interface CatalogPhoneProps {
   role: Role;
@@ -36,6 +38,8 @@ export interface CatalogPhoneProps {
 /** Phone layout: search + category strip + 1-col product cards. */
 export function CatalogPhone(props: CatalogPhoneProps) {
   const { width, padH } = useResponsive();
+  // Fresh device mid-download: empty means "not here yet", not "no products".
+  const downloading = useInitialDownloadActive();
   const {
     role, products, categories, loading,
     q, setQ, onOpenFilter, filterOn, draftCount, cat, setCat,
@@ -93,6 +97,8 @@ export function CatalogPhone(props: CatalogPhoneProps) {
                 <SkeletonProductCard />
                 <SkeletonProductCard />
               </View>
+            ) : downloading ? (
+              <View style={{ backgroundColor: "#1C1C1E", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>{ht.downloadingCatalog}</Text></View>
             ) : (
               <View style={{ backgroundColor: "#1C1C1E", borderWidth: 1, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>Pa gen pwodwi nan kategori sa</Text><Text style={{ color: "#8e8e93", fontSize: 11, marginTop: 4 }}>Eseye yon lòt chèche oswa kategori</Text></View>
             )

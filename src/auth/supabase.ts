@@ -1,10 +1,12 @@
 // Mobile Supabase client with SecureStore-backed session persistence.
 import { createClient, type Session } from "@supabase/supabase-js";
 import * as SecureStore from "expo-secure-store";
+import { Platform } from "react-native";
 
 export const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? "http://localhost:54321";
 export const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? "anon-key";
-export const middlewareUrl = process.env.EXPO_PUBLIC_MIDDLEWARE_URL ?? "http://localhost:4000";
+const defaultMiddlewareHost = Platform.OS === "android" ? "10.0.2.2" : "localhost";
+export const middlewareUrl = process.env.EXPO_PUBLIC_MIDDLEWARE_URL ?? `http://${defaultMiddlewareHost}:4000`;
 
 // `supabase start` binds Kong to 54321 on a private/loopback host — and it is
 // often pointed at the machine's LAN IP (192.168.x.x) so a physical phone can

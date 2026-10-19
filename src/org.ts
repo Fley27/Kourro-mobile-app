@@ -9,6 +9,7 @@ import type { BusinessType, User } from "./users";
 import { USERS } from "./users";
 import { insertOutbox } from "./db";
 import { FALLBACK_STORE_ID, STORE_IDS } from "./db/ids";
+import { assertWritable } from "./subscription/subscription";
 
 export type { BusinessType };
 
@@ -26,6 +27,7 @@ export async function getBusinessType(db: any): Promise<BusinessType> {
 }
 
 export async function setBusinessType(db: any, t: BusinessType): Promise<void> {
+  assertWritable();
   await db.runAsync("INSERT OR REPLACE INTO _meta (key, value) VALUES (?,?)", [BUSINESS_TYPE_KEY, t]);
 }
 

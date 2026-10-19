@@ -168,6 +168,16 @@ export default function ProformatCreateView({
     const row = top ? firstRowFor(top.id) : null;
     if (top && row) { setSearch(top.barcode ?? top.sku ?? ""); handleProductPress(row); setShowScan(false); }
   }
+  // Web/desktop: code typed by an external scanner (keyboard wedge) or by hand.
+  function scanCode(code: string) {
+    const t = code.trim();
+    if (!t) return;
+    setSearch(t);
+    const found = products.find(p => p.barcode?.toLowerCase() === t.toLowerCase() || p.sku?.toLowerCase() === t.toLowerCase());
+    const row = found ? firstRowFor(found.id) : null;
+    if (found && row) { handleProductPress(row); setShowScan(false); }
+    else Alert.alert("Pa jwenn", `Pa gen pwodwi ak kòd ${t}`);
+  }
 
   function confirmBack() {
     if (cart.length) {
@@ -612,7 +622,7 @@ export default function ProformatCreateView({
         />
       )}
 
-      <ScanSheet visible={showScan} onClose={() => setShowScan(false)} onSimulate={simulateScan} productLabel={products[0]?.name ?? ""} />
+      <ScanSheet visible={showScan} onClose={() => setShowScan(false)} onSimulate={simulateScan} onCode={scanCode} productLabel={products[0]?.name ?? ""} />
 
       {/* ── Extended cart sheet — the no-client + prospect layers live INSIDE
           this window (later siblings) so they can never fall under it. ── */}

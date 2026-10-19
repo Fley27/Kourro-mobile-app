@@ -1,14 +1,20 @@
 import React, { useMemo, useState, useRef, useEffect } from "react";
-import { View, Text, Pressable, TextInput, Alert, Modal, ScrollView, StyleSheet, Animated, Easing, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, Pressable, TextInput, Alert, Modal, ScrollView, StyleSheet, Animated, Easing, KeyboardAvoidingView, Platform, Share } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { palette, radius, shadow } from "../../theme";
-import { useResponsive, centerBox, sheetBox } from "../../responsive";
+import { useResponsive } from "../../responsive";
 import { storeIdForLocation } from "../../org";
 import { getDb } from "../../db";
 import { EmployeeProfileBody } from "../../components/EmployeeProfile";
+import { ModalScreen, CustomerProfileHeader } from "../../components/CustomerProfile";
+import { PhoneField, CountryDialPicker } from "../../components/CustomerForm";
+import { formatPhoneDigits, normalizePhoneInput, inferPhoneIso } from "../../phoneFormat";
 import { KeyboardSafeScrollView } from "../../components/KeyboardSafe";
-import { mintId } from "../../db/ids";
+import { isValidEmail } from "../../pickup-staging/useOnline";
+import { supabase, middlewareUrl } from "../../auth/supabase";
+import { fmtG } from "../../format";
+import { orgIdOf, ensurePayPeriod, expectedPayment, paymentHistory, periodById, periodDeficitRows, recordSalaryChange, salaryCacheString, peerSalaryHint } from "../../payroll";
 
 const GOLD = palette.accentGold;
 const GOLD_SOFT = palette.accentGoldSoft;
@@ -19,6 +25,7 @@ export type Employee = {
   name: string;
   role: string;
   phone?: string;
+  email?: string;
   salary: string;
   address?: string;
   store?: string;
@@ -28,7 +35,7 @@ export type Employee = {
   password: string;
   lastAction: string;
   kpi: string;
-  emergency?: { name: string; address: string; phone: string };
+  emergency?: { name: string; address: string; phone: string } | null;
 };
 
 const ROLE_META: Record<string, { label: string; color: string; bg: string; bd: string }> = {
@@ -36,6 +43,18 @@ const ROLE_META: Record<string, { label: string; color: string; bg: string; bd: 
   admin: { label: "ADMIN", color: "#1E40AF", bg: "#EFF6FF", bd: "#BFDBFE" },
   manager: { label: "MANAGER", color: "#92400E", bg: "#FFFBEB", bd: "#FDE68A" },
   cashier: { label: "KESYE", color: "#6D28D9", bg: "#F5F3FF", bd: "#DDD6FE" },
+  associate: { label: "ASOSYE", color: "#0F766E", bg: "#F0FDFA", bd: "#99F6E4" },
+  cook: { label: "KUIZINYE", color: "#9A3412", bg: "#FFF7ED", bd: "#FED7AA" },
+};
+
+// "Modifye wòl" option labels — team roles show in Kreyol (Asosye/Kuizinye)
+// so the tap-through reads like the rest of the app, not raw role slugs.
+const ROLE_OPTION_LABEL: Record<string, string> = {
+  admin: "Admin",
+  manager: "Manager",
+  cashier: "Cashier",
+  associate: "Asosye",
+  cook: "Kuizinye",
 };
 
 const STORE_LABELS: Record<string, string> = {
@@ -43,6 +62,46 @@ const STORE_LABELS: Record<string, string> = {
   Dèlma: "Dèlma",
   Sant: "Sant",
 };
+
+// Role-default monthly salary (goud) shown PREFILLED in the add form — the
+// owner edits it freely; it only tracks the role while the owner never
+// touched the field (smart default, not a lock).
+const ROLE_SALARY_DEFAULT: Record<string, number> = {
+  admin: 32000, manager: 25000, cashier: 12000, associate: 12000, cook: 12000,
+};
+const HT_MONTHS = ["Jan", "Fev", "Mas", "Avr", "Me", "Jen", "Jiy", "Out", "Sep", "Okt", "Nov", "Des"];
+function periodLabel(startDate: string, endDate: string): string {
+  const s = String(startDate ?? "").split("-");
+  const e = String(endDate ?? "").split("-");
+  const sm = HT_MONTHS[Number(s[1]) - 1] ?? s[1];
+  const em = HT_MONTHS[Number(e[1]) - 1] ?? e[1];
+  if (s[0] === e[0] && s[1] === e[1]) return `${sm} ${s[0]}`;
+  return `${sm} ${s[0]} → ${em} ${e[0]}`;
+}
+
+/** Strong typable password: 12 chars, ambiguous glyphs (0/O/1/l) removed so a
+ * cashier can read it off a screen and type it on a register keyboard. */
+function randomPassword(length = 12): string {
+  const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return out;
+}
+
+// Dark field styling — mirrors CustomerForm's darkInput so the staff edit
+// form reads exactly like the customer edit form.
+const DARK_FIELD = {
+  backgroundColor: "#0a0a0a",
+  borderWidth: 1,
+  borderColor: "#3a3a3c",
+  borderRadius: 12,
+  height: 60,
+  paddingHorizontal: 16,
+  fontSize: 16,
+  color: "#fff",
+} as const;
 
 type Props = {
   employees: Employee[];
@@ -67,14 +126,14 @@ type Props = {
   setNewEmpName: (s: string) => void;
   newEmpRole: string;
   setNewEmpRole: (s: string) => void;
-  newEmpPhone: string;
-  setNewEmpPhone: (s: string) => void;
+  newEmpSalary: string;
+  setNewEmpSalary: (s: string) => void;
+  newEmpEmail: string;
+  setNewEmpEmail: (s: string) => void;
   newEmpAddress: string;
   setNewEmpAddress: (s: string) => void;
   newEmpEmergName: string;
   setNewEmpEmergName: (s: string) => void;
-  newEmpEmergPhone: string;
-  setNewEmpEmergPhone: (s: string) => void;
   newEmpEmergAddress: string;
   setNewEmpEmergAddress: (s: string) => void;
   newEmpError: string;
@@ -86,6 +145,7 @@ type Props = {
   canToggle: (target: any) => boolean;
   canResetOther: (target: any) => boolean;
   canChangeSelf: (target: any) => boolean;
+  canEditSalary: (target: any) => boolean;
   addRoleOptions: string[];
   showAdd: boolean;
   setShowAdd: (v: boolean) => void;
@@ -97,11 +157,13 @@ export default function TeamScreen({
   resetTarget, setResetTarget,
   selfEditEmp, setSelfEditEmp, selfSecret, setSelfSecret, selfPassword, setSelfPassword,
   newEmpName, setNewEmpName, newEmpRole, setNewEmpRole,
-  newEmpPhone, setNewEmpPhone, newEmpAddress, setNewEmpAddress,
-  newEmpEmergName, setNewEmpEmergName, newEmpEmergPhone, setNewEmpEmergPhone,
+  newEmpSalary, setNewEmpSalary,
+  newEmpEmail, setNewEmpEmail,
+  newEmpAddress, setNewEmpAddress,
+  newEmpEmergName, setNewEmpEmergName,
   newEmpEmergAddress, setNewEmpEmergAddress,
   newEmpError, setNewEmpError,
-  canManageEmployees, canAddRole, canEditRoleFor, canAffect, canToggle, canResetOther, canChangeSelf,
+  canManageEmployees, canAddRole, canEditRoleFor, canAffect, canToggle, canResetOther, canChangeSelf, canEditSalary,
   addRoleOptions, showAdd, setShowAdd,
 }: Props) {
   const [search, setSearch] = useState("");
@@ -151,7 +213,77 @@ export default function TeamScreen({
     setEmpNameCollapsed(false);
     detailScrollRef.current?.scrollTo?.({ y: 0, animated: false });
   }, [selectedEmp]);
-  const [modalView, setModalView] = useState<"detail" | "edit" | "selfEdit" | "reset">("detail");
+  const [modalView, setModalView] = useState<"detail" | "edit" | "selfEdit" | "reset" | "email" | "info" | "emerg" | "salary" | "paymentDetail">("detail");
+  // Email edit (owner-only) + last generated temp credential (shown so the
+  // owner can hand it over — previously generated silently and lost).
+  const [emailInput, setEmailInput] = useState("");
+  // Personal-info edit form (customer-edit style): strict superior only,
+  // never the owner as target; email field owner-only (read-only "Owner"
+  // chip otherwise); phone uses the customer PhoneField (flag + mask).
+  const [infoName, setInfoName] = useState("");
+  const [infoPhoneDigits, setInfoPhoneDigits] = useState("");
+  const [infoPhoneIso, setInfoPhoneIso] = useState("HT");
+  const [infoDialOpen, setInfoDialOpen] = useState(false);
+  const [infoEmail, setInfoEmail] = useState("");
+  const [infoAddress, setInfoAddress] = useState("");
+  // Emergency-contact edit form (same gates as personal info).
+  const [emergName, setEmergName] = useState("");
+  const [emergPhoneDigits, setEmergPhoneDigits] = useState("");
+  const [emergPhoneIso, setEmergPhoneIso] = useState("HT");
+  const [emergDialOpen, setEmergDialOpen] = useState(false);
+  const [emergAddress, setEmergAddress] = useState("");
+  const [resetResult, setResetResult] = useState<{ label: string; value: string } | null>(null);
+  // Payroll (028): live expected payment + closed-payment history for the
+  // selected employee, and the two payroll sheets (salary edit + breakdown).
+  const [empPayroll, setEmpPayroll] = useState<{ salary: number; deficits: number; expected: number; periodLabel: string } | null>(null);
+  const [empPayments, setEmpPayments] = useState<Array<any>>([]);
+  const [payrollVersion, setPayrollVersion] = useState(0);
+  const [salaryEmp, setSalaryEmp] = useState<Employee | null>(null);
+  const [salaryInput, setSalaryInput] = useState("");
+  const [paymentDetail, setPaymentDetail] = useState<{ payment: any; label: string; range: string; deficits: any[] } | null>(null);
+  // Payroll (028): live expected payment + closed-payment history for the
+  // selected employee. Re-runs when payrollVersion bumps (after any salary
+  // write) so the figures never go stale.
+  useEffect(() => {
+    if (!selectedEmpId || !selectedEmp || !canSeeSalary(selectedEmp)) {
+      setEmpPayroll(null);
+      setEmpPayments([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const db = await getDb();
+        const orgId = await orgIdOf(db);
+        const period = await ensurePayPeriod(db, orgId);
+        const exp = await expectedPayment(db, selectedEmpId, period);
+        const pays = await paymentHistory(db, selectedEmpId);
+        const rows: any[] = [];
+        for (const p of (pays ?? []).slice(0, 8)) {
+          const per = await periodById(db, String((p as any).period_id ?? ""));
+          rows.push({
+            ...p,
+            label: per ? periodLabel(per.start_date, per.end_date) : String((p as any).closed_at ?? "").slice(0, 10),
+            range: per ? `${per.start_date} → ${per.end_date}` : "",
+          });
+        }
+        if (!cancelled) {
+          setEmpPayroll({ ...exp, periodLabel: periodLabel(period.start_date, period.end_date) });
+          setEmpPayments(rows);
+        }
+      } catch {
+        if (!cancelled) { setEmpPayroll(null); setEmpPayments([]); }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEmpId, (selectedEmp as any)?.salary, (selectedEmp as any)?.active, payrollVersion]);
+  // Owner-only email editing for any employee (own included).
+  const canEditEmail = () => role === "owner";
+  // Staff edit their OWN profile (name/phone/address/emergency); a strict
+  // superior edits anyone below (never the owner as target). Email stays
+  // owner-only via canEditEmail.
+  const canEditInfo = (t: any) => t?.id === currentUser?.id || (t?.role !== "owner" && canAffect(t));
   const [resetTargetEmp, setResetTargetEmp] = useState<Employee | null>(null);
   const { width, isTablet, padH } = useResponsive();
   const insets = useSafeAreaInsets();
@@ -248,6 +380,219 @@ export default function TeamScreen({
     </Pressable>
   );
 
+  // Customer-edit-style dark form for staff general info. Valid gates the
+  // header Save pill (same pattern as CustomersScreen's edit sheet).
+  const infoValid =
+    !!selectedEmp &&
+    infoName.trim().length > 0 &&
+    (!infoEmail.trim() || isValidEmail(infoEmail.trim()));
+
+  function openInfoForm() {
+    if (!selectedEmp) return;
+    const stored = String((selectedEmp as any).phone ?? "");
+    setInfoName(String(selectedEmp.name ?? ""));
+    setInfoPhoneDigits(normalizePhoneInput(stored));
+    setInfoPhoneIso(inferPhoneIso(stored) || "HT");
+    setInfoEmail(String((selectedEmp as any).email ?? ""));
+    setInfoAddress(String((selectedEmp as any).address ?? ""));
+    setInfoDialOpen(false);
+    setModalView("info");
+  }
+
+  function openEmergForm() {
+    if (!selectedEmp) return;
+    const em = (selectedEmp as any).emergency ?? { name: "", phone: "", address: "" };
+    const stored = String(em.phone ?? "");
+    setEmergName(String(em.name ?? ""));
+    setEmergPhoneDigits(normalizePhoneInput(stored));
+    setEmergPhoneIso(inferPhoneIso(stored) || "HT");
+    setEmergAddress(String(em.address ?? ""));
+    setEmergDialOpen(false);
+    setModalView("emerg");
+  }
+
+  // Emergency form: all-optional — everything empty clears the section; if
+  // anything is filled, the contact's name becomes required.
+  const emergHasAny = !!(emergName.trim() || emergPhoneDigits || emergAddress.trim());
+  const emergValid = !emergHasAny || emergName.trim().length > 0;
+
+  /** Modifye salè (owner/admin, strict superior): opens with the CURRENT
+   * amount — the cache digits, else the role default. Append-only history. */
+  function openSalaryForm() {
+    if (!selectedEmp) return;
+    const digits = Math.round(Number(String(selectedEmp.salary ?? "").replace(/[^0-9.]/g, "")) || 0);
+    setSalaryEmp(selectedEmp);
+    setSalaryInput(String(digits || ROLE_SALARY_DEFAULT[selectedEmp.role] || 12000));
+    setModalView("salary");
+  }
+  const salaryValid = (Number(String(salaryInput).replace(/[^0-9.]/g, "")) || 0) > 0;
+
+  async function saveSalary() {
+    if (!salaryEmp) return;
+    const amount = Math.round(Number(String(salaryInput).replace(/[^0-9.]/g, "")) || 0);
+    if (amount <= 0) { Alert.alert("Montan envalid", "Antre yon salè ki pi gran pase zewo."); return; }
+    try {
+      const db = await getDb();
+      const orgId = await orgIdOf(db);
+      // Append-only: a NEW dated row; the previous salary stays in history.
+      await recordSalaryChange(db, { employeeId: salaryEmp.id, amount, orgId, storeId: storeIdForLocation(currentStore) });
+      const shown = salaryCacheString(amount);
+      setEmployees(prev => prev.map(x => x.id === salaryEmp.id ? { ...x, salary: shown } : x));
+      setSelectedEmp(prev => (prev && prev.id === salaryEmp.id ? { ...prev, salary: shown } : prev));
+      setPayrollVersion(v => v + 1);
+    } catch { Alert.alert("Erè", "Salè a pa t ka anrejistre."); return; }
+    setSalaryEmp(null);
+    setModalView("detail");
+  }
+
+  /** Breakdown for one closed payment: the deficits netted at close. */
+  async function openPaymentDetail(p: any) {
+    if (!selectedEmp) return;
+    try {
+      const db = await getDb();
+      const per = await periodById(db, String(p?.period_id ?? ""));
+      const rows = per ? await periodDeficitRows(db, selectedEmp.id, per) : [];
+      setPaymentDetail({
+        payment: p,
+        label: p?.label ?? "",
+        range: per ? `${per.start_date} → ${per.end_date}` : "",
+        deficits: rows as any[],
+      });
+      setModalView("paymentDetail");
+    } catch {}
+  }
+
+  function saveInfo() {
+    if (!selectedEmp) return;
+    if (!canEditInfo(selectedEmp)) { Alert.alert("Pa gen dwa", "Se yon siperyè strik ka modifye enfòmasyon sa a."); return; }
+    if (!infoName.trim()) { Alert.alert("Non obligatwa", "Non anplwaye pa ka vid."); return; }
+    if (infoEmail.trim() && !isValidEmail(infoEmail.trim())) { Alert.alert("Imel valab", "Antre yon imel valab oswa kite chèn an vid."); return; }
+    const patch: Partial<Employee> = {
+      name: infoName.trim(),
+      phone: infoPhoneDigits ? formatPhoneDigits(infoPhoneDigits, infoPhoneIso) : "",
+      address: infoAddress.trim(),
+    };
+    if (canEditEmail()) (patch as any).email = infoEmail.trim().toLowerCase();
+    setEmployees(prev => prev.map(x => x.id === selectedEmp.id ? { ...x, ...patch } : x));
+    setSelectedEmp({ ...selectedEmp, ...patch } as Employee);
+    setModalView("detail");
+  }
+
+  function saveEmergency() {
+    if (!selectedEmp) return;
+    if (!canEditInfo(selectedEmp)) { Alert.alert("Pa gen dwa", "Se yon siperyè strik ka modifye enfòmasyon sa a."); return; }
+    if (emergHasAny && !emergName.trim()) { Alert.alert("Non obligatwa", "Non kontak obligatwa si ou ranpli lòt chèn yo."); return; }
+    const emergency = emergHasAny
+      ? { name: emergName.trim(), phone: emergPhoneDigits ? formatPhoneDigits(emergPhoneDigits, emergPhoneIso) : "", address: emergAddress.trim() }
+      : null;
+    setEmployees(prev => prev.map(x => x.id === selectedEmp.id ? { ...x, emergency } : x));
+    setSelectedEmp({ ...selectedEmp, emergency } as Employee);
+    setModalView("detail");
+  }
+
+  // ── Add staff (customer-add style sheet) ──
+  // Phones use the customer PhoneField (digits + country mask). On Kreye the
+  // middleware creates the GoTrue login + cloud profile and emails the temp
+  // password; the response carries the password ONCE for the creator to copy.
+  const [newEmpPhoneDigits, setNewEmpPhoneDigits] = useState("");
+  const [newEmpPhoneIso, setNewEmpPhoneIso] = useState("HT");
+  const [newEmpDialOpen, setNewEmpDialOpen] = useState(false);
+  const [newEmpEmergPhoneDigits, setNewEmpEmergPhoneDigits] = useState("");
+  const [newEmpEmergPhoneIso, setNewEmpEmergPhoneIso] = useState("HT");
+  const [newEmpEmergDialOpen, setNewEmpEmergDialOpen] = useState(false);
+  const [addView, setAddView] = useState<"form" | "done">("form");
+  const [addSaving, setAddSaving] = useState(false);
+  const [addResult, setAddResult] = useState<{ password: string; pin: string; emailSent: boolean } | null>(null);
+
+  const addPhoneOk = newEmpPhoneDigits.length >= 7;
+  const addEmergHasAny = !!(newEmpEmergName.trim() || newEmpEmergPhoneDigits || newEmpEmergAddress.trim());
+  const addValid =
+    !!newEmpName.trim() && addPhoneOk && isValidEmail(newEmpEmail.trim()) &&
+    !!newEmpAddress.trim() && canAddRole(newEmpRole) && (!addEmergHasAny || !!newEmpEmergName.trim());
+
+  function resetAddForm() {
+    setNewEmpName(""); setNewEmpRole("cashier"); setNewEmpEmail(""); setNewEmpAddress("");
+    setNewEmpSalary(String(ROLE_SALARY_DEFAULT.cashier));
+    setNewEmpEmergName(""); setNewEmpEmergAddress(""); setNewEmpError("");
+    setNewEmpPhoneDigits(""); setNewEmpPhoneIso("HT");
+    setNewEmpEmergPhoneDigits(""); setNewEmpEmergPhoneIso("HT");
+    setNewEmpDialOpen(false); setNewEmpEmergDialOpen(false);
+    setAddView("form"); setAddResult(null); setAddSaving(false);
+  }
+  function closeAdd() { setShowAdd(false); resetAddForm(); }
+
+  async function submitAddStaff() {
+    if (addSaving || !addValid) return;
+    setNewEmpError("");
+    const norm = (s: any) => String(s ?? "").trim().toLowerCase();
+    const phone = formatPhoneDigits(newEmpPhoneDigits, newEmpPhoneIso);
+    const dup = employees.some(x =>
+      norm(x?.name) === norm(newEmpName) ||
+      (phone !== "" && String(x?.phone ?? "").trim() === phone)
+    );
+    if (dup) { setNewEmpError("Anplwaye sa a egziste deja."); return; }
+    setAddSaving(true);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token ?? "";
+      const res = await fetch(`${middlewareUrl}/api/staff/invite`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+          store_id: storeIdForLocation(currentStore),
+          email: newEmpEmail.trim().toLowerCase(),
+          full_name: newEmpName.trim(),
+          role: newEmpRole,
+        }),
+      });
+      const out = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        const msg =
+          res.status === 409 ? "Imel sa a gen kont deja." :
+          res.status === 401 || res.status === 403 ? "Ou pa gen dwa ajoute anplwaye." :
+          String(out?.message ?? "Kreye kont la echwe.");
+        setNewEmpError(msg);
+        return;
+      }
+      const id = String(out.user_id);
+      const salaryAmount = Math.round(Number(String(newEmpSalary).replace(/[^0-9.]/g, "")) || 0);
+      // Payroll (028): the visible add-form salary becomes the FIRST dated
+      // salary_history row (employees.salary stays a display cache).
+      if (salaryAmount > 0) {
+        try {
+          const db = await getDb();
+          const orgId = await orgIdOf(db);
+          await recordSalaryChange(db, { employeeId: id, amount: salaryAmount, orgId, storeId: storeIdForLocation(currentStore) });
+        } catch {}
+      }
+      setEmployees(prev => [...prev, {
+        id,
+        name: newEmpName.trim(),
+        role: newEmpRole as any,
+        phone,
+        email: newEmpEmail.trim().toLowerCase(),
+        address: newEmpAddress.trim(),
+        store: currentStore,
+        emergency: addEmergHasAny
+          ? { name: newEmpEmergName.trim(), phone: newEmpEmergPhoneDigits ? formatPhoneDigits(newEmpEmergPhoneDigits, newEmpEmergPhoneIso) : "", address: newEmpEmergAddress.trim() }
+          : null,
+        secret: String(out.pin ?? "0000"),
+        password: String(out.password ?? ""),
+        lastAction: "Nouvo manm",
+        kpi: "—",
+        salary: salaryAmount > 0 ? salaryCacheString(salaryAmount) : (newEmpRole === "admin" ? "G 32 000" : newEmpRole === "manager" ? "G 25 000" : "G 12 000"),
+        isOnline: false,
+        active: true,
+      } as any]);
+      setAddResult({ password: String(out.password ?? ""), pin: String(out.pin ?? ""), emailSent: !!out.email_sent });
+      setAddView("done");
+    } catch {
+      setNewEmpError("Kreye kont la mande entènèt.");
+    } finally {
+      setAddSaving(false);
+    }
+  }
+
   // Shared employee-detail body (profile / edit-role / self-edit / reset).
   // Phone shows it inside the full-screen detail Modal below; the tablet
   // two-panel layout renders the same content in the right pane instead.
@@ -262,7 +607,17 @@ export default function TeamScreen({
                   <Animated.View style={{ flex: 1, opacity: titleFade }}>
                     <Text style={{ textAlign: "center", fontWeight: "800", fontSize: 18, color: "#fff" }} numberOfLines={1}>{empLastName}</Text>
                   </Animated.View>
+                  {selectedEmp && canEditInfo(selectedEmp) ? (
+                  <Pressable
+                    onPress={openInfoForm}
+                    accessibilityLabel="Edit"
+                    style={{ height: 44, paddingHorizontal: 24, borderRadius: 22, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" }}
+                  >
+                    <Text style={{ fontWeight: "800", fontSize: 15, color: "#000" }}>Edit</Text>
+                  </Pressable>
+                ) : (
                   <View style={{ width: 44 }} />
+                )}
                 </View>
 
             {modalView === "detail" && selectedEmp && <KeyboardSafeScrollView ref={detailScrollRef} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false} scrollEventThrottle={16} onScroll={e => setEmpNameCollapsed(e.nativeEvent.contentOffset.y > 100)}>
@@ -277,11 +632,20 @@ export default function TeamScreen({
                 canToggleActive={canToggle(selectedEmp)}
                 canEditRole={canAffect(selectedEmp) && selectedEmp.role !== "owner" && selectedEmp.id !== currentUser?.id}
                 canEditCredentials={canChangeSelf(selectedEmp) || canResetOther(selectedEmp)}
+                canEditEmail={canEditEmail()}
+                canEditEmergency={canEditInfo(selectedEmp)}
+                canEditSalary={canEditSalary(selectedEmp)}
+                payroll={empPayroll}
+                payments={empPayments}
+                onOpenPayment={openPaymentDetail}
+                onEditSalary={openSalaryForm}
+                onEditEmail={() => { setEmailInput(String((selectedEmp as any)?.email ?? "")); setResetResult(null); setModalView("email"); }}
+                onEditEmergency={openEmergForm}
                 onToggleActive={() => { toggleActive(selectedEmp); setSelectedEmp({ ...selectedEmp, active: !selectedEmp.active }); }}
                 onEditRole={() => { setEditingEmp(selectedEmp); setEditEmpRole(selectedEmp.role); setModalView("edit"); }}
                 onEditCredentials={() => {
                   if (canChangeSelf(selectedEmp)) { setSelfEditEmp(selectedEmp); setSelfSecret(""); setSelfPassword(""); setModalView("selfEdit"); }
-                  else { setResetTargetEmp(selectedEmp); setModalView("reset"); }
+                  else { setResetTargetEmp(selectedEmp); setResetResult(null); setModalView("reset"); }
                 }}
               />
               </View>
@@ -295,110 +659,297 @@ export default function TeamScreen({
                     <Text style={{ fontSize: 16, color: "#fff", fontWeight: "500", marginLeft: 4 }}>Dèyè</Text>
                   </Pressable>
                   <View style={{ flex: 1 }} />
+                  {modalView === "info" || modalView === "emerg" || modalView === "salary" ? (
+                    (() => {
+                      const valid = modalView === "emerg" ? emergValid : modalView === "salary" ? salaryValid : infoValid;
+                      const onSave = modalView === "emerg" ? saveEmergency : modalView === "salary" ? saveSalary : saveInfo;
+                      return (
+                        <Pressable
+                          onPress={onSave}
+                          disabled={!valid}
+                          style={{ paddingHorizontal: 26, paddingVertical: 14, borderRadius: 26, backgroundColor: valid ? "#fff" : "#2b2b2b" }}
+                        >
+                          <Text style={{ fontWeight: "800", fontSize: 15, color: valid ? "#000" : "#6e6e73" }}>Save</Text>
+                        </Pressable>
+                      );
+                    })()
+                  ) : null}
                 </View>
                 <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} style={{ flex: 1, marginTop: 6 }} contentContainerStyle={{ paddingBottom: 24 }}>
 
-            {/* Edit role — inside modal */}
+            {/* Edit role — inside modal (dark sheet, black chrome) */}
             {modalView === "edit" && editingEmp && (
-              <Animated.View style={{ backgroundColor: "white", padding: 16, paddingBottom: 28, gap: 16, transform: [{ translateX: slide }], opacity }}>
+              <Animated.View style={{ padding: 16, paddingBottom: 28, gap: 16, transform: [{ translateX: slide }], opacity }}>
                 <View style={{ alignItems: "center", gap: 2 }}>
-                  <Text style={{ fontWeight: "700", fontSize: 18, color: "#16130c", letterSpacing: -0.4 }}>Modifye wòl</Text>
-                  <Text style={{ fontSize: 13, color: "#837b69", textAlign: "center", marginTop: 2 }}>{editingEmp.role.toUpperCase()} → {editEmpRole.toUpperCase()}</Text>
+                  <Text style={{ fontWeight: "700", fontSize: 18, color: "#fff", letterSpacing: -0.4 }}>Modifye wòl</Text>
+                  <Text style={{ fontSize: 13, color: "#8e8e93", textAlign: "center", marginTop: 2 }}>{ROLE_OPTION_LABEL[editingEmp.role] ?? editingEmp.role} → {ROLE_OPTION_LABEL[editEmpRole] ?? editEmpRole}</Text>
                 </View>
                 {editingEmp.role === "owner" ? (
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#FFF1F2", borderRadius: 12, padding: 12 }}>
-                    <Ionicons name="alert-circle" size={18} color="#FF3B30" />
-                    <Text style={{ flex: 1, fontSize: 13, fontWeight: "500", color: "#FF3B30" }}>Pa ka modifye aksè Owner.</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#1a0d0d", borderRadius: 12, padding: 12, borderWidth: 1, borderColor: "#5a1a1a" }}>
+                    <Ionicons name="alert-circle" size={18} color="#FF453A" />
+                    <Text style={{ flex: 1, fontSize: 13, fontWeight: "500", color: "#FF453A" }}>Pa ka modifye aksè Owner.</Text>
                   </View>
                 ) : null}
                 {editingEmp.id === currentUser?.id && role === "admin" ? (
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#FFFBEB", borderRadius: 12, padding: 12 }}>
-                    <Ionicons name="alert-circle" size={18} color="#92400E" />
-                    <Text style={{ flex: 1, fontSize: 13, fontWeight: "500", color: "#92400E" }}>Admin pa ka bese tèt li.</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#241a05", borderRadius: 12, padding: 12, borderWidth: 1, borderColor: "#5a451a" }}>
+                    <Ionicons name="alert-circle" size={18} color="#FFD60A" />
+                    <Text style={{ flex: 1, fontSize: 13, fontWeight: "500", color: "#FFD60A" }}>Admin pa ka bese tèt li.</Text>
                   </View>
                 ) : null}
                 <View style={{ gap: 6 }}>
                   <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Nouvo wòl</Text>
-                  <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
-                    {(["admin", "manager", "cashier"] as const).filter(r => canEditRoleFor(editingEmp, r)).map((r, i, arr) => (
-                      <Pressable key={r} onPress={() => setEditEmpRole(r)} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 14, borderBottomWidth: i < arr.length - 1 ? StyleSheet.hairlineWidth : 0, borderBottomColor: "#E5E5EA" }}>
-                        <Ionicons name="person-outline" size={18} color="#837b69" style={{ marginRight: 12 }} />
-                        <Text style={{ flex: 1, fontSize: 15, color: "#16130c", fontWeight: "500" }}>{r.charAt(0).toUpperCase() + r.slice(1)}</Text>
-                        {editEmpRole === r && <Ionicons name="checkmark-circle" size={20} color="#16130c" />}
+                  <View style={{ backgroundColor: "#0a0a0a", borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: "#3a3a3c" }}>
+                    {(["admin", "manager", "cashier", "associate", "cook"] as const).filter(r => canEditRoleFor(editingEmp, r)).map((r, i, arr) => (
+                      <Pressable key={r} onPress={() => setEditEmpRole(r)} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 14, borderBottomWidth: i < arr.length - 1 ? StyleSheet.hairlineWidth : 0, borderBottomColor: "#3a3a3c" }}>
+                        <Ionicons name="person-outline" size={18} color="#8e8e93" style={{ marginRight: 12 }} />
+                        <Text style={{ flex: 1, fontSize: 15, color: "#fff", fontWeight: "500" }}>{ROLE_OPTION_LABEL[r] ?? r}</Text>
+                        {editEmpRole === r && <Ionicons name="checkmark-circle" size={20} color="#fff" />}
                       </Pressable>
                     ))}
                   </View>
                 </View>
                 <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
-                  <Pressable onPress={() => setModalView("detail")} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#F2F2F7", borderRadius: 12, alignItems: "center" }}><Text style={{ fontWeight: "600", fontSize: 15, color: "#16130c" }}>Anile</Text></Pressable>
+                  <Pressable onPress={() => setModalView("detail")} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#2b2b2b", borderRadius: 12, alignItems: "center" }}><Text style={{ fontWeight: "600", fontSize: 15, color: "#fff" }}>Anile</Text></Pressable>
                   <Pressable
                     onPress={() => {
                       if (!canEditRoleFor(editingEmp, editEmpRole as any)) { Alert.alert("Refize", "Pa ka pwomouvwa nan Owner, pa ka manyen Owner, Admin pa ka bese tèt li."); return; }
                       setEmployees(prev => prev.map(x => x.id === editingEmp.id ? { ...x, role: editEmpRole as any } : x));
                       setSelectedEmp(null); setModalView("detail");
                     }}
-                    style={{ flex: 1, paddingVertical: 14, backgroundColor: canEditRoleFor(editingEmp, editEmpRole as any) ? "#16130c" : "#E5E5EA", borderRadius: 12, alignItems: "center" }}>
-                    <Text style={{ color: "white", fontWeight: "700", fontSize: 15 }}>Anrejistre</Text>
+                    style={{ flex: 1, paddingVertical: 14, backgroundColor: canEditRoleFor(editingEmp, editEmpRole as any) ? "#fff" : "#2b2b2b", borderRadius: 12, alignItems: "center" }}>
+                    <Text style={{ color: canEditRoleFor(editingEmp, editEmpRole as any) ? "#000" : "#6e6e73", fontWeight: "700", fontSize: 15 }}>Anrejistre</Text>
                   </Pressable>
                 </View>
               </Animated.View>
             )}
 
-            {/* Self edit — inside modal */}
+            {/* Self edit — inside modal (dark sheet, black chrome) */}
             {modalView === "selfEdit" && selfEditEmp && (
-              <Animated.View style={{ backgroundColor: "white", padding: 16, paddingBottom: 28, gap: 16, transform: [{ translateX: slide }], opacity }}>
+              <Animated.View style={{ padding: 16, paddingBottom: 28, gap: 16, transform: [{ translateX: slide }], opacity }}>
                 <View style={{ alignItems: "center", gap: 2 }}>
-                  <Text style={{ fontWeight: "700", fontSize: 18, color: "#16130c", letterSpacing: -0.4 }}>Chanje pa mwen</Text>
-                  <Text style={{ fontSize: 13, color: "#837b69", textAlign: "center", marginTop: 2 }}>Se sèlman ou ki ka chanje kòd / modpas ou.</Text>
+                  <Text style={{ fontWeight: "700", fontSize: 18, color: "#fff", letterSpacing: -0.4 }}>Chanje pa mwen</Text>
+                  <Text style={{ fontSize: 13, color: "#8e8e93", textAlign: "center", marginTop: 2 }}>Se sèlman ou ki ka chanje kòd / modpas ou.</Text>
                 </View>
                 <View style={{ gap: 6 }}>
                   <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Modpas / Kòd</Text>
-                  <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
+                  <View style={{ backgroundColor: "#0a0a0a", borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: "#3a3a3c" }}>
                     <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                      <Ionicons name="key-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                      <TextInput placeholder="Nouvo kòd — kite vid" placeholderTextColor="#a1967f" value={selfSecret} onChangeText={setSelfSecret} secureTextEntry style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                      <Ionicons name="key-outline" size={18} color="#8e8e93" style={{ position: "absolute", left: 14 }} />
+                      <TextInput placeholder="Nouvo kòd — kite vid" placeholderTextColor="#8e8e93" value={selfSecret} onChangeText={setSelfSecret} secureTextEntry style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#fff" }} />
                     </View>
-                    <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
+                    <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#3a3a3c", marginLeft: 44 }} />
                     <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                      <Ionicons name="lock-closed-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                      <TextInput placeholder="Nouvo modpas — kite vid" placeholderTextColor="#a1967f" value={selfPassword} onChangeText={setSelfPassword} secureTextEntry style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
+                      <Ionicons name="lock-closed-outline" size={18} color="#8e8e93" style={{ position: "absolute", left: 14 }} />
+                      <TextInput placeholder="Nouvo modpas — kite vid" placeholderTextColor="#8e8e93" value={selfPassword} onChangeText={setSelfPassword} secureTextEntry style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#fff" }} />
                     </View>
                   </View>
                 </View>
                 <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
-                  <Pressable onPress={() => setModalView("detail")} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#F2F2F7", borderRadius: 12, alignItems: "center" }}><Text style={{ fontWeight: "600", fontSize: 15, color: "#16130c" }}>Anile</Text></Pressable>
+                  <Pressable onPress={() => setModalView("detail")} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#2b2b2b", borderRadius: 12, alignItems: "center" }}><Text style={{ fontWeight: "600", fontSize: 15, color: "#fff" }}>Anile</Text></Pressable>
                   <Pressable
                     onPress={() => {
                       if (!selfSecret.trim() && !selfPassword.trim()) { Alert.alert("Antre kòd oswa modpas"); return; }
                       setEmployees(prev => prev.map(x => x.id === selfEditEmp.id ? { ...x, secret: selfSecret.trim() || x.secret, password: selfPassword.trim() || x.password } : x));
                       setSelfEditEmp(null); setSelfSecret(""); setSelfPassword(""); setSelectedEmp(null); setModalView("detail");
                     }}
-                    style={{ flex: 1, paddingVertical: 14, backgroundColor: "#16130c", borderRadius: 12, alignItems: "center" }}><Text style={{ color: "white", fontWeight: "700", fontSize: 15 }}>Anrejistre pa mwen</Text></Pressable>
+                    style={{ flex: 1, paddingVertical: 14, backgroundColor: "#fff", borderRadius: 12, alignItems: "center" }}><Text style={{ color: "#000", fontWeight: "700", fontSize: 15 }}>Anrejistre pa mwen</Text></Pressable>
                 </View>
               </Animated.View>
             )}
 
-            {/* Reset — inside modal */}
-            {modalView === "reset" && resetTargetEmp && (
-              <Animated.View style={{ backgroundColor: "white", padding: 16, paddingBottom: 28, gap: 16, transform: [{ translateX: slide }], opacity }}>
-                <View style={{ alignItems: "center", gap: 2 }}>
-                  <Text style={{ fontWeight: "700", fontSize: 18, color: "#16130c", letterSpacing: -0.4 }}>Reyinisyialize</Text>
-                  <Text style={{ fontSize: 13, color: "#837b69", textAlign: "center", marginTop: 2 }}>Ou pa wè ansyen kòd/modpas. Reyinisyializasyon fòse itilizatè a mete nouvo pa li menm.</Text>
+            {/* General-info edit — customer-edit-style dark form; strict
+                superior, never owner; email editable by owner only. */}
+            {modalView === "info" && selectedEmp && (
+              <Animated.View style={{ transform: [{ translateX: slide }], opacity }}>
+                <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginBottom: 4 }}>Modifye enfòmasyon</Text>
+                <Text style={{ color: "#8e8e93", fontSize: 13, marginBottom: 18 }}>{selectedEmp.name}</Text>
+
+                <View style={{ marginBottom: 12 }}>
+                  <TextInput value={infoName} onChangeText={setInfoName} placeholder="Non konplè" placeholderTextColor="#8e8e93" style={DARK_FIELD} />
                 </View>
-                <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
-                  <Pressable onPress={() => { setEmployees(prev => prev.map(x => x.id === resetTargetEmp.id ? { ...x, secret: String(1000 + Math.floor(Math.random()*9000)).slice(-4) } : x)); setSelectedEmp(null); setModalView("detail"); }} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E5E5EA" }}>
-                    <Ionicons name="key-outline" size={20} color="#FF3B30" style={{ marginRight: 12 }} />
-                    <Text style={{ flex: 1, fontSize: 15, color: "#FF3B30", fontWeight: "600" }}>Reyinisyialize kòd</Text>
-                    <Ionicons name="chevron-forward" size={18} color="#C7C7CC" />
-                  </Pressable>
-                  <Pressable onPress={() => { setEmployees(prev => prev.map(x => x.id === resetTargetEmp.id ? { ...x, password: `tmp-${Math.random().toString(36).slice(2,8)}` } : x)); setSelectedEmp(null); setModalView("detail"); }} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 14 }}>
-                    <Ionicons name="lock-closed-outline" size={20} color="#FF3B30" style={{ marginRight: 12 }} />
-                    <Text style={{ flex: 1, fontSize: 15, color: "#FF3B30", fontWeight: "600" }}>Reyinisyialize modpas</Text>
-                    <Ionicons name="chevron-forward" size={18} color="#C7C7CC" />
-                  </Pressable>
+                <PhoneField
+                  value={infoPhoneDigits}
+                  onChange={setInfoPhoneDigits}
+                  country={infoPhoneIso}
+                  onPressFlag={() => setInfoDialOpen(true)}
+                />
+                {!canEditEmail() ? (
+                  <View style={{ alignItems: "flex-end", marginBottom: 6 }}>
+                    <View style={{ backgroundColor: "#2b2b2b", borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2 }}>
+                      <Text style={{ fontSize: 10, fontWeight: "600", color: "#8e8e93" }}>Owner</Text>
+                    </View>
+                  </View>
+                ) : null}
+                <View style={{ marginBottom: 12 }}>
+                  <TextInput
+                    value={infoEmail}
+                    onChangeText={setInfoEmail}
+                    editable={canEditEmail()}
+                    keyboardType="email-address"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="Imel"
+                    placeholderTextColor="#8e8e93"
+                    style={[DARK_FIELD, canEditEmail() ? null : { opacity: 0.55 }]}
+                  />
+                </View>
+                <View style={{ marginBottom: 12 }}>
+                  <TextInput value={infoAddress} onChangeText={setInfoAddress} placeholder="Adrès" placeholderTextColor="#8e8e93" multiline textAlignVertical="top" style={[DARK_FIELD, { height: 96, paddingTop: 14 }]} />
+                </View>
+                <Text style={{ color: "#8e8e93", fontSize: 12 }}>Non obligatwa; lòt chèn yo opsyonèl. Imel: sèlman Owner ka modifye l.</Text>
+                <CountryDialPicker
+                  visible={infoDialOpen}
+                  onClose={() => setInfoDialOpen(false)}
+                  onPick={iso => setInfoPhoneIso(iso)}
+                  title="Kòd peyi"
+                />
+              </Animated.View>
+            )}
+
+            {/* Emergency contact — customer-edit-style dark form; same gates
+                as personal info. All-optional; empty Save clears the section. */}
+            {modalView === "emerg" && selectedEmp && (
+              <Animated.View style={{ transform: [{ translateX: slide }], opacity }}>
+                <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginBottom: 4 }}>Kontak ijans</Text>
+                <Text style={{ color: "#8e8e93", fontSize: 13, marginBottom: 18 }}>{selectedEmp.name}</Text>
+
+                <View style={{ marginBottom: 12 }}>
+                  <TextInput value={emergName} onChangeText={setEmergName} placeholder="Non kontak" placeholderTextColor="#8e8e93" style={DARK_FIELD} />
+                </View>
+                <PhoneField
+                  value={emergPhoneDigits}
+                  onChange={setEmergPhoneDigits}
+                  country={emergPhoneIso}
+                  onPressFlag={() => setEmergDialOpen(true)}
+                />
+                <View style={{ marginBottom: 12 }}>
+                  <TextInput value={emergAddress} onChangeText={setEmergAddress} placeholder="Adrès kontak" placeholderTextColor="#8e8e93" multiline textAlignVertical="top" style={[DARK_FIELD, { height: 96, paddingTop: 14 }]} />
+                </View>
+                <Text style={{ color: "#8e8e93", fontSize: 12 }}>Tout chèn yo opsyonèl. Voye tout vid pou effase kontak ijans la.</Text>
+                <CountryDialPicker
+                  visible={emergDialOpen}
+                  onClose={() => setEmergDialOpen(false)}
+                  onPick={iso => setEmergPhoneIso(iso)}
+                  title="Kòd peyi"
+                />
+              </Animated.View>
+            )}
+
+            {/* Modifye salè — append-only (028): saving writes a NEW dated
+                row; the old salary stays in history. Owner/admin, strict
+                superior only, inactive targets blocked. */}
+            {modalView === "salary" && salaryEmp && (
+              <Animated.View style={{ transform: [{ translateX: slide }], opacity }}>
+                <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginBottom: 4 }}>Modifye salè</Text>
+                <Text style={{ color: "#8e8e93", fontSize: 13, marginBottom: 18 }}>{salaryEmp.name} — aktyèlman {salaryEmp.salary} / mwa</Text>
+                <TextInput
+                  value={salaryInput}
+                  onChangeText={v => setSalaryInput(v.replace(/[^0-9]/g, ""))}
+                  placeholder="Nouvo salè pa mwa"
+                  placeholderTextColor="#8e8e93"
+                  keyboardType="number-pad"
+                  style={DARK_FIELD}
+                />
+                {(() => {
+                  const hint = peerSalaryHint(Number(salaryInput) || 0, salaryEmp.role, employees, salaryEmp.id);
+                  return hint ? <Text style={{ color: "#FFD60A", fontSize: 12, marginTop: 8 }}>{hint}</Text> : null;
+                })()}
+                <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 10 }}>Chak chanjman se yon nouvo liy date — ansyen salè a rete nan istwa a.</Text>
+              </Animated.View>
+            )}
+
+            {/* Payment breakdown — one closed payment: salary − period deficits. */}
+            {modalView === "paymentDetail" && paymentDetail && (
+              <Animated.View style={{ transform: [{ translateX: slide }], opacity }}>
+                <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginBottom: 4 }}>Detay peman</Text>
+                <Text style={{ color: "#8e8e93", fontSize: 13, marginBottom: 18 }}>{paymentDetail.label}{paymentDetail.range ? ` · ${paymentDetail.range}` : ""}</Text>
+                <View style={{ backgroundColor: "#0a0a0a", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, padding: 16, marginBottom: 14 }}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 7 }}>
+                    <Text style={{ color: "#8e8e93", fontSize: 14 }}>Salè</Text>
+                    <Text style={{ color: "#fff", fontSize: 14, fontWeight: "600" }}>{fmtG(Number(paymentDetail.payment.salary_amount ?? 0))}</Text>
+                  </View>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 7 }}>
+                    <Text style={{ color: "#8e8e93", fontSize: 14 }}>Defisit (sou salè)</Text>
+                    <Text style={{ color: "#FF453A", fontSize: 14, fontWeight: "600" }}>− {fmtG(Number(paymentDetail.payment.deficit_total ?? 0))}</Text>
+                  </View>
+                  <View style={{ height: 1, backgroundColor: "#262626", marginVertical: 6 }} />
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 7 }}>
+                    <Text style={{ color: "#fff", fontSize: 15, fontWeight: "700" }}>Nèt peye</Text>
+                    <Text style={{ color: "#30D158", fontSize: 15, fontWeight: "800" }}>{fmtG(Number(paymentDetail.payment.net_amount ?? 0))}</Text>
+                  </View>
+                </View>
+                {paymentDetail.deficits.length ? (
+                  <>
+                    <Text style={{ color: "#8e8e93", fontSize: 11, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 8 }}>Defisit peryòd la</Text>
+                    {paymentDetail.deficits.map((d: any, i: number) => (
+                      <View key={String(d.id ?? i)} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 11, borderBottomWidth: i < paymentDetail.deficits.length - 1 ? 1 : 0, borderBottomColor: "#262626" }}>
+                        <Text style={{ color: "#fff", fontSize: 14 }}>{String(d.date ?? "")}</Text>
+                        <Text style={{ color: "#FF453A", fontSize: 14, fontWeight: "600" }}>− {fmtG(Number(d.amount ?? 0))}</Text>
+                      </View>
+                    ))}
+                  </>
+                ) : null}
+              </Animated.View>
+            )}
+
+            {/* Email edit (owner-only) — inside modal (dark sheet, black chrome) */}
+            {modalView === "email" && selectedEmp && (
+              <Animated.View style={{ padding: 16, paddingBottom: 28, gap: 16, transform: [{ translateX: slide }], opacity }}>
+                <View style={{ alignItems: "center", gap: 2 }}>
+                  <Text style={{ fontWeight: "700", fontSize: 18, color: "#fff", letterSpacing: -0.4 }}>Modifye imel</Text>
+                  <Text style={{ fontSize: 13, color: "#8e8e93", textAlign: "center", marginTop: 2 }}>{selectedEmp.name}</Text>
+                </View>
+                <View style={{ backgroundColor: "#0a0a0a", borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: "#3a3a3c" }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+                    <Ionicons name="mail-outline" size={18} color="#8e8e93" style={{ position: "absolute", left: 14 }} />
+                    <TextInput placeholder="Imel" placeholderTextColor="#8e8e93" value={emailInput} onChangeText={setEmailInput} keyboardType="email-address" autoCapitalize="none" autoCorrect={false} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#fff" }} />
+                  </View>
                 </View>
                 <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
-                  <Pressable onPress={() => setModalView("detail")} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#F2F2F7", borderRadius: 12, alignItems: "center" }}><Text style={{ fontWeight: "600", fontSize: 15, color: "#16130c" }}>Anile</Text></Pressable>
+                  <Pressable onPress={() => setModalView("detail")} style={{ flex: 1, paddingVertical: 14, backgroundColor: "#2b2b2b", borderRadius: 12, alignItems: "center" }}><Text style={{ fontWeight: "600", fontSize: 15, color: "#fff" }}>Anile</Text></Pressable>
+                  <Pressable
+                    onPress={() => {
+                      if (role !== "owner") { Alert.alert("Pa gen dwa", "Sèlman Owner ka modifye imel."); return; }
+                      if (!isValidEmail(emailInput.trim())) { Alert.alert("Imel obligatwa", "Antre yon imel valab."); return; }
+                      const next = emailInput.trim().toLowerCase();
+                      setEmployees(prev => prev.map(x => x.id === selectedEmp.id ? { ...x, email: next } : x));
+                      setSelectedEmp({ ...selectedEmp, email: next } as any);
+                      setModalView("detail");
+                    }}
+                    style={{ flex: 1, paddingVertical: 14, backgroundColor: "#fff", borderRadius: 12, alignItems: "center" }}><Text style={{ color: "#000", fontWeight: "700", fontSize: 15 }}>Anrejistre</Text></Pressable>
+                </View>
+              </Animated.View>
+            )}
+
+            {/* Reset — inside modal (dark sheet, black chrome) */}
+            {modalView === "reset" && resetTargetEmp && (
+              <Animated.View style={{ padding: 16, paddingBottom: 28, gap: 16, transform: [{ translateX: slide }], opacity }}>
+                <View style={{ alignItems: "center", gap: 2 }}>
+                  <Text style={{ fontWeight: "700", fontSize: 18, color: "#fff", letterSpacing: -0.4 }}>Reyinisyialize</Text>
+                  <Text style={{ fontSize: 13, color: "#8e8e93", textAlign: "center", marginTop: 2 }}>Ou pa wè ansyen kòd/modpas. Reyinisyializasyon fòse itilizatè a mete nouvo pa li menm.</Text>
+                </View>
+                {resetResult ? (
+                  <View style={{ backgroundColor: "#0a0a0a", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 16, padding: 16, alignItems: "center", gap: 6 }}>
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: "#a1967f" }}>{resetResult.label}</Text>
+                    <Text selectable style={{ fontSize: 22, fontWeight: "800", color: "#fff", letterSpacing: 1 }}>{resetResult.value}</Text>
+                    <Text style={{ fontSize: 12, color: "#a1967f", textAlign: "center" }}>Bay li bay anplwaye a — l ap disparèt lè w fèmen.</Text>
+                  </View>
+                ) : (
+                <View style={{ backgroundColor: "#0a0a0a", borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: "#3a3a3c" }}>
+                  <Pressable onPress={() => { const v = String(1000 + Math.floor(Math.random()*9000)).slice(-4); setEmployees(prev => prev.map(x => x.id === resetTargetEmp.id ? { ...x, secret: v } : x)); setResetResult({ label: "Nouvo kòd tanporè", value: v }); }} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#3a3a3c" }}>
+                    <Ionicons name="key-outline" size={20} color="#FF453A" style={{ marginRight: 12 }} />
+                    <Text style={{ flex: 1, fontSize: 15, color: "#FF453A", fontWeight: "600" }}>Reyinisyialize kòd</Text>
+                    <Ionicons name="chevron-forward" size={18} color="#6e6e73" />
+                  </Pressable>
+                  <Pressable onPress={() => { const v = randomPassword(); setEmployees(prev => prev.map(x => x.id === resetTargetEmp.id ? { ...x, password: v } : x)); setResetResult({ label: "Nouvo modpas", value: v }); }} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 14 }}>
+                    <Ionicons name="lock-closed-outline" size={20} color="#FF453A" style={{ marginRight: 12 }} />
+                    <Text style={{ flex: 1, fontSize: 15, color: "#FF453A", fontWeight: "600" }}>Reyinisyialize modpas</Text>
+                    <Ionicons name="chevron-forward" size={18} color="#6e6e73" />
+                  </Pressable>
+                </View>
+                )}
+                <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
+                  <Pressable onPress={() => { setResetResult(null); setSelectedEmp(null); setModalView("detail"); }} style={{ flex: 1, paddingVertical: 14, backgroundColor: resetResult ? "#fff" : "#2b2b2b", borderRadius: 12, alignItems: "center" }}><Text style={{ fontWeight: "600", fontSize: 15, color: resetResult ? "#000" : "#fff" }}>{resetResult ? "Fèmen" : "Anile"}</Text></Pressable>
                 </View>
               </Animated.View>
             )}
@@ -564,107 +1115,147 @@ export default function TeamScreen({
         </View>
       </Modal>
 
-      {/* Add member modal */}
-      <Modal visible={showAdd} transparent animationType="slide" onRequestClose={() => setShowAdd(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0} style={{ flex: 1 }}>
-          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.32)", justifyContent: "flex-end", alignItems: isTablet ? "center" : undefined }}>
-            <View style={{ ...sheetBox(isTablet, width, 640), width: "100%", backgroundColor: "#efe7d2", borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: "94%", overflow: "hidden" }}>
-            <View style={{ backgroundColor: "white", paddingHorizontal: 16, paddingTop: 10, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#e5e5ea" }}>
-              <View style={{ width: 36, height: 4, backgroundColor: "#d1d1d6", borderRadius: 2, marginBottom: 12, alignSelf: "center" }} />
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
-                <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: "#16130c", alignItems: "center", justifyContent: "center", shadowColor: "#16130c", shadowOpacity: 0.25, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, borderWidth: 1.5, borderColor: GOLD }}>
-                  <Ionicons name="person-add" size={24} color="#fff" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "800", fontSize: 19, color: "#16130c", letterSpacing: -0.4 }}>Nouvo Manb</Text>
-                  <Text style={{ fontSize: 12, color: "#837b69", marginTop: 2 }}>{role === "owner" ? "Admin · Manager · Cashier" : "Manager · Cashier"}</Text>
-                </View>
-              </View>
-            </View>
-            <KeyboardSafeScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" style={{ padding: 16 }} contentContainerStyle={{ gap: 16, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
-              {/* Informasyon pèsonèl */}
-              <View style={{ gap: 6 }}>
-                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Enfòmasyon pèsonèl</Text>
-                <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="person-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Non konplè" placeholderTextColor="#a1967f" value={newEmpName} onChangeText={v => { setNewEmpName(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="call-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Telefon" placeholderTextColor="#a1967f" value={newEmpPhone} onChangeText={v => { setNewEmpPhone(v); if(newEmpError) setNewEmpError(""); }} keyboardType="phone-pad" style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="home-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Adrès" placeholderTextColor="#a1967f" value={newEmpAddress} onChangeText={v => { setNewEmpAddress(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                </View>
-              </View>
-
-              {/* Wòl */}
-              <View style={{ gap: 6 }}>
-                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Wòl</Text>
-                <View style={{ flexDirection: "row", backgroundColor: "#E9E9EB", borderRadius: 14, padding: 4, gap: 4 }}>
-                  {addRoleOptions.map(r => {
-                    const active = newEmpRole === r;
-                    return (
-                      <Pressable key={r} onPress={() => setNewEmpRole(r)} style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: active ? "white" : "transparent", alignItems: "center", shadowColor: active ? "#000" : "transparent", shadowOpacity: active ? 0.1 : 0, shadowRadius: 4, elevation: active ? 2 : 0 }}>
-                        <Text style={{ fontSize: 12, fontWeight: "700", color: active ? "#16130c" : "#837b69", letterSpacing: 0.3 }}>{r.toUpperCase()}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-
-              {/* Kontak ijans */}
-              <View style={{ gap: 6 }}>
-                <Text style={{ paddingLeft: 4, fontSize: 11, fontWeight: "800", color: "#9C7A1E", letterSpacing: 0.8, textTransform: "uppercase" }}>Kontak ijans</Text>
-                <View style={{ backgroundColor: "white", borderRadius: 16, overflow: "hidden", borderWidth: 0.5, borderColor: "rgba(0,0,0,0.05)" }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="person-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Non ijans" placeholderTextColor="#a1967f" value={newEmpEmergName} onChangeText={v => { setNewEmpEmergName(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="call-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Telefon ijans" placeholderTextColor="#a1967f" value={newEmpEmergPhone} onChangeText={v => { setNewEmpEmergPhone(v); if(newEmpError) setNewEmpError(""); }} keyboardType="phone-pad" style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: "#E5E5EA", marginLeft: 44 }} />
-                  <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
-                    <Ionicons name="home-outline" size={18} color="#837b69" style={{ position: "absolute", left: 14 }} />
-                    <TextInput placeholder="Adrès ijans" placeholderTextColor="#a1967f" value={newEmpEmergAddress} onChangeText={v => { setNewEmpEmergAddress(v); if(newEmpError) setNewEmpError(""); }} style={{ flex: 1, paddingLeft: 30, paddingVertical: 14, fontSize: 15, color: "#16130c" }} />
-                  </View>
-                </View>
-              </View>
-
-              {newEmpError ? <View style={{ backgroundColor: "#FFF1F2", borderWidth: 0.5, borderColor: "#FECDD3", borderRadius: 12, padding: 12 }}><Text style={{ fontSize: 13, fontWeight: "600", color: "#B00020", textAlign: "center" }}>{newEmpError}</Text></View> : null}
-            </KeyboardSafeScrollView>
-            <View style={{ padding: 16, paddingBottom: 16 + insets.bottom, backgroundColor: "white", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#e5e5ea", gap: 8 }}>
+      {/* Add member — full-screen black sheet (customer-add design):
+          form → invite (GoTrue + profile + SMTP email) → one-time password
+          card the creator can copy / share. */}
+      <Modal visible={showAdd} transparent={false} animationType="slide" onRequestClose={closeAdd}>
+        <ModalScreen>
+          <CustomerProfileHeader
+            onBack={closeAdd}
+            backIcon="x-circle"
+            title={addView === "done" ? "Kont kreye" : "Nouvo anplwaye"}
+            headerAction={addView === "form" ? (
               <Pressable
-                onPress={() => {
-                  setNewEmpError("");
-                  if (!newEmpName.trim()) { setNewEmpError("Non obligatwa."); return; }
-                  if (!newEmpPhone.trim()) { setNewEmpError("Telefon obligatwa."); return; }
-                  if (!newEmpAddress.trim()) { setNewEmpError("Adrès obligatwa."); return; }
-                  if (!newEmpEmergName.trim() || !newEmpEmergPhone.trim() || !newEmpEmergAddress.trim()) { setNewEmpError("Kontak ijans konplè obligatwa: non, telefon, adrès."); return; }
-                  if (!canAddRole(newEmpRole)) { setNewEmpError("Ou pa gen dwa kreye wòl sa a — se sèlman siperyè strik ka kreye (pa menm nivo, pa Owner)."); return; }
-                  const id = mintId();
-                  const secret = String(employees.length + 1);
-                  setEmployees(prev => [...prev, { id, name: newEmpName.trim(), role: newEmpRole as any, phone: newEmpPhone.trim(), address: newEmpAddress.trim(), store: currentStore, emergency: { name: newEmpEmergName.trim(), phone: newEmpEmergPhone.trim(), address: newEmpEmergAddress.trim() }, secret, password: `pass-${Math.random().toString(36).slice(2, 8)}`, lastAction: "Nouvo manm", kpi: "—", salary: newEmpRole === "admin" ? "G 32 000" : newEmpRole === "manager" ? "G 25 000" : "G 12 000", isOnline: false, active: true } as any]);
-                  setNewEmpName(""); setNewEmpPhone(""); setNewEmpAddress(""); setNewEmpEmergName(""); setNewEmpEmergPhone(""); setNewEmpEmergAddress(""); setNewEmpRole("cashier"); setNewEmpError("");
-                  setShowAdd(false);
-                }}
-                style={{ backgroundColor: "#16130c", borderRadius: 14, paddingVertical: 15, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, shadowColor: "#16130c", shadowOpacity: 0.15, shadowRadius: 14, shadowOffset: { width: 0, height: 8 }, borderWidth: 1, borderColor: "rgba(200,162,74,0.35)" }}>
-                <Ionicons name="add" size={20} color="#fff" />
-                <Text style={{ color: "white", fontWeight: "700", fontSize: 15 }}>Ajoute anplwaye</Text>
+                onPress={submitAddStaff}
+                disabled={!addValid || addSaving}
+                style={{ paddingHorizontal: 26, paddingVertical: 14, borderRadius: 26, backgroundColor: addValid && !addSaving ? "#fff" : "#2b2b2b" }}
+              >
+                <Text style={{ fontWeight: "800", fontSize: 15, color: addValid && !addSaving ? "#000" : "#6e6e73" }}>{addSaving ? "…" : "Kreye"}</Text>
               </Pressable>
-              <Pressable onPress={() => setShowAdd(false)} style={{ paddingVertical: 6, alignItems: "center" }}><Text style={{ fontSize: 13, color: "#837b69", fontWeight: "500" }}>Fèmen</Text></Pressable>
-            </View>
-          </View>
-          </View>
-        </KeyboardAvoidingView>
+            ) : undefined}
+          />
+          {addView === "form" ? (
+            <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginBottom: 12 }}>Enfòmasyon pèsònèl</Text>
+              <View style={{ marginBottom: 12 }}>
+                <TextInput value={newEmpName} onChangeText={v => { setNewEmpName(v); if (newEmpError) setNewEmpError(""); }} placeholder="Non konplè" placeholderTextColor="#8e8e93" style={DARK_FIELD} />
+              </View>
+              <PhoneField
+                value={newEmpPhoneDigits}
+                onChange={v => { setNewEmpPhoneDigits(v); if (newEmpError) setNewEmpError(""); }}
+                country={newEmpPhoneIso}
+                onPressFlag={() => setNewEmpDialOpen(true)}
+              />
+              <View style={{ marginBottom: 12 }}>
+                <TextInput value={newEmpEmail} onChangeText={v => { setNewEmpEmail(v); if (newEmpError) setNewEmpError(""); }} placeholder="Imel — li sèvi pou konekte" placeholderTextColor="#8e8e93" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} style={DARK_FIELD} />
+              </View>
+              <View style={{ marginBottom: 4 }}>
+                <TextInput value={newEmpAddress} onChangeText={v => { setNewEmpAddress(v); if (newEmpError) setNewEmpError(""); }} placeholder="Adrès" placeholderTextColor="#8e8e93" multiline textAlignVertical="top" style={[DARK_FIELD, { height: 96, paddingTop: 14 }]} />
+              </View>
+
+              <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginTop: 18, marginBottom: 12 }}>Wòl</Text>
+              <View style={{ flexDirection: "row", backgroundColor: "#0a0a0a", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, padding: 4, gap: 4 }}>
+                {addRoleOptions.map(r => {
+                  const active = newEmpRole === r;
+                  return (
+                    <Pressable
+                      key={r}
+                      onPress={() => {
+                        // Smart default: the salary follows the role while the
+                        // owner never touched the field; once edited, hands off.
+                        const wasDefault = newEmpSalary === String(ROLE_SALARY_DEFAULT[newEmpRole] ?? 12000);
+                        setNewEmpRole(r);
+                        if (wasDefault) setNewEmpSalary(String(ROLE_SALARY_DEFAULT[r] ?? 12000));
+                      }}
+                      style={{ flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: active ? "#fff" : "transparent", alignItems: "center" }}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: "700", color: active ? "#000" : "#8e8e93", letterSpacing: 0.3 }}>{r.toUpperCase()}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginTop: 18, marginBottom: 12 }}>Salè</Text>
+              <TextInput
+                value={newEmpSalary}
+                onChangeText={v => setNewEmpSalary(v.replace(/[^0-9]/g, ""))}
+                placeholder="Salè pa mwa an goud"
+                placeholderTextColor="#8e8e93"
+                keyboardType="number-pad"
+                style={DARK_FIELD}
+              />
+              {(() => {
+                const hint = peerSalaryHint(Number(newEmpSalary) || 0, newEmpRole, employees);
+                return hint ? (
+                  <Text style={{ color: "#FFD60A", fontSize: 12, marginTop: 8 }}>{hint}</Text>
+                ) : (
+                  <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 8 }}>Salè prekounye a selon wòl la — ou lib pou chanje l.</Text>
+                );
+              })()}
+
+              <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3, marginTop: 22, marginBottom: 4 }}>Kontak ijans</Text>
+              <Text style={{ color: "#8e8e93", fontSize: 12, marginBottom: 12 }}>Opsyonèl — ou ka ranpli l pita nan Edit → Kontak ijans.</Text>
+              <View style={{ marginBottom: 12 }}>
+                <TextInput value={newEmpEmergName} onChangeText={setNewEmpEmergName} placeholder="Non kontak" placeholderTextColor="#8e8e93" style={DARK_FIELD} />
+              </View>
+              <PhoneField
+                value={newEmpEmergPhoneDigits}
+                onChange={setNewEmpEmergPhoneDigits}
+                country={newEmpEmergPhoneIso}
+                onPressFlag={() => setNewEmpEmergDialOpen(true)}
+              />
+              <View style={{ marginBottom: 12 }}>
+                <TextInput value={newEmpEmergAddress} onChangeText={setNewEmpEmergAddress} placeholder="Adrès kontak" placeholderTextColor="#8e8e93" multiline textAlignVertical="top" style={[DARK_FIELD, { height: 96, paddingTop: 14 }]} />
+              </View>
+
+              {newEmpError ? (
+                <View style={{ marginTop: 4, backgroundColor: "#1a0d0d", borderWidth: 1, borderColor: "#5a1a1a", borderRadius: 12, padding: 12 }}>
+                  <Text style={{ color: "#ff6961", fontSize: 13, fontWeight: "600" }}>{newEmpError}</Text>
+                </View>
+              ) : null}
+
+              <CountryDialPicker visible={newEmpDialOpen} onClose={() => setNewEmpDialOpen(false)} onPick={iso => setNewEmpPhoneIso(iso)} title="Kòd peyi" />
+              <CountryDialPicker visible={newEmpEmergDialOpen} onClose={() => setNewEmpEmergDialOpen(false)} onPick={iso => setNewEmpEmergPhoneIso(iso)} title="Kòd peyi" />
+              <View style={{ height: 28 }} />
+            </KeyboardSafeScrollView>
+          ) : (
+            <KeyboardSafeScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+              <View style={{ alignItems: "center", paddingTop: 16, gap: 12 }}>
+                <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: "#0a0a0a", borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center" }}>
+                  <Ionicons name="checkmark" size={34} color="#fff" />
+                </View>
+                <Text style={{ color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.3 }}>Kont kreye</Text>
+                <Text style={{ color: "#8e8e93", fontSize: 13, textAlign: "center", paddingHorizontal: 12 }}>
+                  {addResult?.emailSent
+                    ? `Imel voye a ${newEmpEmail.trim().toLowerCase()}`
+                    : "Kont la kreye — pataje modpas la ak anplwaye a."}
+                </Text>
+                <View style={{ width: "100%", backgroundColor: "#0a0a0a", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 16, padding: 18, alignItems: "center", gap: 6, marginTop: 10 }}>
+                  <Text style={{ color: "#8e8e93", fontSize: 11, fontWeight: "700", letterSpacing: 0.8 }}>MODPAS TANPORÈ</Text>
+                  <Text selectable style={{ color: "#fff", fontSize: 26, fontWeight: "800", letterSpacing: 2 }}>{addResult?.password}</Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 }}>
+                    <Text style={{ color: "#8e8e93", fontSize: 13 }}>PIN:</Text>
+                    <Text selectable style={{ color: "#fff", fontSize: 16, fontWeight: "700", letterSpacing: 3 }}>{addResult?.pin}</Text>
+                  </View>
+                </View>
+                <Pressable
+                  onPress={() => {
+                    Share.share({
+                      message: `Kourro\nImel: ${newEmpEmail.trim().toLowerCase()}\nModpas tanporè: ${addResult?.password ?? ""}\nPIN: ${addResult?.pin ?? ""}`,
+                    }).catch(() => {});
+                  }}
+                  style={{ width: "100%", marginTop: 6, backgroundColor: "#2b2b2b", borderRadius: 14, paddingVertical: 15, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8 }}
+                >
+                  <Ionicons name="share-outline" size={18} color="#fff" />
+                  <Text style={{ color: "#fff", fontWeight: "700", fontSize: 15 }}>Pataje</Text>
+                </Pressable>
+                <Pressable onPress={closeAdd} style={{ width: "100%", marginTop: 4, marginBottom: 20, backgroundColor: "#fff", borderRadius: 14, paddingVertical: 15, alignItems: "center" }}>
+                  <Text style={{ color: "#000", fontWeight: "800", fontSize: 15 }}>Fèmen</Text>
+                </Pressable>
+              </View>
+            </KeyboardSafeScrollView>
+          )}
+        </ModalScreen>
       </Modal>
 
       {/* Employee detail — phone: full-screen modal (tablet: right pane). */}

@@ -1059,7 +1059,7 @@ export function standbyTotals(sales: any[], from: number, to: number, cashierId?
 export function isPastAutoClose(now: Date, timeStr: string | null | undefined): boolean {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr ?? "").trim());
   const hh = m ? parseInt(m[1], 10) : 6;
-  const mm = m ? parseInt(m[2], 10) : 30;
+  const mm = m ? parseInt(m[2], 10) : 0;
   const mins = (now.getHours() * 60 + now.getMinutes());
   return mins >= hh * 60 + mm;
 }
@@ -1068,9 +1068,9 @@ export function isPastAutoClose(now: Date, timeStr: string | null | undefined): 
  * Should THIS shift have auto-closed by now?
  *
  * The close moment is the first "HH:MM" occurrence strictly after the shift
- * clocked in: a shift opened at 09:00 with a 06:30 auto-close lives until
- * 06:30 the NEXT day. A blanket "past HH:MM today" check (isPastAutoClose)
- * would instead force-close every open shift for the whole 06:30–24:00
+ * clocked in: a shift opened at 09:00 with a 06:00 auto-close lives until
+ * 06:00 the NEXT day. A blanket "past HH:MM today" check (isPastAutoClose)
+ * would instead force-close every open shift for the whole 06:00–24:00
  * window — the auto-close poll runs on boot, on foreground and every 60s, so
  * an app rebundle would silently kill a shift that is still in use
  * (auto_closed = 1, report written behind the user's back).
@@ -1078,7 +1078,7 @@ export function isPastAutoClose(now: Date, timeStr: string | null | undefined): 
 export function shiftAutoCloseDue(startTime: string | null | undefined, now: Date, timeStr: string | null | undefined): boolean {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr ?? "").trim());
   const hh = m ? parseInt(m[1], 10) : 6;
-  const mm = m ? parseInt(m[2], 10) : 30;
+  const mm = m ? parseInt(m[2], 10) : 0;
   const st = epoch(String(startTime ?? ""));
   if (isNaN(st)) return isPastAutoClose(now, timeStr); // legacy rows without start: old rule
   const start = new Date(st);

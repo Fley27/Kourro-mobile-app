@@ -1,6 +1,7 @@
 import { fmtG, fmt } from "./format";
 import { getUserById } from "./users";
 import { insertOutbox } from "./db";
+import { assertWritable } from "./subscription/subscription";
 import { buildReceipts, receiptItemsFrom, attachLineLabels } from "./receipts";
 import { FALLBACK_STORE_ID, mintId } from "./db/ids";
 
@@ -65,6 +66,7 @@ export async function changeSalePaymentMethod(
   target: "cash" | "credit",
   opts: { db: any; storeId: string; storeName: string; currentUser: any }
 ): Promise<{ sale: any; receiptNumber: string; previous: string; target: string }> {
+  assertWritable();
   const { sale, items, customer, credit } = detail;
   const db = opts.db;
   const now = new Date().toISOString();

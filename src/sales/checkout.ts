@@ -3,6 +3,7 @@
 // Pure wrt React state: takes explicit inputs, returns explicit results.
 // POSScreen orchestrates UI (pending commit, resets, modals) around it.
 import { insertOutbox } from "../db";
+import { assertWritable } from "../subscription/subscription";
 import { buildReceipts, type ReceiptData } from "../receipts";
 import { fmtG, fmt } from "../format";
 import { loadCatalogModel, currentCanonicalCost, minItemFactor, itemFactor } from "../catalogModel";
@@ -159,6 +160,7 @@ export async function persistSale(args: {
   expectedDiscount?: number;
   proformatId?: string | null;
 }): Promise<CheckoutResult> {
+  assertWritable();
   const { db, storeId, deviceId, storeName, cashier, lines, payment, customer, creditDueDate, resumedTabId, logTabEvent,
     appliedCoupon, proformatId } = args;
   const finalSubtotal = cartSubtotal(lines);
@@ -301,6 +303,12 @@ export async function persistSale(args: {
     saleItemRows.push(saleItemRow);
     if (!serviceIds.has(it.id)) {
       await db.runAsync("UPDATE products SET stock_quantity = stock_quantity - ?, current_amount_available = current_amount_available - ? WHERE id = ?", [baseQty, baseQty, it.id]);
+      // Per-store truth (product_stock) tracks the same delta — the products
+      // scalar above stays as a deprecated cache for old readers.
+      try {
+        const { applyStockDelta } = await import("../stock");
+        await applyStockDelta(db, storeId, it.id, -baseQty, now);
+      } catch {}
     }
   }
   await insertOutbox("sales", "create", sale);

@@ -13,6 +13,7 @@
 // screens is how "waiting is freely editable" quietly stops being true.
 import { getDb, insertOutbox } from "../db";
 import { notifyLocal } from "../notifications";
+import { guardWrite } from "../subscription/subscription";
 import {
   canCancelLine,
   canDecideChange,
@@ -58,6 +59,15 @@ import { mintId } from "../db/ids";
 // and clogged the queue. The four tables are registered now (TABLES entry +
 // 012_assisted_orders.sql), so dirty rows ride the regular sync push.
 const CLOUD_OUTBOX = true;
+
+// ── Subscription write gate ────────────────────────────────────────────────
+// New/advancing order writes are blocked while the org is read-only (expired
+// subscription). Close-out actions (cancel a line, decline a change) always
+// pass — guardWrite({ closeOut: true }) — or rows would stay stranded.
+function subGate(closeOut = false): { ok: false; error: string } | null {
+  const g = guardWrite({ closeOut });
+  return g.ok ? null : { ok: false, error: g.message };
+}
 
 export type OrderBusMessage = {
   table: "open_orders" | "open_order_lines" | "order_change_requests";
@@ -213,6 +223,8 @@ export type CreateOrderArgs = {
  * customer name in retail mode (phone is the backup lookup, not the key).
  */
 export async function createOrder(args: CreateOrderArgs): Promise<StoreResult<{ order: Order }>> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const tableNo = (args.tableNo ?? "").trim();
   const customerName = (args.customerName ?? "").trim();
@@ -384,6 +396,8 @@ export async function billingLines(orderId: string): Promise<BillingLine[]> {
 
 /** Payment starts → the whole order locks for settlement. */
 export async function lockOrder(orderId: string, actor: Actor): Promise<StoreResult<{ order: Order }>> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const order = await loadOrder(db, orderId);
   if (!order) return { ok: false, error: "Kòmand lan pa jwenn." };
@@ -536,6 +550,8 @@ export async function cancelOrder(orderId: string, actor: Actor, reason?: string
  * Only collapseForBilling merges, at payment time.
  */
 export async function addRound(orderId: string, rows: RoundLineInput[], actor: Actor): Promise<StoreResult<{ lines: OrderLine[] }>> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const order = await loadOrder(db, orderId);
   if (!order) return { ok: false, error: "Kòmand lan pa jwenn." };
@@ -612,6 +628,8 @@ export async function addRound(orderId: string, rows: RoundLineInput[], actor: A
 export type LinePatch = { qty?: number; unit_price?: number; variant?: string | null; name?: string | null };
 
 export async function editWaitingLine(lineId: string, patch: LinePatch, actor: Actor): Promise<StoreResult<{ line: OrderLine }>> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const line = await loadLine(db, lineId);
   if (!line) return { ok: false, error: "Liy lan pa jwenn." };
@@ -677,6 +695,8 @@ export async function cancelLine(lineId: string, actor: Actor, reason?: string):
 // ── progress → delivered ───────────────────────────────────────────────────
 /** The preparer starts work. That is the moment the line locks. */
 export async function startLine(lineId: string, actor: Actor): Promise<StoreResult<{ line: OrderLine }>> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const line = await loadLine(db, lineId);
   if (!line) return { ok: false, error: "Liy lan pa jwenn." };
@@ -703,6 +723,8 @@ export async function startLine(lineId: string, actor: Actor): Promise<StoreResu
  * person who physically does the hand-off is not fixed to one job title.
  */
 export async function deliverLine(lineId: string, actor: Actor): Promise<StoreResult<{ line: OrderLine }>> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const line = await loadLine(db, lineId);
   if (!line) return { ok: false, error: "Liy lan pa jwenn." };
@@ -734,6 +756,8 @@ export async function requestChange(args: {
   reason?: string | null;
   actor: Actor;
 }): Promise<StoreResult<{ request: ChangeRequest }>> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const line = await loadLine(db, args.lineId);
   if (!line) return { ok: false, error: "Liy lan pa jwenn." };
@@ -801,6 +825,11 @@ export async function decideChangeRequest(
   ));
   if (!req) return { ok: false, error: "Demann lan pa jwenn." };
   if (req.status !== "pending") return { ok: false, error: "Demann sa a deja regle." };
+  // Declining is a close-out (it terminates the request); accepting an edit
+  // advances the order → gated like any other forward write. Accepting a
+  // "cancel" request is also terminal, so it passes.
+  const blocked = subGate(!accept || req.kind === "cancel");
+  if (blocked) return blocked;
   const line = await loadLine(db, req.line_id);
   if (!line) return { ok: false, error: "Liy lan pa jwenn." };
   const order = await loadOrder(db, line.order_id);
@@ -871,6 +900,8 @@ export async function decideChangeRequest(
 
 /** Preparer refuses an outright — the line comes back as needs-attention. */
 export async function markAttention(lineId: string, actor: Actor, reason?: string): Promise<StoreResult> {
+  const blocked = subGate();
+  if (blocked) return blocked;
   const db = await getDb();
   const line = await loadLine(db, lineId);
   if (!line) return { ok: false, error: "Liy lan pa jwenn." };
@@ -904,6 +935,9 @@ export async function resolveAttention(
   const order = await loadOrder(db, line.order_id);
   if (!order) return { ok: false, error: "Kòmand lan pa jwenn." };
   if (!canResolveAttention(order, line, actor)) return { ok: false, error: "Liy sa a pa tounen pou ou regle." };
+  // Cancelling is the close-out path; resending a line advances the order.
+  const blocked = subGate(action === "cancel");
+  if (blocked) return blocked;
 
   const text = String(reason ?? "").trim() || null;
   const ts = nowISO();

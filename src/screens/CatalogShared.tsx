@@ -4,7 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { blackPalette as palette, radius, shadow } from "../theme";
 import { fmtG, fmt, monoStyle } from "../format";
 import type { ProductUnit } from "../pricing";
-import { breakdownStock, countInUnit, itemFactor, minItemFactor, type Item, type Variant } from "../catalogModel";
+import { breakdownStock, biggestUnitDisplay, type Item, type Variant } from "../catalogModel";
 import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 import { CATEGORY_IDS, mintId } from "../db/ids";
 
@@ -312,21 +312,25 @@ export function CategoryStrip({ categories, cat, setCat, products, getProductCat
  *  status pill, SKU · categories, qty + unit, gold price, chevron.
  *  Quantities stay white unless stock warns (FÈB/EPUIZE bright tint);
  *  `selected` highlights the pick. */
-export function ProductCard({ item, role, prodCats, status, recentMoves, displayPrice, unitName, isTablet, canEdit, canViewCost, canToggleAvail, selected, isFirst, isLast, stockItems, variants, baseCost, footer, onPress }: {
+export function ProductCard({ item, role, prodCats, status, recentMoves, displayPrice, unitName, isTablet, canEdit, canViewCost, canToggleAvail, canView, selected, isFirst, isLast, stockItems, variants, baseCost, footer, onPress }: {
   item: Product; role: string; prodCats: Category[]; status: StockStatus;
   recentMoves: StockMovement[]; displayPrice: number; unitName: string;
-  isTablet: boolean; canEdit: boolean; canViewCost: boolean; canToggleAvail?: boolean; selected?: boolean; isFirst?: boolean; isLast?: boolean; stockItems?: Item[]; variants?: Variant[]; baseCost?: number; footer?: React.ReactNode; onPress: () => void;
+  isTablet: boolean; canEdit: boolean; canViewCost: boolean; canToggleAvail?: boolean;
+  /** Read-only detail access (tablet cashier/associate): card opens the
+   * inspector, but every mutation button stays behind its own flag. */
+  canView?: boolean;
+  selected?: boolean; isFirst?: boolean; isLast?: boolean; stockItems?: Item[]; variants?: Variant[]; baseCost?: number; footer?: React.ReactNode; onPress: () => void;
 }) {
   void role; void recentMoves; void canToggleAvail; void isFirst; void isLast;
   void displayPrice; void canViewCost; void baseCost;
   const service = isService(item);
   const available = isAvailable(item);
-  // Biggest container ("48 boutèy") when the item chain is known.
+  // Biggest container ("199 Kès") when the item chain is known — one shared
+  // helper with the inspector/detail, so the card and the detail screen can
+  // never print different numbers for the same stock again.
   const chain = (stockItems ?? []).filter(i => i.product_id === item.id && !i.is_deleted);
-  const biggest = chain.length
-    ? chain.map(it => ({ it, per: itemFactor(chain, it.id) / minItemFactor(chain, item.id) })).filter(x => x.per > 0).sort((a, b) => b.per - a.per)[0] ?? null
-    : null;
-  const bigCount = biggest ? countInUnit(chain, item.id, biggest.it.id, item.stock_quantity) : item.stock_quantity;
+  const disp = biggestUnitDisplay(stockItems ?? [], item.id, item.stock_quantity, unitName);
+  const bigCount = disp.count;
   const warns = !service && status.label !== "DISPONIB";
   // Low stock (≤ Seuil Fèb) → 1px ember border; empty stock → 1px red.
   const warnBorder = !service && status.label !== "DISPONIB"
@@ -335,7 +339,7 @@ export function ProductCard({ item, role, prodCats, status, recentMoves, display
   // status.sub is the bright-on-dark tint (mint/peach/red).
   const qtyColor = warns ? status.sub : "#fff";
   const catLine = prodCats.slice(0, 1).map(c => c.name).join(" • ");
-  const qtyUnit = biggest ? biggest.it.name : unitName;
+  const qtyUnit = disp.unit;
   // One price can't represent a multi-variant product — show the count.
   const chainIds = new Set(chain.map(i => i.id));
   const variantCount = (variants ?? []).filter(v => !v.is_deleted && chainIds.has(String(v.item_id))).length;
@@ -351,7 +355,7 @@ export function ProductCard({ item, role, prodCats, status, recentMoves, display
     padding: 14,
     opacity: service && !available ? 0.55 : 1,
   };
-  const pressable = canEdit || (!!canToggleAvail && service);
+  const pressable = canEdit || canView || (!!canToggleAvail && service);
   const inner = (
     <>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>

@@ -1,5 +1,4 @@
 import * as Notifications from "expo-notifications";
-import { Platform } from "react-native";
 import type { NotifRoute } from "./notifRoute";
 
 let handlerConfigured = false;
@@ -17,7 +16,6 @@ function configure() {
 }
 
 async function ensurePermitted(): Promise<boolean> {
-  if (Platform.OS === "web") return false;
   configure();
   try {
     const existing = await Notifications.getPermissionsAsync();
@@ -61,7 +59,6 @@ type RouteHandler = (route: NotifRoute) => void;
  * so there is no shared subscription state to manage.
  */
 export function initNotifRouting(onRoute: RouteHandler): () => void {
-  if (Platform.OS === "web") return () => {};
   configure();
 
   let lastKey: string | null = null;
@@ -100,7 +97,6 @@ const DRAFT_REMINDER_ID = "batch-draft-daily";
  * safe to call unconditionally.
  */
 export async function notifyDraftReminder(on: boolean): Promise<void> {
-  if (Platform.OS === "web") return;
   try {
     configure();
     if (!on) {
@@ -134,7 +130,6 @@ const DEFICIT_REVIEW_ID = "guard-deficit-weekly-review";
  * cancel: there is nothing to review.
  */
 export async function notifyWeeklyDeficitReview(newLastWeek: number): Promise<void> {
-  if (Platform.OS === "web") return;
   try {
     configure();
     if (newLastWeek <= 0) {

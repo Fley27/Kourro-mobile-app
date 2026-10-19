@@ -5,8 +5,7 @@ import { ht } from "../i18n";
 import { fmtG, fmt, monoStyle } from "../format";
 import { formatCheckoutRow } from "../catalogModel";
 import { PROD_DARK, ProductsEmpty, type Product, type SaleRow, type PendingState, type PriceLine, type SearchMode } from "../screens/POSShared";
-import { useResponsive } from "../responsive";
-import { VariantGroupCard, groupCardColumns, GROUP_CARD_MIN_W, GROUP_CARD_GAP } from "./group";
+import { VariantGroupCard, GROUP_CARD_GAP } from "./group";
 import { PendingVeil } from "./PendingVeil";
 import { groupSaleRows } from "./hooks";
 import { SkeletonGroupStack } from "../components/Skeleton";
@@ -215,7 +214,6 @@ export function TabletProductPane(props: {
   onDecQty: (key: string) => void;
   inCartQtyFor: (row: SaleRow) => number;
 }) {
-  const { width, padH } = useResponsive();
   const {
     entrance, search, searchMode, rows, catNames, catalogLoaded, pending, pendingInput, pendingLine, pendingMaxQ,
     onSearchChange, onSearchModeChange, onBarcodeSubmit, onOpenScanner,
@@ -227,15 +225,8 @@ export function TabletProductPane(props: {
   const groups = useMemo(() => groupSaleRows(visibleRows, catNames), [visibleRows, catNames]);
   const pendingActiveFor = (row: SaleRow) => !!pending && pending.product.id === row.product.id && pending.unitId === row.unitId && pending.variant === row.variant;
 
-  // Product-grid column count follows the pane's real width, not the device
-  // class: cards never drop below GROUP_CARD_MIN_W, so the article name in the
-  // header always has room. onLayout is the source of truth; until it lands we
-  // estimate the left pane (products flex 3, cart flex 2 with a 300pt floor).
-  const [measuredListW, setMeasuredListW] = useState(0);
-  const paneAvail = width - padH * 2 - 12;
-  const listW = measuredListW || paneAvail - Math.max(300, paneAvail * (2 / 5));
-  const cardCols = groupCardColumns(listW);
-  const cardMinW = listW >= GROUP_CARD_MIN_W ? GROUP_CARD_MIN_W : undefined;
+  // One product per line — the checkout list is the primary scan surface, so
+  // no multi-column grid on wide panes; cards stretch to the pane width.
 
   return (
     <View style={{ flex: 3, minWidth: 0, gap: 12 }}>
@@ -269,18 +260,12 @@ export function TabletProductPane(props: {
       )}
       {/* List + focus veil: pending item blurs/dims the list (WhatsApp
           long-press style) and blocks other selections. */}
-      <View style={{ flex: 1 }} onLayout={e => setMeasuredListW(e.nativeEvent.layout.width)}>
+      <View style={{ flex: 1 }}>
         <FlatList
           style={{ flex: 1 }}
           data={groups}
           keyExtractor={g => g.product.id}
-          key={`group-grid-${cardCols}`}
-          numColumns={cardCols}
-          // RN hard-throws when a single-column list gets a wrapper
-          // style — a pane below GROUP_CARD_MIN_W legitimately renders
-          // one column (portrait / split-view), so the gap wrapper only
-          // exists when there's actually a row to space.
-          columnWrapperStyle={cardCols > 1 ? { gap: GROUP_CARD_GAP } : undefined}
+          numColumns={1}
           contentContainerStyle={{ gap: GROUP_CARD_GAP, paddingTop: 2, paddingBottom: 12 }}
           ListHeaderComponent={
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 2 }}>
@@ -293,8 +278,6 @@ export function TabletProductPane(props: {
               group={item}
               inCartQtyFor={inCartQtyFor}
               pendingActiveFor={pendingActiveFor}
-              flex={1}
-              minWidth={cardMinW}
               onRowPress={onProductPress}
               onDecQty={onDecQty}
             />

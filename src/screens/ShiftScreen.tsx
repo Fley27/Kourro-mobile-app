@@ -17,7 +17,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Text } from "../components/InterText";
 import { getDb, insertOutbox } from "../db";
 import { carryTotal, inLocalDay, localDayKey, localDayRange, reconcileShift } from "../businessGuard";
-import { USERS, getUserById, USER_IDS } from "../users";
+import { USERS, getUserById as demoUserById, USER_IDS } from "../users";
+import { isLiveSupabase } from "../auth/supabase";
 import { notifyLocal } from "../notifications";
 import { notifUI, type NotifRoute } from "../notifRoute";
 import { fmtG, fmt, monoStyle } from "../format";
@@ -33,6 +34,9 @@ import { DarkBackButton } from "../components/BackButton";
 import { SafeScreen } from "../components/SafeScreen";
 import { reportIdForDay, reportIdForShift } from "../db/ids";
 import { mintId } from "../db/ids";
+import { guardWrite } from "../subscription/subscription";
+import { DeficitDecisionSheet } from "../components/DeficitDecisionSheet";
+import { orgIdOf, recordSalaryDeficit } from "../payroll";
 
 type Sale = { id: string; sale_number: string; total: number; payment_method: string; status: string; created_at: string; amount_paid: number; seller_role?: string; seller_id?: string; store_id?: string; standby?: number };
 type Shift = { id: string; opening_balance: number; opening_stated?: number; opening_confirmed_by?: string; status: string; start_time: string; cashier_confirmed: number; manager_confirmed: number; supervisor_confirmed: number; actual_cash?: number; cashier_id?: string };
@@ -187,6 +191,13 @@ function Avatar({ name, size = 40 }: { name: string; size?: number }) {
 }
 
 type TeamMember = { id: string; name: string; role: string; store?: string };
+
+const isSupervisorRole = (r: string) => r === "manager" || r === "admin" || r === "owner";
+// Module-level staff cache (set by the main component from its staff
+// directory) so helper row components resolve live names too, not just demo.
+let staffCache: TeamMember[] = [];
+const personById = (id: string | null | undefined): TeamMember | undefined =>
+  staffCache.find(s => s.id === String(id ?? "")) ?? (demoUserById(String(id ?? "")) as TeamMember | undefined);
 type PersonReport = {
   user: TeamMember;
   shift: any | null;
@@ -214,6 +225,9 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
   const [reviewReports, setReviewReports] = useState<any[]>([]);
   const [settlements, setSettlements] = useState<any[]>([]);
   const [showEnd, setShowEnd] = useState(false);
+  // Payroll (028): explicit deficit decision after a short report submit.
+  const [deficitPrompt, setDeficitPrompt] = useState<{ amount: number; date: string; reportId: string } | null>(null);
+  const [deficitSaving, setDeficitSaving] = useState(false);
   const auth = useAuthState();
   const [actualCash, setActualCash] = useState("");
   const [pendingValidateId, setPendingValidateId] = useState<string | null>(null);
@@ -249,11 +263,16 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
   // Report ids with an open dispute (past rows wear the "Disputed" status)
   const [pastDisputeIds, setPastDisputeIds] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<ReportDetailData | null>(null);
-  const [autoCloseTime, setAutoCloseTime] = useState("06:30");
+  const [autoCloseTime, setAutoCloseTime] = useState("06:00");
   // Supervisor: team dashboard + own shift + person drill-in + review queue
   const [teamShifts, setTeamShifts] = useState<any[]>([]);
   const [teamReports, setTeamReports] = useState<any[]>([]);
   const [roster, setRoster] = useState<TeamMember[]>([]);
+  // Live roster rows (live mode): the real staff directory behind the demo
+  // USERS seed. Feeds the manager picker, supervisor notifications, name
+  // lookups and the "who is online" strip — demo ids must never address a
+  // live business.
+  const [staffRows, setStaffRows] = useState<any[]>([]);
   const [supView, setSupView] = useState<"team" | "own" | "open">("team");
   // Cashier: the full-screen Open Shift modal is the first thing she sees when
   // today's shift isn't open yet — opening the shift is her priority action.
@@ -313,6 +332,24 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
   const today = localDayKey();
   const currentUserId = currentUser?.id ?? null;
 
+  // ── Staff directory ──────────────────────────────────────────────────────
+  // A live business is staffed by `employees` rows (synced from cloud
+  // profiles); USERS is only the demo seed for mock/offline mode. Every
+  // supervisor lookup (manager picker, notification fan-out, names) reads
+  // this directory so a live shift is never addressed to a demo id — the
+  // reason live supervisors never received a cashier's opening report.
+  const staffDirectory: TeamMember[] = React.useMemo(() => {
+    if (isLiveSupabase) {
+      return staffRows
+        .filter((e: any) => !Number(e.is_deleted ?? 0))
+        .map((e: any) => ({ id: String(e.id), name: String(e.full_name ?? ""), role: String(e.role ?? "cashier"), store: "" }));
+    }
+    return USERS.map(u => ({ id: u.id, name: u.name, role: u.role, store: u.store ?? "" }));
+  }, [staffRows]);
+  // The module-level personById reads this cache — the queue row components
+  // render outside the component and need the same live tab in staff rows.
+  useEffect(() => { staffCache = staffDirectory; }, [staffDirectory]);
+
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     if (loadInFlight.current) return;
     loadInFlight.current = true;
@@ -338,6 +375,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const losses = (await db.getAllAsync("SELECT * FROM monthly_losses")) as any[];
       const allChecks = ((await db.getAllAsync("SELECT * FROM cash_register_checks").catch(() => [])) ?? []) as any[];
       const employees = ((await db.getAllAsync("SELECT * FROM employees").catch(() => [])) ?? []) as any[];
+      setStaffRows(employees);
       const meta = ((await db.getAllAsync("SELECT * FROM _meta WHERE key = 'shift_autoclose_time'").catch(() => [])) ?? []) as any[];
       if (meta[0]?.value) setAutoCloseTime(String(meta[0].value));
 
@@ -357,7 +395,9 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       // Store-wide today: pending openings (visible to everyone — any date,
       // a pending opening never expires at midnight), team shifts,
       // team reports, and the cashier roster for the "not opened" section.
-      const todayShifts = storeShifts.filter((s: any) => inLocalDay(s.start_time, today) || String(s.status ?? "") === "pending");
+      // Open shifts stay listed regardless of age: an overnight or abandoned
+      // shift is exactly what supervisors must see "all the time".
+      const todayShifts = storeShifts.filter((s: any) => inLocalDay(s.start_time, today) || String(s.status ?? "") === "pending" || String(s.status ?? "") === "open");
       setPendingOpenings(todayShifts
         .filter((s: any) => s.status === "pending")
         .sort((a: any, b: any) => String(a.start_time ?? "").localeCompare(String(b.start_time ?? ""))));
@@ -372,8 +412,12 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         .map((c: any) => String(c.report_id))));
       const rosterIds = new Set<string>();
       const nextRoster: TeamMember[] = [];
-      for (const u of USERS) {
-        if (u.role === "cashier") { nextRoster.push({ id: u.id, name: u.name, role: "cashier", store: u.store }); rosterIds.add(u.id); }
+      // Demo cashiers only exist in the seed world — on a live business they
+      // showed up as phantom "not opened" staff forever.
+      if (!isLiveSupabase) {
+        for (const u of USERS) {
+          if (u.role === "cashier") { nextRoster.push({ id: u.id, name: u.name, role: "cashier", store: u.store }); rosterIds.add(u.id); }
+        }
       }
       for (const e of employees) {
         if (e.role === "cashier" && !rosterIds.has(String(e.id)) && !nextRoster.some(r => r.name === e.full_name)) {
@@ -391,10 +435,13 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const mineToday = storeShifts
         .filter((s: any) => (s.cashier_id ?? null) === (currentUserId ?? null) && (inLocalDay(s.start_time, today) || String(s.status ?? "") === "open" || String(s.status ?? "") === "pending"))
         .sort((a: any, b: any) => (((b.status === "open") ? 1 : 0) - ((a.status === "open") ? 1 : 0)) || String(b.start_time ?? "").localeCompare(String(a.start_time ?? "")));
-      const mineTodayAny = shifts
-        .filter((s: any) => (s.cashier_id ?? null) === (currentUserId ?? null) && (inLocalDay(s.start_time, today) || String(s.status ?? "") === "open" || String(s.status ?? "") === "pending"))
-        .sort((a: any, b: any) => (((b.status === "open") ? 1 : 0) - ((a.status === "open") ? 1 : 0)) || String(b.start_time ?? "").localeCompare(String(a.start_time ?? "")));
-      const myOpenAny = shifts.find((s: any) => s.status === "open" && (s.cashier_id ?? null) === (currentUserId ?? null));
+      // Cross-store leak: `mineTodayAny`/`myOpenAny` read the RAW unscoped
+      // `shifts` table, so a shift this user has open at a DIFFERENT store
+      // (another register / another business) could be resolved and validated
+      // here. Both are now pinned to this store — `storeShifts` is already
+      // store-filtered, so we just reuse it.
+      const mineTodayAny = mineToday;
+      const myOpenAny = myOpenStrict;
       const resolvedShift = mineToday[0] ?? myOpenStrict ?? myOpen ?? mineTodayAny[0] ?? myOpenAny ?? storeShifts.find((s: any) => s.status === "open") ?? shifts.find((s: any) => s.status === "open") ?? null;
       setShift(myOpen || storeShifts.find((s: any) => s.status === "open") || myOpenAny || shifts.find((s: any) => s.status === "open") || null);
       setMyShiftToday(resolvedShift);
@@ -551,8 +598,11 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
     ?? hands.find((h: any) => h.id === `hand-${currentUserId}-${today}`) ?? null;
 
   // ---------- Opening a shift ----------
-  const managerList = USERS.filter(u => u.role === "manager" || u.role === "admin" || u.role === "owner");
+  // Live: the business's real supervisors from the staff directory. Demo:
+  // same-store preference as before.
+  const managerList = staffDirectory.filter(u => isSupervisorRole(u.role));
   const defaultManager = () => {
+    if (isLiveSupabase) return managerList.find(u => u.role === "manager")?.id ?? managerList[0]?.id ?? null;
     const cs = (currentUser as any)?.store;
     return managerList.find(u => u.store === cs)?.id ?? managerList[0]?.id ?? USER_IDS.manager;
   };
@@ -597,6 +647,10 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
 
   async function submitOpening() {
     if (!currentUser?.id) return Alert.alert("Sesi", "Ou dwe konekte yon itilizatè");
+    // Opening a shift is a NEW business write: blocked read-only. Closing an
+    // open shift / submitting the report stays possible (close-out path).
+    const gate = guardWrite();
+    if (!gate.ok) return Alert.alert("Abònman ekspire", gate.message);
     // Cashiers type into openAmount; supervisors into ownShiftAmount (their modal).
     const amt = parseFloat(isCashier ? openAmount : ownShiftAmount);
     if (isNaN(amt) || amt < 0) return Alert.alert("Antre montan", "Antre montan kach ou reyèlman resevwa nan kes la.");
@@ -610,7 +664,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       if (mineReps.some((r: any) => String(r.status ?? "") !== "closed"))
         return Alert.alert("Ap tann revizyon", "Rapò anvan an poko konfime pa yon sipèvizè.");
       for (const r of mineReps) {
-        const reviewer = r.reviewed_by ? getUserById(r.reviewed_by) : null;
+        const reviewer = r.reviewed_by ? personById(r.reviewed_by) : null;
         const reviewerRank = reviewer ? (RANK[(reviewer as any).role] ?? 0) : 0;
         if (!r.reviewed_by || String(r.reviewed_by) === String(currentUser.id) || reviewerRank < 1)
           return Alert.alert("Pa aksepte", "Chanjman anvan an dwe aksepte pa yon sipèvizè anvan ou louvri yon lòt.");
@@ -631,7 +685,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         const id = mintId();
         await db.runAsync("INSERT INTO shifts (id, store_id, cashier_id, manager_id, opening_balance, opening_stated, opening_confirmed_by, status, start_time, end_time, cashier_confirmed, manager_confirmed, supervisor_confirmed, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           [id, storeId, currentUser.id, currentUser.id, amt, amt, currentUser.id, "open", ts, null, 1, 1, 1, ts, ts]);
-        for (const sup of USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id)) {
+        for (const sup of staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id)) {
           await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
             [mintId(), sup.id, "shift_opening", id, `${currentUser.name} ouvèt chanjman li ak ${fmtG(amt)} (antre pa li menm).`, "pending", ts]);
         }
@@ -654,14 +708,14 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         [id, storeId, currentUser.id, mgr, 0, amt, null, "pending", ts, null, 0, 0, 0, ts, ts]);
       await db.runAsync("INSERT INTO cash_register_checks (id, store_id, report_id, cashier_id, check_date, stated_amount, program_amount, status, action, set_by, set_by_role, is_default, approved_by, correct_amount, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [mintId(), storeId, "", currentUser.id, localDayKey(ts), amt, amt, "pending", "opening", currentUser.id, role, 0, null, null, ts, ts]);
-      for (const sup of USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id)) {
+      for (const sup of staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id)) {
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [mintId(), sup.id, "shift_opening_pending", id, `${currentUser.name} antre ${fmtG(amt)} pou ouvèti — manadjè konfime: ${getUserById(mgr)?.name ?? mgr}. Vant debloke kounye a.`, "pending", ts]);
+          [mintId(), sup.id, "shift_opening_pending", id, `${currentUser.name} antre ${fmtG(amt)} pou ouvèti — manadjè konfime: ${personById(mgr)?.name ?? mgr}. Vant debloke kounye a.`, "pending", ts]);
       }
       // The rows above are a log nothing renders — this is the tap that
       // actually reaches a human. Same record: this shift, pending queue.
-      notifyLocal("Ouverture pou konfime", `${currentUser.name} antre ${fmtG(amt)} pou ouvèti — ap tann konfimasyon manadjè a (${getUserById(mgr)?.name ?? mgr}).`, { screen: "queue", tab: "pending", id });
-      uploadSuccess("Chanjman kòmanse ✓", `${fmtG(amt)} anrejistre — ou ka kòmanse vann kounye a. Ap tann konfimasyon ${getUserById(mgr)?.name ?? "manadjè a"}.`);
+      notifyLocal("Ouverture pou konfime", `${currentUser.name} antre ${fmtG(amt)} pou ouvèti — ap tann konfimasyon manadjè a (${personById(mgr)?.name ?? mgr}).`, { screen: "queue", tab: "pending", id });
+      uploadSuccess("Chanjman kòmanse ✓", `${fmtG(amt)} anrejistre — ou ka kòmanse vann kounye a. Ap tann konfimasyon ${personById(mgr)?.name ?? "manadjè a"}.`);
       setOpenForm(false); setOpenAmount("");
       // Shift is open — land her on the live dashboard, not the entry modal.
       setCashierOpenView(false);
@@ -702,9 +756,9 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         : `${currentUser?.name ?? "Sipèvizè"} konfime kes ou a ${fmtG(amt)}. Chanjman ou konfime.`;
       await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
         [mintId(), s.cashier_id, action === "reject" ? "shift_opening_rejected" : "shift_opening_confirmed", shiftId, cashierMsg, "pending", ts]);
-      for (const sup of USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id)) {
+      for (const sup of staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id)) {
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [mintId(), sup.id, "shift_opening_resolved", shiftId, `${currentUser?.name ?? "Sipèvizè"} ${action === "reject" ? "refize" : "konfime"} ouverture ${getUserById(s.cashier_id)?.name ?? s.cashier_id} (${fmtG(amt)}).`, "pending", ts]);
+          [mintId(), sup.id, "shift_opening_resolved", shiftId, `${currentUser?.name ?? "Sipèvizè"} ${action === "reject" ? "refize" : "konfime"} ouverture ${personById(s.cashier_id)?.name ?? s.cashier_id} (${fmtG(amt)}).`, "pending", ts]);
       }
       notifyLocal("Ouverture rezoud", cashierMsg, { screen: "queue", tab: "pending", id: shiftId });
       uploadSuccess("Ouverture rezoud ✓", cashierMsg);
@@ -724,14 +778,14 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const ts = new Date().toISOString();
       await db.runAsync("INSERT INTO cash_register_checks (id, store_id, report_id, cashier_id, check_date, stated_amount, program_amount, status, action, set_by, set_by_role, is_default, approved_by, correct_amount, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [mintId(), storeId, "", s.cashier_id, today, amt, Number(s.opening_stated ?? 0), "pending", "claim", currentUser.id, role, 0, null, null, ts, ts]);
-      for (const sup of USERS.filter(u => u.role === "manager" || u.role === "admin" || u.role === "owner")) {
+      for (const sup of staffDirectory.filter(s => isSupervisorRole(s.role))) {
         await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
-          [mintId(), sup.id, "shift_claim", shiftId, `${currentUser.name} fè plent sou ouverture ${getUserById(s.cashier_id)?.name ?? s.cashier_id}: li di se ${fmtG(amt)}.`, "pending", ts]);
+          [mintId(), sup.id, "shift_claim", shiftId, `${currentUser.name} fè plent sou ouverture ${personById(s.cashier_id)?.name ?? s.cashier_id}: li di se ${fmtG(amt)}.`, "pending", ts]);
       }
       // Same as the opening ping above: the DB rows have no reader, so the
       // supervisor only learns of the claim through a tappable notification.
-      notifyLocal("Plent sou ouverture", `${currentUser.name} fè plent sou ouverture ${getUserById(s.cashier_id)?.name ?? s.cashier_id}: li di se ${fmtG(amt)}.`, { screen: "queue", tab: "pending", id: shiftId });
-      uploadSuccess("Plent anrejistre", `Plent sou ${getUserById(s.cashier_id)?.name ?? "kesye a"} voye bay tout sipèvizè.`);
+      notifyLocal("Plent sou ouverture", `${currentUser.name} fè plent sou ouverture ${personById(s.cashier_id)?.name ?? s.cashier_id}: li di se ${fmtG(amt)}.`, { screen: "queue", tab: "pending", id: shiftId });
+      uploadSuccess("Plent anrejistre", `Plent sou ${personById(s.cashier_id)?.name ?? "kesye a"} voye bay tout sipèvizè.`);
       setClaimFor(null); setClaimAmount("");
       load({ silent: true });
     } catch (e: any) { uploadError("Erè", e?.message ?? "Plent echwe"); }
@@ -752,7 +806,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
           const amt = Number(c.stated_amount ?? 0);
           await db.runAsync("UPDATE shifts SET status = ?, opening_balance = ?, cashier_confirmed = ?, manager_confirmed = ?, supervisor_confirmed = ?, opening_confirmed_by = ?, updated_at = ? WHERE id = ?",
             ["open", amt, 1, 1, 1, currentUser.id, ts, s.id]);
-          msg = `${currentUser?.name ?? "Sipèvizè"} apwouve plent la — ouverture ${getUserById(c.cashier_id)?.name ?? c.cashier_id} kòmanse ak ${fmtG(amt)}.`;
+          msg = `${currentUser?.name ?? "Sipèvizè"} apwouve plent la — ouverture ${personById(c.cashier_id)?.name ?? c.cashier_id} kòmanse ak ${fmtG(amt)}.`;
         }
       }
       await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
@@ -777,10 +831,10 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const id = mintId();
       await db.runAsync("INSERT INTO cash_register_checks (id, store_id, report_id, cashier_id, check_date, stated_amount, program_amount, status, action, set_by, set_by_role, is_default, approved_by, correct_amount, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [id, storeId, r.id, r.user_id, r.report_date, Number(r.actual_cash ?? 0), Number(r.expected_cash ?? 0), "pending", "report_dispute", currentUser.id, role, 0, null, null, ts, ts]);
-      const cashierName = getUserById(r.user_id)?.name ?? r.user_id;
+      const cashierName = personById(r.user_id)?.name ?? r.user_id;
       await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
         [mintId(), r.user_id, "report_disputed", r.id, `${currentUser?.name ?? "Sipèvizè"} konteste rapò ${r.report_date} ou — verifye kes la epi re-soumèt.`, "pending", ts]);
-      for (const sup of USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id)) {
+      for (const sup of staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id)) {
         try {
           await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
             [mintId(), sup.id, "report_disputed", r.id, `${currentUser?.name ?? "Sipèvizè"} konteste rapò ${cashierName} (${r.report_date}).`, "pending", ts]);
@@ -826,7 +880,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const ts = new Date().toISOString();
       await db.runAsync("INSERT INTO cash_movements (id, shift_id, store_id, type, amount, reason, created_by, taken_by, validated_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         [mintId(), owner.id ?? null, storeId, cashOutType, amt, cashOutReason.trim() || (cashOutType === "inventory" ? "Kach depans" : "Retrè kach"), currentUser.id, owner.cashier_id ?? currentUserId, `${currentUser.name}`, ts]);
-      notifyLocal(cashOutType === "inventory" ? "Kach depans" : "Retrè kach", `${fmtG(amt)} ${cashOutType === "inventory" ? "depans" : "retire"} nan kès ${getUserById(owner.cashier_id)?.name ?? "kesye a"} — ${cashOutReason.trim() || "san rezon"}`, { screen: "shift" });
+      notifyLocal(cashOutType === "inventory" ? "Kach depans" : "Retrè kach", `${fmtG(amt)} ${cashOutType === "inventory" ? "depans" : "retire"} nan kès ${personById(owner.cashier_id)?.name ?? "kesye a"} — ${cashOutReason.trim() || "san rezon"}`, { screen: "shift" });
       uploadSuccess("Anrejistre ✓", `${fmtG(amt)} ${cashOutType === "inventory" ? "kach depans" : "retrè"} anrejistre nan chanjman an.`);
       setCashOutForm(false); setCashOutAmount(""); setCashOutReason("");
       load({ silent: true });
@@ -850,7 +904,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       try {
         await insertOutbox("debt_collections", "create", { id, shift_id: (ownShift as any).id ?? null, store_id: storeId, customer_id: null, amount: amt, note: note || null, created_at: ts });
       } catch {}
-      for (const sup of USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id)) {
+      for (const sup of staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id)) {
         try {
           await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
             [mintId(), sup.id, "debt_collected", id, `${currentUser.name} anrejistre ${fmtG(amt)} dèt kolekte${note ? ` — ${note}` : ""}.`, "pending", ts]);
@@ -932,7 +986,15 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const db = await getDb();
       const shiftId = (myShiftToday as any)?.id ?? null;
       const repId = shiftId ? reportIdForShift(shiftId) : reportIdForDay(currentUser.id, today);
-      if (reports.some((r: any) => r.id === repId || (shiftId && (r as any).shift_id === shiftId))) return repId;
+      // React state can lag the DB (double-tap, reopen, sync pull) — ask the
+      // DB directly; a stale `reports` snapshot would let the INSERT below
+      // collide on the derived id (UNIQUE constraint failed).
+      const already = (await db.getAllAsync("SELECT id FROM daily_reports WHERE id = ?", [repId]).catch(() => [])) as any[];
+      if (already?.length) return repId;
+      if (shiftId) {
+        const byShift = (await db.getAllAsync("SELECT id FROM daily_reports WHERE shift_id = ? LIMIT 1", [shiftId]).catch(() => [])) as any[];
+        if (byShift?.length) return String(byShift[0].id);
+      }
       let carry = 0;
       let carriedIds: string[] = [];
       try {
@@ -945,9 +1007,11 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       } catch {}
       // Store THIS user's shift-window figures (not the store roll-up) so the
       // saved report shows exactly what her till handled — incl. MonCash/NatCash
-      // for the manager to verify.
+      // for the manager to verify. INSERT OR IGNORE: another writer (sync
+      // pull, double-tap) may have created the derived id between the check
+      // above and this write — the existing row wins.
       await db.runAsync(
-        "INSERT INTO daily_reports (id, store_id, report_date, role, user_id, shift_id, status, standby_carry, opening_balance, cash_sales, moncash_sales, natcash_sales, credit_sales, credit_collected_cash, withdrawals_total, inventory_total, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO daily_reports (id, store_id, report_date, role, user_id, shift_id, status, standby_carry, opening_balance, cash_sales, moncash_sales, natcash_sales, credit_sales, credit_collected_cash, withdrawals_total, inventory_total, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [repId, storeId, today, role, currentUser.id, shiftId, "pending", carry, myOpening, myCashTotal, myMoncashTotal, myNatcashTotal, myCreditTotal, myCollectedTotal, myCashOutTotal, inventoryTotal, new Date().toISOString()]
       );
       if (carriedIds.length) {
@@ -981,8 +1045,8 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         && Number(h?.cashier_confirmed ?? 0) === 0);
       if (!existing) {
         const cashierStore = (currentUser as any)?.store ?? null;
-        let managers = USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id && (u.store === cashierStore || u.role === "owner"));
-        if (!managers.length) managers = USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id);
+        let managers = staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id && (isLiveSupabase || s.store === cashierStore || s.role === "owner"));
+        if (!managers.length) managers = staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id);
         const managerId = managers[0]?.id ?? USER_IDS.manager;
         await db.runAsync(
           "INSERT INTO standby_hands (id, store_id, cashier_id, manager_id, report_id, sale_count, amount, handed_at, cashier_confirmed, confirmed_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -992,8 +1056,8 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
           [1, ts, ts, 1, (existing as any).id]);
       }
       const cashierStore = (currentUser as any)?.store ?? null;
-      let notifyIds = USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id && (u.store === cashierStore || u.role === "owner")).map(u => u.id);
-      if (!notifyIds.length) notifyIds = USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id).map(u => u.id);
+      let notifyIds = staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id && (isLiveSupabase || s.store === cashierStore || s.role === "owner")).map(s => s.id);
+      if (!notifyIds.length) notifyIds = staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id).map(s => s.id);
       const confirmedHandId = existing ? String((existing as any).id) : handId;
       for (const uid of [...new Set(notifyIds)].slice(0, 6)) {
         try {
@@ -1052,6 +1116,28 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         ?? ((myShiftToday as any)?.id ? reportIdForShift((myShiftToday as any).id) : reportIdForDay(currentUser.id, today));
       await db.runAsync("UPDATE daily_reports SET status = ?, expected_cash = ?, actual_cash = ?, deficit = ?, submitted_at = ?, closed_at = ?, standby_carry = ?, opening_balance = ?, cash_sales = ?, moncash_sales = ?, natcash_sales = ?, credit_sales = ?, credit_collected_cash = ?, withdrawals_total = ?, inventory_total = ?, updated_at = ? WHERE id = ?",
         ["submitted", expectedCash, finalActual, deficitAmt, new Date().toISOString(), null, myStandbyCarry, myOpening, myCashTotal, myMoncashTotal, myNatcashTotal, myCreditTotal, myCollectedTotal, myCashOutTotal, inventoryTotal, new Date().toISOString(), submitRepId]);
+      // Submitting IS the close for a cashier: the shift ends now, the report
+      // stays "submitted" for the supervisor's deficit review. Leaving the
+      // shift open made a finished close look "still open" for as long as no
+      // supervisor confirmed — which, offline, was forever.
+      if (isCashier) {
+        const tsClose = new Date().toISOString();
+        const closable = new Set<string>();
+        for (const cand of [myShiftToday, shift]) {
+          const c = cand as any;
+          if (!c?.id) continue;
+          if (String(c.cashier_id ?? "") !== String(currentUser.id)) continue;
+          if (c.status !== "open" && c.status !== "pending") continue;
+          closable.add(String(c.id));
+        }
+        for (const sid of closable) {
+          try {
+            await db.runAsync(
+              "UPDATE shifts SET status = 'closed', end_time = ?, actual_cash = COALESCE(?, actual_cash), cashier_confirmed = 1, updated_at = ? WHERE id = ? AND status IN ('open','pending')",
+              [tsClose, counted ?? null, tsClose, sid]);
+          } catch {}
+        }
+      }
       try {
         const { clearCartDraft } = await import("../sales/cartDraft");
         await clearCartDraft(db, storeId, currentUser.id);
@@ -1067,11 +1153,11 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         }
       }
       const cashierStore = (currentUser as any)?.store ?? null;
-      let supervisorIds: string[] = USERS
-        .filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id && (u.store === cashierStore || u.role === "owner"))
-        .map(u => u.id);
+      let supervisorIds: string[] = staffDirectory
+        .filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id && (isLiveSupabase || s.store === cashierStore || s.role === "owner"))
+        .map(s => s.id);
       if (supervisorIds.length === 0) {
-        supervisorIds = USERS.filter(u => (u.role === "manager" || u.role === "admin" || u.role === "owner") && u.id !== currentUser.id).map(u => u.id);
+        supervisorIds = staffDirectory.filter(s => isSupervisorRole(s.role) && s.id !== currentUser.id).map(s => s.id);
       }
       const notifyIds = [...new Set(supervisorIds)];
       if (notifyIds.length > 0) {
@@ -1085,11 +1171,43 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const supLabel = cashierStore ? `Manadjè/Admin (${cashierStore}) + Owner` : "Manadjè/Admin/Owner";
       uploadSuccess("Rapò soumèt", `Rapò kesye soumèt — ap tann konfimasyon sipèvizè a. Atann ${fmtG(expectedCash)}, konte ${fmtG(finalActual ?? 0)} — Defisi ${fmtG(deficitAmt)}. Notifikasyon voye bay ${supLabel}.`);
       notifyLocal(deficitAmt > 0 ? `Rapò soumèt — Defisi ${fmtG(deficitAmt)}` : "Rapò soumèt", `${currentUser.name} soumèt rapò jounen li (atann ${fmtG(expectedCash)}, konte ${fmtG(finalActual ?? 0)}, defisi ${fmtG(deficitAmt)}) — ap tann konfimasyon.`, { screen: "report", id: String(submitRepId) });
+      // Payroll (028): the explicit salary decision. "Pran sou salè" appends a
+      // permanent deficit row netted at period close; "Neglijab" registers
+      // nothing. The old cashier_deficits ledger above stays as the
+      // operational trail Business Guard reviews.
+      if (isCashier && deficitAmt > 0) {
+        setDeficitPrompt({ amount: deficitAmt, date: today, reportId: String(submitRepId) });
+      }
       try { const { salesEvents } = await import("../salesEvents"); salesEvents.emit(); } catch {}
       setCheckCounted(false); setCheckCashOut(false); setCheckStandby(false);
       load({ silent: true });
     } catch (e: any) {
       uploadError("Erè", e?.message ?? "Fèmen rapò echwe");
+    }
+  }
+
+  /** Deficit decision (028) — permanent, made once per daily report. */
+  async function decideDeficit(choice: "salary" | "negligible") {
+    const p = deficitPrompt;
+    if (!p || deficitSaving) return;
+    setDeficitSaving(true);
+    try {
+      if (choice === "salary") {
+        const db = await getDb();
+        const orgId = await orgIdOf(db);
+        await recordSalaryDeficit(db, {
+          employeeId: currentUser.id, amount: p.amount, date: p.date,
+          reportId: p.reportId, orgId, storeId, registeredBy: currentUser.id,
+        });
+        notifyLocal("Sou salè", `${fmtG(p.amount)} ap dedwi sou salè ou nan fèmti peryòd la.`, { screen: "report", id: p.reportId });
+      } else {
+        notifyLocal("Neglijab", `Defisi ${fmtG(p.amount)} make neglijab — anyen anrejistre sou salè.`, { screen: "report", id: p.reportId });
+      }
+    } catch {
+      uploadError("Erè", "Defisi a pa t ka anrejistre");
+    } finally {
+      setDeficitSaving(false);
+      setDeficitPrompt(null);
     }
   }
 
@@ -1099,7 +1217,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
   // queue) resolves later — no debt/waive/settlement decisions here.
   const visibleReport = (r: any) => {
     if ((currentUser as any)?.role === "owner") return true;
-    const cashier = getUserById(r.user_id);
+    const cashier = personById(r.user_id);
     if (!cashier?.store) return true;
     return cashier.store === (currentUser as any)?.store;
   };
@@ -1116,7 +1234,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
       const db = await getDb();
       const ts = new Date().toISOString();
       const deficitAmt = Number(r.deficit ?? 0);
-      const cashierName = getUserById(r.user_id)?.name ?? r.user_id;
+      const cashierName = personById(r.user_id)?.name ?? r.user_id;
       const decision = deficitAmt > 0 ? "debt" : "approved";
       await db.runAsync(
         "INSERT INTO report_reviews (id, store_id, report_id, cashier_id, report_date, deficit, decision, decided_by, decided_by_role, decided_by_rank, reason, previous_review_id, created_at, lamport_clock, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1174,13 +1292,34 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
   // Owner sees all stores; others only their own store's people.
   const sameStore = (uid: string) => {
     if ((currentUser as any)?.role === "owner") return true;
-    const u = getUserById(uid);
+    const u = personById(uid);
     if (!u?.store) return true;
     return u.store === (currentUser as any)?.store;
   };
   const notOpened = roster.filter(r => !teamShifts.some((s: any) => String(s.cashier_id) === r.id) && sameStore(r.id));
   const myPendingOpenings = pendingOpenings.filter((s: any) => s.manager_id === currentUserId);
   const activeShifts = teamShifts.filter((s: any) => s.status === "open" && sameStore(String(s.cashier_id)));
+  // ── Team now — always-on: who is online + who still has a shift open ─────
+  // Presence rides the profile heartbeat (employees.updated_at, refreshed by
+  // autoSync once a minute on live devices). Open shifts come straight from
+  // the synced shifts table at any age, so an overnight or abandoned shift
+  // can never hide from a supervisor.
+  const ONLINE_WINDOW_MS = 3 * 60 * 1000;
+  const nowMs = Date.now();
+  const teamNow = staffDirectory
+    .map(s => {
+      const emp = staffRows.find((e: any) => String(e.id) === s.id)
+        // Demo world: employees seeded under their own ids match by name.
+        ?? staffRows.find((e: any) => s.name && String(e.full_name ?? "") === s.name);
+      const seenMs = Date.parse(String(emp?.updated_at ?? ""));
+      const fresh = !isNaN(seenMs) && nowMs - seenMs <= ONLINE_WINDOW_MS;
+      const online = fresh || s.id === currentUserId || (!isLiveSupabase && !!Number(emp?.online_status ?? 0));
+      const open = teamShifts.find((t: any) => String(t.status ?? "") === "open" && String(t.cashier_id ?? "") === s.id);
+      return { ...s, online, openShift: !!open, shiftStart: String(open?.start_time ?? "") };
+    })
+    .sort((a, b) => Number(b.openShift) - Number(a.openShift) || Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+  const onlineCount = teamNow.filter(p => p.online).length;
+  const openShiftCount = teamNow.filter(p => p.openShift).length;
   // Disputes (both kinds) — visible system-wide, bubble to the top.
   const myDisputes = claims.filter((c: any) => sameStore(c.cashier_id));
   const otherPendingOpenings = pendingOpenings.filter((s: any) => s.manager_id !== currentUserId);
@@ -1218,8 +1357,11 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
     const d = Number(r.deficit ?? 0);
     const disputed = pastDisputeIds.has(String(r.id));
     const isPending = String(r.status ?? "") === "pending";
+    const isSubmitted = String(r.status ?? "") === "submitted";
     const pill = isPending
       ? { label: "Pending", icon: "time-outline" as const, bg: SHIFT.pendingSoft, fg: SHIFT.pending, bd: SHIFT.pendingBd }
+      : isSubmitted
+      ? { label: "An atant revizyon", icon: "hourglass-outline" as const, bg: SHIFT.reviewSoft, fg: SHIFT.review, bd: SHIFT.reviewBd }
       : disputed
       ? { label: "Disputed", icon: "alert-circle-outline" as const, bg: SHIFT.disputedSoft, fg: SHIFT.disputed, bd: SHIFT.disputedBd }
       : d > 0
@@ -1349,7 +1491,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
                     <Ionicons name="information-circle-outline" size={17} color={SHIFT.pending} />
                     <Text style={{ flex: 1, fontSize: 11.5, color: SHIFT.pending, lineHeight: 17 }}>
-                      {fmtG(myOpening)} an kours — {getUserById(myShiftToday.manager_id)?.name ?? "manadjè a"} poko konfime. Sa pa bloke vant ou.
+                      {fmtG(myOpening)} an kours — {personById(myShiftToday.manager_id)?.name ?? "manadjè a"} poko konfime. Sa pa bloke vant ou.
                     </Text>
                   </View>
                   {claimFor === myShiftToday.id ? (
@@ -1428,6 +1570,38 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
         {/* ══ SUPERVISOR: Pending Approvals review queue (main screen) ══ */}
         {isSupervisor && supView === "team" && (
           <>
+            {/* Team now — always-on presence + open-shift board */}
+            {teamNow.length > 0 && (
+              <View style={{ marginTop: 14 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
+                  <Text style={{ fontSize: 11, color: "#9a9a9e", fontWeight: "700", letterSpacing: 2, textTransform: "uppercase", flex: 1 }}>Ekip kounye a</Text>
+                  <Text style={{ fontSize: 11, color: "#6e6e73", fontWeight: "700" }}>{onlineCount} anliy · {openShiftCount} chanjman ouvè</Text>
+                </View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingRight: 4 }}>
+                  {teamNow.map(p => (
+                    <Pressable key={p.id} onPress={() => openPerson({ id: p.id, name: p.name, role: p.role })}
+                      style={{ width: 136, backgroundColor: "#151518", borderRadius: 16, borderWidth: 0.5, borderColor: p.openShift ? SHIFT.liveBd : "rgba(255,255,255,0.08)", padding: 12 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center" }}>
+                        <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: "#2b2b2e", alignItems: "center", justifyContent: "center" }}>
+                          <Text style={{ fontWeight: "800", fontSize: 12, color: "#fff" }}>{initialsOf(p.name)}</Text>
+                        </View>
+                        <View style={{ marginLeft: "auto", width: 9, height: 9, borderRadius: 5, backgroundColor: p.online ? SHIFT.active : "#3a3a3c" }} />
+                      </View>
+                      <Text numberOfLines={1} style={{ fontSize: 12.5, fontWeight: "700", color: "#fff", marginTop: 8 }}>{p.name || "—"}</Text>
+                      <Text numberOfLines={1} style={{ fontSize: 10, color: p.online ? SHIFT.active : "#8e8e93", marginTop: 2, fontWeight: "700", letterSpacing: 0.6, textTransform: "uppercase" }}>
+                        {p.online ? "Anliy" : "Òfliy"}
+                      </Text>
+                      {p.openShift ? (
+                        <View style={{ marginTop: 6, flexDirection: "row", alignItems: "center", gap: 4 }}>
+                          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: SHIFT.live }} />
+                          <Text style={{ fontSize: 9.5, fontWeight: "800", color: SHIFT.live, letterSpacing: 0.5 }}>CHANJMAN OUVÈ{p.shiftStart && !inLocalDay(p.shiftStart, today) ? " · SOTI YÈ" : ""}</Text>
+                        </View>
+                      ) : null}
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
             <View style={{ marginTop: 4 }}>
               <Text style={{ fontSize: 11, color: "#9a9a9e", fontWeight: "700", letterSpacing: 2, textTransform: "uppercase" }}>Daily report · {dateEyebrow}</Text>
               <View style={{ flexDirection: "row", alignItems: "center", marginTop: 6 }}>
@@ -1466,7 +1640,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
                   ))}
                   {otherPendingOpenings.map((s: any) => (
                     <QueueOpeningRow key={s.id} opening={s} mine={false} expanded={false}
-                      onToggle={() => openPerson({ id: s.cashier_id, name: getUserById(s.cashier_id)?.name ?? s.cashier_id, role: "cashier" })}
+                      onToggle={() => openPerson({ id: s.cashier_id, name: personById(s.cashier_id)?.name ?? s.cashier_id, role: "cashier" })}
                       onResolve={resolveOpening} />
                   ))}
                   {pendingReports.map((r: any) => (
@@ -1475,7 +1649,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
                       loadPerson={fetchPerson}
                       onConfirm={() => confirmReport(r)}
                       onDispute={() => disputeReport(r)}
-                      onInspect={() => openPerson({ id: r.user_id, name: getUserById(r.user_id)?.name ?? r.user_id, role: r.role })} />
+                      onInspect={() => openPerson({ id: r.user_id, name: personById(r.user_id)?.name ?? r.user_id, role: r.role })} />
                   ))}
                 </View>
               )}
@@ -1486,7 +1660,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
                   {confirmedToday.length === 0 ? (
                     <QueueEmpty title="Pa gen rapò konfime" sub="Rapò w konfime jodi a ap parèt isit la." />
                   ) : confirmedToday.map((r: any) => {
-                    const name = getUserById(r.user_id)?.name ?? r.user_id;
+                    const name = personById(r.user_id)?.name ?? r.user_id;
                     const d = Number(r.deficit ?? 0);
                     return (
                       <Pressable key={r.id} onPress={() => openPerson({ id: r.user_id, name, role: r.role })} style={{ flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: "#151518", borderRadius: 18, padding: 14, marginBottom: 10, borderWidth: 0.5, borderColor: "rgba(255,255,255,0.08)" }}>
@@ -1519,7 +1693,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
                     <QueueEmpty title="Pa gen plent" sub="Plent sou ouverture ap parèt isit la." />
                   ) : null}
                   {openingDisputes.map((c: any) => {
-                    const name = getUserById(c.cashier_id)?.name ?? c.cashier_id;
+                    const name = personById(c.cashier_id)?.name ?? c.cashier_id;
                     return (
                       <View key={c.id} style={{ backgroundColor: "#151518", borderWidth: 0.5, borderColor: SHIFT.disputedBd, borderRadius: 18, overflow: "hidden", marginBottom: 10 }}>
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 14 }}>
@@ -1544,7 +1718,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
                     );
                   })}
                   {reportDisputes.map((c: any) => {
-                    const name = getUserById(c.cashier_id)?.name ?? c.cashier_id;
+                    const name = personById(c.cashier_id)?.name ?? c.cashier_id;
                     const r = teamReports.find((x: any) => x.id === c.report_id);
                     return (
                       <View key={c.id} style={{ backgroundColor: "#151518", borderWidth: 0.5, borderColor: SHIFT.disputedBd, borderRadius: 18, overflow: "hidden", marginBottom: 10 }}>
@@ -1554,7 +1728,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
                           </View>
                           <View style={{ flex: 1 }}>
                             <Text style={{ fontSize: 15, fontWeight: "700", color: "#fff" }}>{name}</Text>
-                            <Text style={{ fontSize: 11.5, color: "#8e8e93", marginTop: 2 }}>Rapò {c.check_date} konteste pa {getUserById(c.set_by)?.name ?? "sipèvizè"}</Text>
+                            <Text style={{ fontSize: 11.5, color: "#8e8e93", marginTop: 2 }}>Rapò {c.check_date} konteste pa {personById(c.set_by)?.name ?? "sipèvizè"}</Text>
                           </View>
                           <StatusBadge status="disputed" />
                         </View>
@@ -1578,13 +1752,13 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
               <View style={{ marginTop: 16 }}>
                 <SectionTitle icon="hourglass-outline" title="Ouverture an atant konfimasyon" count={otherPendingOpenings.length} color={SHIFT.pending} />
                 {otherPendingOpenings.map((s: any) => {
-                  const m = { id: s.cashier_id, name: getUserById(s.cashier_id)?.name ?? s.cashier_id, role: "cashier" };
+                  const m = { id: s.cashier_id, name: personById(s.cashier_id)?.name ?? s.cashier_id, role: "cashier" };
                   return (
                     <Pressable key={s.id} onPress={() => openPerson(m)} style={{ flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: palette.surface, borderRadius: radius.lg, padding: 13, marginBottom: 8, borderWidth: 0.5, borderColor: palette.hairline }}>
                       <Avatar name={m.name} size={38} />
                       <View style={{ flex: 1 }}>
                         <Text style={{ fontSize: 13.5, fontWeight: "700", color: palette.ink }}>{m.name}</Text>
-                        <Text style={{ fontSize: 10.5, color: palette.muted2, marginTop: 2 }}>{fmtG(Number(s.opening_stated ?? 0))} · manadjè: {getUserById(s.manager_id)?.name ?? s.manager_id}</Text>
+                        <Text style={{ fontSize: 10.5, color: palette.muted2, marginTop: 2 }}>{fmtG(Number(s.opening_stated ?? 0))} · manadjè: {personById(s.manager_id)?.name ?? s.manager_id}</Text>
                       </View>
                       <StatusBadge status="pending" />
                     </Pressable>
@@ -1829,7 +2003,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
           dateStr={dateStr}
           status={!hasShiftToday ? "opening" : myShiftToday.status === "pending" ? "pending" : "active"}
           pendingShift={myPendingShift}
-          pendingManager={getUserById(myPendingShift?.manager_id)?.name ?? "manadjè a"}
+          pendingManager={personById(myPendingShift?.manager_id)?.name ?? "manadjè a"}
           live={{ sales: fmtG(mySalesTotal), txns: myTxnCount, collected: fmtG(myCollectedTotal), expected: fmtG(headerBalance) }}
           amount={ownShiftAmount}
           onAmount={setOwnShiftAmount}
@@ -1851,7 +2025,7 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
           dateStr={dateStr}
           status={!hasShiftToday ? "opening" : myShiftToday.status === "pending" ? "pending" : "active"}
           pendingShift={myPendingShift}
-          pendingManager={getUserById(myPendingShift?.manager_id)?.name ?? "manadjè a"}
+          pendingManager={personById(myPendingShift?.manager_id)?.name ?? "manadjè a"}
           live={{ sales: fmtG(mySalesTotal), txns: myTxnCount, collected: fmtG(myCollectedTotal), expected: fmtG(headerBalance) }}
           amount={openAmount}
           onAmount={setOpenAmount}
@@ -1871,6 +2045,19 @@ export default function ShiftScreen({ storeId, role = "seller", currentUser, ope
 
       {/* Itemized report drill-in (past reports / today's report) */}
       {detail ? <ShiftReportDetail data={detail} onClose={() => setDetail(null)} /> : null}
+
+      {/* Deficit decision (028) — cashier chooses at report submission. */}
+      <DeficitDecisionSheet
+        visible={!!deficitPrompt}
+        amount={deficitPrompt?.amount ?? 0}
+        employeeName={currentUser?.name ?? ""}
+        subtitle={deficitPrompt?.date ?? ""}
+        canTakeFromSalary
+        saving={deficitSaving}
+        onTakeFromSalary={() => decideDeficit("salary")}
+        onNegligible={() => decideDeficit("negligible")}
+        onClose={() => (deficitSaving ? null : setDeficitPrompt(null))}
+      />
     </View>
   );
 }
@@ -2047,7 +2234,7 @@ function QueueReportRow({ report, severe, expanded, onToggle, loadPerson, onConf
   onDispute: () => void;
   onInspect: () => void;
 }) {
-  const name = getUserById(report.user_id)?.name ?? report.user_id;
+  const name = personById(report.user_id)?.name ?? report.user_id;
   const deficitAmt = Number(report.deficit ?? 0);
   const member: TeamMember = { id: report.user_id, name, role: report.role };
   return (
@@ -2171,7 +2358,7 @@ function QueueOpeningRow({ opening, mine, expanded, onToggle, onResolve }: {
   onToggle: () => void;
   onResolve: (shiftId: string, action: "approve" | "set" | "reject", amount?: string) => void;
 }) {
-  const name = getUserById(opening.cashier_id)?.name ?? opening.cashier_id;
+  const name = personById(opening.cashier_id)?.name ?? opening.cashier_id;
   const [fixAmount, setFixAmount] = useState("");
   const [fixing, setFixing] = useState(false);
   return (
@@ -2183,7 +2370,7 @@ function QueueOpeningRow({ opening, mine, expanded, onToggle, onResolve }: {
         <View style={{ flex: 1 }}>
           <Text style={{ fontSize: 15, fontWeight: "700", color: "#fff" }}>{name}</Text>
           <Text style={{ fontSize: 11.5, color: "#8e8e93", marginTop: 2 }}>
-            {mine ? `Opened ${ago(opening.start_time)} — needs your confirm` : `Opened ${ago(opening.start_time)} · ${getUserById(opening.manager_id)?.name ?? ""}`}
+            {mine ? `Opened ${ago(opening.start_time)} — needs your confirm` : `Opened ${ago(opening.start_time)} · ${personById(opening.manager_id)?.name ?? ""}`}
           </Text>
         </View>
         <View style={{ alignItems: "flex-end", gap: 5 }}>

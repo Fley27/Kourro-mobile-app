@@ -43,6 +43,8 @@ import { MoneyInput } from "../components/maskedInput";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 import { mintId } from "../db/ids";
+import { useFallbackSearch } from "../search/localFirstSearch";
+import { SearchFallbackNotice } from "../search/SearchFallbackNotice";
 
 export default function POSScreen({
   storeId,
@@ -235,6 +237,13 @@ export default function POSScreen({
     decQty, incQty, removeFromCart, setCustomQty,
   } = useCartLines({ cart, setCart, products, pricing, minFactorMap });
   const filtered = useSaleRows({ products, pricing, minFactorMap, catNames, search, variantSales });
+
+  // Local-first product search: the rows above are the local answer. On a
+  // miss: online → one live lookup (notice only — a remote-only product can't
+  // be sold until its pricing/stock land via the normal sync); offline →
+  // clear "connection needed" notice. Never blocks the register.
+  const searchFallback = useFallbackSearch({ kind: "product", query: search, localHit: filtered, storeId });
+  const productSearchMiss = search.trim().length >= 2 && filtered.length === 0;
 
   // Open sales / tabs (Vant an Atann): suspended carts with frozen variant prices
   const [tabs, setTabs] = useState<SuspendedTab[]>([]);
@@ -790,6 +799,16 @@ export default function POSScreen({
     const top = products[0];
     const row = top ? firstRowFor(top.id) : null;
     if (top && row) { setSearch(top.barcode ?? top.sku ?? ""); handleProductPress(row); setShowBarcodeModal(false); }
+  }
+  // Web/desktop: code typed by an external scanner (keyboard wedge) or by hand.
+  function scanCode(code: string) {
+    const t = code.trim();
+    if (!t) return;
+    setSearch(t);
+    const found = products.find(p => p.barcode?.toLowerCase() === t.toLowerCase() || p.sku?.toLowerCase() === t.toLowerCase());
+    const row = found ? firstRowFor(found.id) : null;
+    if (found && row) { handleProductPress(row); setShowBarcodeModal(false); }
+    else Alert.alert("Pa jwenn", `Pa gen pwodwi ak kòd ${t}`);
   }
 
   // A customer-bound coupon dies the moment the sale switches to another
@@ -1508,6 +1527,7 @@ export default function POSScreen({
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
+      {productSearchMiss ? <SearchFallbackNotice status={searchFallback.status === "local" ? "idle" : searchFallback.status} /> : null}
       {showTablet ? (
         <POSTablet
           search={search}
@@ -2257,6 +2277,7 @@ export default function POSScreen({
         visible={showBarcodeModal}
         onClose={() => setShowBarcodeModal(false)}
         onSimulate={simulateScan}
+        onCode={scanCode}
         productLabel={products[0]?.name ?? ""}
       />
 

@@ -60,7 +60,11 @@ export function useSaleCatalog(enabled = true) {
     (async () => {
       try {
       const db = await getDb();
-      const rows = (await db.getAllAsync("SELECT * FROM products WHERE is_deleted=0 AND (status IS NULL OR status = 'active') ORDER BY name LIMIT 50")) as Product[];
+      // 500 (was 50): the picker's in-memory search only sees what this query
+      // returned — a hard 50 made any product past the 50th alphabetically
+      // unsearchable on POS. Products are reference data (always fully synced),
+      // so a full-ish list is the correct local window.
+      const rows = (await db.getAllAsync("SELECT * FROM products WHERE is_deleted=0 AND (status IS NULL OR status = 'active') ORDER BY name LIMIT 500")) as Product[];
       fetched = true;
       try {
         const cats = ((await db.getAllAsync("SELECT id, name FROM categories")) as any[]) ?? [];

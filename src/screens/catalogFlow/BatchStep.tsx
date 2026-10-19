@@ -13,7 +13,7 @@ import { fmt, fmtG } from "../../format";
 import type { Batch, Item } from "../../catalogModel";
 import { itemFactor, previewBatchUnitCost, mergeV2Batch, receiveV2Batch } from "../../catalogModel";
 import type { FlowCtx } from "./types";
-import { canHandleBatches } from "./types";
+import { canHandleBatches, canReceiveBatches } from "./types";
 import PickerGrid from "../../components/PickerGrid";
 import { uploadError } from "../../components/UploadTransition";
 import { MoneyInput } from "../../components/maskedInput";
@@ -268,7 +268,7 @@ export default function BatchStep({
 
 
   async function receive(b: Batch) {
-    if (!canHandleBatches(ctx.role)) return Alert.alert("Pa gen dwa", "Sèlman Manager/Admin/Owner ka resevwa.");
+    if (!canReceiveBatches(ctx.role)) return Alert.alert("Pa gen dwa", "Sèlman Manager/Admin/Owner/Kesye ka resevwa.");
     setBusy(true);
     try {
       const db = await getDb();
@@ -286,6 +286,7 @@ export default function BatchStep({
   }
 
   async function deny(b: Batch) {
+    if (!canHandleBatches(ctx.role)) return Alert.alert("Pa gen dwa", "Sèlman Manager/Admin/Owner ka refize.");
     if (!denyReason.trim()) return Alert.alert("Rezon obligatwa", "Bay rezon refi a.");
     setBusy(true);
     try {
@@ -395,8 +396,9 @@ export default function BatchStep({
             {f > 0 && Number(b.quantity) > 0 ? (
               <Text style={{ fontSize: 11, color: "#8e8e93", fontWeight: "600" }}>≈ {fmtG(Math.round((Number(b.total_paid) / Number(b.quantity)) * 100) / 100)} / {it?.name} · {fmtG(Math.round((Number(b.total_paid) / Number(b.quantity) / f) * 100) / 100)} / baz</Text>
             ) : null}
-            {!stageMode && pStatus !== "draft" && b.status === "pending" && canHandleBatches(ctx.role) ? (
+            {!stageMode && pStatus !== "draft" && b.status === "pending" && canReceiveBatches(ctx.role) ? (
               denyId === b.id ? (
+                canHandleBatches(ctx.role) ? (
                 <View style={{ gap: 8 }}>
                   <TextInput value={denyReason} onChangeText={setDenyReason} placeholder="Rezon refi a (obligatwa)" placeholderTextColor="#636366"
                     style={{ height: 48, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 12, paddingHorizontal: 12, fontSize: 14, color: "#fff", backgroundColor: "transparent" }} />
@@ -409,14 +411,17 @@ export default function BatchStep({
                     </Pressable>
                   </View>
                 </View>
+                ) : null
               ) : (
                 <View style={{ flexDirection: "row", gap: 8 }}>
                   <Pressable onPress={() => receive(b)} disabled={busy} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, backgroundColor: "#fff", alignItems: "center" }}>
                     <Text style={{ fontWeight: "800", fontSize: 13, color: "#000" }}>Resevwa (+stòk)</Text>
                   </Pressable>
+                  {canHandleBatches(ctx.role) ? (
                   <Pressable onPress={() => setDenyId(b.id)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: "rgba(192,57,43,0.5)", alignItems: "center" }}>
                     <Text style={{ fontWeight: "700", fontSize: 13, color: "#e06c5b" }}>Refize</Text>
                   </Pressable>
+                  ) : null}
                 </View>
               )
             ) : null}

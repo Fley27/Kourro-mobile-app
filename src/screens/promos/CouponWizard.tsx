@@ -213,6 +213,16 @@ export default function CouponWizard({
     const row = top ? firstRowFor(top.id) : null;
     if (top && row) { handleProductPress(row); setShowScan(false); }
   }
+  // Web/desktop: code typed by an external scanner (keyboard wedge) or by hand.
+  function scanCode(code: string) {
+    const t = code.trim();
+    if (!t) return;
+    setSearch(t);
+    const found = products.find(p => String(p.barcode ?? "").toLowerCase() === t.toLowerCase() || String(p.sku ?? "").toLowerCase() === t.toLowerCase());
+    const row = found ? firstRowFor(found.id) : null;
+    if (found && row) { handleProductPress(row); setShowScan(false); }
+    else Alert.alert("Pa jwenn", `Pa gen pwodwi ak kòd ${t}`);
+  }
 
   const flatPreview = useMemo(() => {
     if (effectivePct == null) return null;
@@ -518,7 +528,7 @@ export default function CouponWizard({
                 ) : (
                   <ProductsEmpty />
                 )}
-              <ScanSheet visible={showScan} onClose={() => setShowScan(false)} onSimulate={simulateScan} productLabel={sleepy[0]?.name ?? products[0]?.name ?? ""} />
+              <ScanSheet visible={showScan} onClose={() => setShowScan(false)} onSimulate={simulateScan} onCode={scanCode} productLabel={sleepy[0]?.name ?? products[0]?.name ?? ""} />
             </>
           ) : null}
 

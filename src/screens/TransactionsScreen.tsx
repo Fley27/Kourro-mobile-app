@@ -22,6 +22,8 @@ import { notifUI, type NotifRoute } from "../notifRoute";
 import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 import { FALLBACK_STORE_ID } from "../db/ids";
 import { mintId } from "../db/ids";
+import { useFallbackSearch } from "../search/localFirstSearch";
+import { SearchFallbackNotice } from "../search/SearchFallbackNotice";
 
 type TxnViewState = { name: "hub" } | { name: "sale"; saleId: string };
 
@@ -219,10 +221,22 @@ export default function TransactionsScreen({
     });
   }, [sales, customers, q, methods, krediStates, krediAges, hubCredits, hubPayments]);
 
+  // Local-first: the in-memory filter above is the primary answer. On a miss
+  // (sale older than this device's window), one live server lookup — or a
+  // clear "connection needed" notice when offline. Remote rows are shown
+  // once, never written into the local DB.
+  const fallback = useFallbackSearch({ kind: "sale", query: q, localHit: filtered, storeId });
+  const displayRows = useMemo(
+    () => (fallback.status === "remote" && fallback.rows.length
+      ? [...fallback.rows.filter(r => !filtered.some(s => s.id === r.id)), ...filtered]
+      : filtered),
+    [filtered, fallback.status, fallback.rows]
+  );
+
   const grouped = useMemo(() => {
     const now = new Date();
     const map = new Map<string, { key: string; title: string; sort: number; data: any[] }>();
-    for (const s of filtered) {
+    for (const s of displayRows) {
       const t = new Date(s.created_at ?? "").getTime();
       if (isNaN(t)) {
         const g = map.get("nodate") ?? { key: "nodate", title: "San dat", sort: -1, data: [] };
@@ -236,7 +250,7 @@ export default function TransactionsScreen({
       map.set(meta.key, g);
     }
     return [...map.values()].sort((a, b) => b.sort - a.sort);
-  }, [filtered]);
+  }, [displayRows]);
 
   async function openSale(sale: any) {
     try {
@@ -448,11 +462,12 @@ export default function TransactionsScreen({
             {((methods && methods.length) || krediStates.length || krediAges.length) ? (
               <Text style={{ fontSize: 12, color: "#8e8e93", marginTop: 6 }}>
                 Filtre: {[
-                  ...(methods ?? []).map(m => m === "cash" ? "Cash" : m === "moncash" ? "MonCash" : "NatCash"),
+                  ...(methods ?? []).map(m => m === "cash" ? "Cash" : m === "moncash" ? "MonCash" : m === "natcash" ? "NatCash" : m),
                   ...(krediStates.length || krediAges.length ? ["Kredi"] : []),
                 ].join(" • ")}
               </Text>
             ) : null}
+            <SearchFallbackNotice status={fallback.status} />
             <View style={{ height: 20 }} />
           </>
         }

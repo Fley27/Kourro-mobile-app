@@ -2,6 +2,7 @@
 // promotions system (pure math lives in promoMath.ts, audit in audit.ts).
 // Every write goes: row insert/update → outbox → promo_audit.
 import { insertOutbox } from "../db";
+import { assertWritable } from "../subscription/subscription";
 import { loadCatalogModel, currentCanonicalCost, minItemFactor, itemFactor, costForItem, type CatalogModel } from "../catalogModel";
 import { logPromo } from "./audit";
 import {
@@ -87,6 +88,7 @@ export async function createProformat(db: any, args: {
   customerId: string;
   lines: ProformatLineInput[];
 }): Promise<Proformat> {
+  assertWritable();
   if (!args.customerId) fail("Kliyan obligatwa", "Resolwe nimewo telefòn kliyan an anvan.");
   if (!args.lines.length) fail("Pwodwi obligatwa", "Ajoute omwen yon pwodwi sou proformat la.");
 
@@ -307,6 +309,7 @@ export async function listDiscounts(db: any, storeId: string): Promise<Discount[
 export async function createDiscount(db: any, args: {
   storeId: string; deviceId?: string; actor: PromoActor; percentage: number;
 }): Promise<Discount> {
+  assertWritable();
   const pct = Number(args.percentage);
   if (!Number.isFinite(pct) || pct <= 0) fail("Pri valab", "Antre yon pousantrap ki pi gran pase 0.");
   const now = new Date().toISOString();
@@ -420,6 +423,7 @@ export async function issueCoupon(db: any, args: {
   expiryDays: number;
   proformat?: Proformat | null;
 }): Promise<Coupon> {
+  assertWritable();
   const preset = EXPIRY_PRESETS.find(p => p.days === Number(args.expiryDays));
   if (!preset) fail("Echèans", "Chwazi yon dat ekspirasyon (3 jou / 1 semèn / 15 jou / 1 mwa).");
   if (!args.customerId) fail("Kliyan obligatwa", "Resolwe nimewo telefòn kliyan an anvan.");
@@ -677,6 +681,7 @@ export async function recordCouponRedemption(db: any, args: {
   actor: PromoActor;
   amountApplied: number;
 }): Promise<void> {
+  assertWritable();
   const now = new Date().toISOString();
   const logRow = {
     id: newId("crd"),

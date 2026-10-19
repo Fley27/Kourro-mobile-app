@@ -10,8 +10,10 @@ import {
   type Category, type Product,
   SearchHeader, CategoryStrip, StockStatusPill, statusForProduct, isService, isAvailable, categoryDisplayIcon, ProductCard,
 } from "./CatalogShared";
-import { currentVariantPrice, type CatalogModel } from "../catalogModel";
+import { currentVariantPrice, biggestUnitDisplay, smallestItem, type CatalogModel } from "../catalogModel";
 import { SkeletonProductCard } from "../components/Skeleton";
+import { useInitialDownloadActive } from "../sync/useSyncStatus";
+import { ht } from "../i18n";
 import type { StepKey } from "./catalogFlow/CatalogFlowModal";
 import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
@@ -76,6 +78,8 @@ function MetricTile({ label, value, valueColor }: { label: string; value: string
 /** Tablet master-detail: ledger master list + inspector detail card + placeholder. */
 export function CatalogTablet(props: CatalogTabletProps) {
   const { width, padH } = useResponsive();
+  // Fresh device mid-download: empty means "not here yet", not "no products".
+  const downloading = useInitialDownloadActive();
   const {
     role, products, categories, loading,
     q, setQ, onOpenFilter, filterOn, draftCount, cat, setCat,
@@ -86,6 +90,10 @@ export function CatalogTablet(props: CatalogTabletProps) {
     showNameEdit, setShowNameEdit, nameInput, setNameInput, handleChangeName,
     v2, supplierList, getBaseCost, getUnitCosts, onManageProduct, onOpenProduct, onActivateProduct,
   } = props;
+  // Tablet read-only detail: cashiers and associates may open the inspector
+  // (prices/variants/batches visible, cost tiles stay hidden), but every
+  // mutation button remains behind canAddMore/canEdit/canDelete.
+  const canViewDetail = role === "cashier" || role === "associate" || canEdit;
 
   // Web Inventory KPIs — all derived from props already passed by the shell.
   const lowList = products.filter(p => isService(p) ? false : p.stock_quantity <= p.low_stock_threshold);
@@ -115,6 +123,15 @@ export function CatalogTablet(props: CatalogTabletProps) {
       .sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
     const tLast = tBatches.find(b => b.status === "received") ?? tBatches[0] ?? null;
     const tUnitName = defaultUnitOf(p.id)?.unit_name ?? p.unit ?? "pcs";
+    // Same biggest-container pairing as the product card ("199 Kès"): the raw
+    // canonical count with the default unit's name ("4792 Kès") was a different
+    // number in a different unit sharing one label. Threshold converts into
+    // the same display unit (it is stored canonical, like stock).
+    const tStock = biggestUnitDisplay(tItems, p.id, Number(p.stock_quantity ?? 0), tUnitName);
+    // Threshold is stored canonical (compared against raw stock_quantity), so
+    // it pairs with the SMALLEST unit's name — converting 5 base units into
+    // "0 Kès" would be technically right and practically useless.
+    const tSeuilUnit = smallestItem(tItems)?.name ?? tStock.unit;
     const tPrice = displayPriceOf(p);
     const tCost = getBaseCost(p.id);
     const tUnitCosts = getUnitCosts(p.id);
@@ -141,7 +158,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
                 {isAvailable(p) ? "Disponib" : "Koupe"}
               </Text>
             ) : (
-              <Text style={{ fontWeight: "800", fontSize: 24, color: tStatus.accent, ...monoStyle }}>{p.stock_quantity} <Text style={{ fontSize: 12, fontWeight: "600" }}>{tUnitName}</Text></Text>
+              <Text style={{ fontWeight: "800", fontSize: 24, color: tStatus.accent, ...monoStyle }}>{tStock.count} <Text style={{ fontSize: 12, fontWeight: "600" }}>{tStock.unit}</Text></Text>
             )}
             <StockStatusPill status={tStatus} large />
           </View>
@@ -150,7 +167,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
               {isAvailable(p) ? "Sèvis — parèt nan vant" : "Sèvis koupe (86) — kache nan vant"}
             </Text>
           ) : (
-            <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 6 }}>Seuil fèb: {p.low_stock_threshold} {tUnitName}</Text>
+            <Text style={{ fontSize: 11, color: "#8e8e93", marginTop: 6 }}>Seuil fèb: {Number(p.low_stock_threshold ?? 0)} {tSeuilUnit}</Text>
           )}
         </View>
         {/* 2-col metric tiles: PRI VANT / KOUT / MAJ / STÒK */}
@@ -170,7 +187,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
                 valueColor={tMargin !== null ? (tMargin >= 20 ? palette.success : palette.warning) : "#fff"}
               />
             )}
-            <MetricTile label="STÒK" value={isService(p) ? (isAvailable(p) ? "Disponib" : "Koupe") : `${p.stock_quantity} ${tUnitName}`} valueColor={isService(p) ? (isAvailable(p) ? palette.success : palette.warning) : tStatus.accent} />
+            <MetricTile label="STÒK" value={isService(p) ? (isAvailable(p) ? "Disponib" : "Koupe") : `${tStock.count} ${tStock.unit}`} valueColor={isService(p) ? (isAvailable(p) ? palette.success : palette.warning) : tStatus.accent} />
           </View>
           {tVariants.length > 0 && (
             <View style={{ marginTop: 10, borderTopWidth: 0.5, borderColor: "#262626" }}>
@@ -370,6 +387,7 @@ export function CatalogTablet(props: CatalogTabletProps) {
                   stockItems={v2.items}
                   variants={v2.variants}
                   baseCost={getBaseCost(item.id)}
+                  canView={canViewDetail}
                   onPress={() => { setInfoProduct(item); setShowNameEdit(false); setNameInput(item.name); }}
                 />
               )}
@@ -381,6 +399,8 @@ export function CatalogTablet(props: CatalogTabletProps) {
                     <SkeletonProductCard />
                     <SkeletonProductCard />
                   </View>
+                ) : downloading ? (
+                  <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>{ht.downloadingCatalog}</Text></View>
                 ) : (
                   <View style={{ backgroundColor: "#1C1C1E", borderWidth: 0.5, borderColor: "#2b2b2b", borderRadius: radius.md, padding: 24, alignItems: "center", marginTop: 8 }}><Text style={{ color: "#8e8e93", fontWeight: "500", fontSize: 13 }}>Pa gen pwodwi nan kategori sa</Text><Text style={{ color: "#8e8e93", fontSize: 11, marginTop: 4 }}>Eseye yon lòt chèche oswa kategori</Text></View>
                 )

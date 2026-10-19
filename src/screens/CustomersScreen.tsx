@@ -24,6 +24,9 @@ import { CustomerProfileBody, CustomerProfileHeader, CustomerTxnsList, ProfileMe
 import { uploadSuccess, uploadError } from "../components/UploadTransition";
 import { FALLBACK_STORE_ID } from "../db/ids";
 import { mintId } from "../db/ids";
+import { getActiveStoreId } from "../storeContext";
+import { useFallbackSearch } from "../search/localFirstSearch";
+import { SearchFallbackNotice } from "../search/SearchFallbackNotice";
 
 export default function CustomersScreen({ role = "cashier", currentUser, onAddSale }: { role?: string; currentUser?: any; onAddSale?: (c: any) => void }) {
   const [customers, setCustomers] = useState<any[]>([]);
@@ -348,6 +351,18 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
     return list;
   }, [customers, debts, showDebtOnly, search]);
 
+  // Local-first search fallback: the memo above is the local answer. On a miss
+  // (client older than this device's window) — one live server lookup when
+  // online, or a clear "connection needed" notice when offline. Remote rows
+  // are shown once and never written into the local DB.
+  const fallback = useFallbackSearch({ kind: "customer", query: search, localHit: displayCustomers, storeId: getActiveStoreId() });
+  const mergedCustomers = useMemo(
+    () => (fallback.status === "remote" && fallback.rows.length
+      ? [...fallback.rows.filter((r: any) => !displayCustomers.some(c => c.id === r.id)), ...displayCustomers]
+      : displayCustomers),
+    [displayCustomers, fallback.status, fallback.rows]
+  );
+
   async function logEdit(customerId: string, action: string, fieldName: string, oldValue: any, newValue: any) {
     try {
     const db = await getDb();
@@ -431,11 +446,14 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000", alignItems: showTablet ? "center" : undefined }}>
+      <View style={{ width: "100%", maxWidth: showTablet ? 980 : undefined }}>
+        <SearchFallbackNotice status={fallback.status} />
+      </View>
       {showTablet ? (
         <CustomersTablet
           customers={customers}
           debts={debts}
-          displayCustomers={displayCustomers}
+          displayCustomers={mergedCustomers}
           loading={loading}
           search={search}
           setSearch={setSearch}
@@ -485,7 +503,7 @@ export default function CustomersScreen({ role = "cashier", currentUser, onAddSa
         <CustomersPhone
           customers={customers}
           debts={debts}
-          displayCustomers={displayCustomers}
+          displayCustomers={mergedCustomers}
           loading={loading}
           search={search}
           setSearch={setSearch}

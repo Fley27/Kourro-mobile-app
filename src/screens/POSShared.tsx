@@ -6,6 +6,8 @@ import { formatCheckoutRow } from "../catalogModel";
 import { useResponsive } from "../responsive";
 import { blackPalette as palette, radius } from "../theme";
 import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
+import { useInitialDownloadActive } from "../sync/useSyncStatus";
+import { ht } from "../i18n";
 
 // ---- Cross-device primitives + types (device sets live in ../picker/phone
 // and ../picker/tablet; cart/total/empty markup is identical on both) ----
@@ -104,6 +106,14 @@ export type SaleGroup = {
 };
 
 export function ProductsEmpty() {
+  // Fresh device mid-download: an empty grid means "not here yet", not "no
+  // such product" — say so instead of flashing the dead-end copy.
+  const downloading = useInitialDownloadActive();
+  if (downloading) {
+    return (
+      <View style={{ backgroundColor: PROD_DARK.card, borderWidth: 1, borderColor: PROD_DARK.hair, borderRadius: 18, padding: 20, alignItems: "center", marginTop: 16 }}><Text style={{ color: PROD_DARK.muted, fontWeight: "600", fontSize: 12 }}>{ht.downloadingCatalog}</Text></View>
+    );
+  }
   return (
     <View style={{ backgroundColor: PROD_DARK.card, borderWidth: 1, borderColor: PROD_DARK.hair, borderRadius: 18, padding: 20, alignItems: "center", marginTop: 16 }}><Text style={{ color: PROD_DARK.muted, fontWeight: "600", fontSize: 12 }}>Pa gen pwodwi</Text><Text style={{ color: "#52525b", fontSize: 11, marginTop: 4 }}>Eseye yon lòt rechèch</Text></View>
   );

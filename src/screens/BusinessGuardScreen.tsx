@@ -74,6 +74,8 @@ import {
 import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 import { FALLBACK_STORE_ID } from "../db/ids";
 import { mintId } from "../db/ids";
+import { DeficitDecisionSheet } from "../components/DeficitDecisionSheet";
+import { orgIdOf, recordSalaryDeficit } from "../payroll";
 
 const BG = "rgba(0,0,0,0.96)";
 const CARD = "rgba(255,255,255,0.05)";
@@ -305,6 +307,9 @@ export default function BusinessGuardScreen({
   // Shift-report confirmation (Queue tab): close report + confirmed clock-out.
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Payroll (028): explicit deficit decision when confirming a short report.
+  const [deficitPrompt, setDeficitPrompt] = useState<{ amount: number; date: string; reportId: string; employeeId: string; name: string; canTake: boolean } | null>(null);
+  const [deficitSaving, setDeficitSaving] = useState(false);
   const [guardReport, setGuardReport] = useState<ReportDetailData | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
@@ -344,7 +349,12 @@ export default function BusinessGuardScreen({
         arr.push(String(es.store_id));
         empScopes.set(String(es.employee_id), arr);
       }
-      const emp = employees.filter((e: any) => inScope(e.store_id) || (empScopes.get(String(e.id)) ?? []).some(s => inScope(s)));
+      // A pre-PK device database can hold the same employee twice (twin rows
+      // from INSERT OR REPLACE appending). Dedupe by id — newest row wins —
+      // so StaffTab never renders colliding React keys.
+      const empById = new Map<string, any>();
+      for (const e of employees ?? []) empById.set(String(e.id), e);
+      const emp = [...empById.values()].filter((e: any) => inScope(e.store_id) || (empScopes.get(String(e.id)) ?? []).some(s => inScope(s)));
       // Deficit actors are auth user ids (cashier-1…); employees are emp-*.
       // Resolve roles through both spaces — employees win when names match.
       const userByName = new Map(USERS.map(u => [u.name, u]));
@@ -743,8 +753,46 @@ export default function BusinessGuardScreen({
       } catch {}
       setConfirmId(null);
       await load();
+      // Payroll (028): a short report gets the explicit salary decision here
+      // (guard side) — unless the cashier already made it at submission; the
+      // report-id dedupe in recordSalaryDeficit guarantees one row max.
+      if (Number(rep.cashShort ?? 0) > 0) {
+        try {
+          const db = await getDb();
+          const dup = ((await db.getAllAsync("SELECT id FROM salary_deficits WHERE daily_report_id = ? LIMIT 1", [rep.id]).catch(() => [])) as any[]) ?? [];
+          if (!dup.length) {
+            const emp = ((await db.getAllAsync("SELECT is_active FROM employees WHERE id = ? LIMIT 1", [rep.userId]).catch(() => [])) as any[])[0];
+            setDeficitPrompt({
+              amount: Number(rep.cashShort), date: rep.reportDate, reportId: rep.id,
+              employeeId: rep.userId, name: rep.name,
+              canTake: !emp || !!Number(emp.is_active ?? 1),
+            });
+          }
+        } catch {}
+      }
     } catch {} finally {
       setConfirming(false);
+    }
+  }
+
+  /** Deficit decision (028) — permanent, one row per daily report. */
+  async function decideDeficit(choice: "salary" | "negligible") {
+    const p = deficitPrompt;
+    if (!p || deficitSaving) return;
+    setDeficitSaving(true);
+    try {
+      if (choice === "salary") {
+        const db = await getDb();
+        const orgId = await orgIdOf(db);
+        await recordSalaryDeficit(db, {
+          employeeId: p.employeeId, amount: p.amount, date: p.date,
+          reportId: p.reportId, orgId, storeId, registeredBy: String(currentUser?.id ?? ""),
+        });
+        await load();
+      }
+    } catch {} finally {
+      setDeficitSaving(false);
+      setDeficitPrompt(null);
     }
   }
 
@@ -911,6 +959,20 @@ export default function BusinessGuardScreen({
           </KeyboardSafeScrollView>
         </View>
       </Modal>
+
+      {/* Deficit decision (028) — guard-side, right after confirming a short
+          report; skipped when the cashier already chose at submission. */}
+      <DeficitDecisionSheet
+        visible={!!deficitPrompt}
+        amount={deficitPrompt?.amount ?? 0}
+        employeeName={deficitPrompt?.name ?? ""}
+        subtitle={deficitPrompt?.date ?? ""}
+        canTakeFromSalary={!!deficitPrompt?.canTake}
+        saving={deficitSaving}
+        onTakeFromSalary={() => decideDeficit("salary")}
+        onNegligible={() => decideDeficit("negligible")}
+        onClose={() => (deficitSaving ? null : setDeficitPrompt(null))}
+      />
     </>
   );
 }

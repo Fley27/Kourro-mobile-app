@@ -1,6 +1,7 @@
 import { fmtG } from "../format";
 import { mintId } from "../db/ids";
 import { insertOutbox } from "../db";
+import { assertWritable } from "../subscription/subscription";
 // Shared credit reimbursement — the same flow as Credits screen pay,
 // usable from transaction detail (Customers, POS) without duplicating writes.
 export type CreditPayResult = {
@@ -34,6 +35,7 @@ export async function payCreditDebt(
   amount: number,
   collectedBy: string | null
 ): Promise<CreditPayResult> {
+  assertWritable();
   const payments = ((await db.getAllAsync(
     "SELECT * FROM credit_payments WHERE credit_id = ? OR debt_id = ?",
     [debt.id, debt.id]

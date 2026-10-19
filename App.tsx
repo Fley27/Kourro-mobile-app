@@ -32,13 +32,20 @@ import { tabsUI } from "./src/tabsUI";
 import { notifUI, type NotifRoute } from "./src/notifRoute";
 import { initNotifRouting } from "./src/notifications";
 import { OrdersFab } from "./src/components/OrdersFab";
+import { SyncErrorBanner } from "./src/components/SyncErrorBanner";
+import { SubscriptionBanner } from "./src/components/SubscriptionBanner";
+import { SyncStatusIndicator } from "./src/components/SyncStatusIndicator";
+import { SyncIssueBanner } from "./src/components/SyncIssueBanner";
+import { InitialDownloadBanner } from "./src/components/InitialDownloadBanner";
 import { ordersUI } from "./src/ordersUI";
 import { ht } from "./src/i18n";
 import { USERS, getUserById, USER_IDS, type Role, type User } from "./src/users";
-import { FALLBACK_STORE_ID, STORE_IDS } from "./src/db/ids";
+import { FALLBACK_STORE_ID, STORE_IDS, deriveId, reportIdForShift, mintId } from "./src/db/ids";
 import { blackPalette as palette, radius, shadow } from "./src/theme";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuthState } from "./src/auth/authStore";
+import { useWritable, refreshSubscriptionFromDb } from "./src/subscription/subscription";
+import { isLiveSupabase } from "./src/auth/supabase";
 import type { Proformat } from "./src/promos/types";
 import LoginScreen from "./src/screens/LoginScreen";
 import { fmtG } from "./src/format";
@@ -52,26 +59,39 @@ export type StoreItem = { id: string; name: string; location: string; code: stri
 
 
 
-const STORE_ID = FALLBACK_STORE_ID;
+// The active store is React state (see below) — resolved from the user's
+// roster in live mode, never a hardcoded uuid. Non-React code (autoSync,
+// checkout) reads the mirrored value in src/storeContext.
+
 // Yellow apricot — shift-gate banner background (text on it stays white).
 const APRICOT = "#f2a63c";
 // NOTE: device id is NOT a Math.random() const (RAM-only, changes every
 // rebundle). It is loaded once from SecureStore (disk) into state below.
 
 // employees <-> SQLite mapping (team roster persistence)
-const empStoreId = (store?: string) => store === "Dèlma" ? STORE_IDS.delmas : store === "Petyonvil" ? STORE_IDS.petionVille : STORE_ID;
+const empStoreId = (store?: string) => store === "Dèlma" ? STORE_IDS.delmas : store === "Petyonvil" ? STORE_IDS.petionVille : FALLBACK_STORE_ID;
 const empStoreName = (sid?: string) => sid === STORE_IDS.delmas || sid === "st-delma" ? "Dèlma" : "Petyonvil";
 const parseSalary = (s: any) => { const n = parseInt(String(s).replace(/[^0-9]/g, ""), 10); return isNaN(n) ? 0 : n; };
 function empFromRow(r: any): any {
   const base = USERS.find(u => u.id === r.id);
+  let emergency: { name: string; address: string; phone: string } | null = null;
+  if (r.emergency_json) {
+    try {
+      const parsed = JSON.parse(r.emergency_json);
+      if (parsed && typeof parsed === "object") {
+        emergency = { name: String(parsed.name ?? ""), address: String(parsed.address ?? ""), phone: String(parsed.phone ?? "") };
+      }
+    } catch {}
+  }
   return {
     id: r.id,
     name: r.full_name,
     role: r.role,
     phone: r.phone ?? "",
+    email: (r as any).email ?? "",
     address: r.address ?? "",
     store: empStoreName(r.store_id),
-    emergency: { name: "", address: "", phone: "" },
+    emergency,
     secret: base?.secret ?? "",
     password: "",
     lastAction: "",
@@ -81,6 +101,23 @@ function empFromRow(r: any): any {
     active: !!r.is_active,
   } as any;
 }
+
+// Identity-stable state guards: pull cycles bump `syncTick` often, and the
+// roster/employees effects re-run on every tick. Re-setting the same content
+// as a fresh array would retrigger every consumer's [array]-identity deps —
+// including the report screens' `refresh(true)`-on-`[load]` effect (visible
+// up/down RefreshControl bounce) and the employees persist effect, which
+// re-queues roster outbox rows and feeds an infinite push→pull echo loop.
+const sameStrArr = (a: string[], b: string[]) =>
+  a.length === b.length && a.every((v, i) => v === b[i]);
+const empSig = (e: any) =>
+  [e?.id, e?.name, e?.role, e?.phone, e?.address, e?.store, e?.salary, e?.active, e?.isOnline, JSON.stringify(e?.emergency ?? null)].join("|");
+const sameEmployees = (a: any[], b: any[]) =>
+  a.length === b.length && a.every((e, i) => empSig(e) === empSig(b[i]));
+const storeSig = (s: any) =>
+  [s?.id, s?.name, s?.location, s?.code, s?.disabled, s?.breachFlagged].join("|");
+const sameStores = (a: any[], b: any[]) =>
+  a.length === b.length && a.every((s, i) => storeSig(s) === storeSig(b[i]));
 
 // Armed once fontsLoaded (see AppShell) — never while the family is in flight.
 let fontDefaultsArmed = false;
@@ -167,6 +204,17 @@ function AppShell() {
   // Stable device id from HARD memory (SecureStore/Keychain). Survives
   // rebundles + restarts; used for suspended-sales + sync attribution.
   const [deviceId, setDeviceId] = useState<string>("device-pending");
+  // --- Global store context (Apple-like Account Center) — persisted to SQLite (except users) ---
+  // Live mode: the list starts empty and is filled from the user's own
+  // memberships (REST, RLS-scoped) — the demo locations only exist off-live.
+  const [stores, setStores] = useState<StoreItem[]>(() => isLiveSupabase ? [] : [
+    { id: STORE_IDS.petionVille, name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", createdAt: new Date().toISOString() },
+    { id: STORE_IDS.delmas, name: "Delmas", location: "Dèlma", code: "DL-9034", createdAt: new Date().toISOString() },
+  ]);
+  const [activeStoreId, setActiveStoreId] = useState<string>(STORE_IDS.petionVille);
+  // Live mode blocks sync (and every tenant-scoped write path) until the
+  // roster has resolved a store this user actually belongs to.
+  const [storeResolved, setStoreResolved] = useState(!isLiveSupabase);
   useEffect(() => {
     (async () => {
       try {
@@ -177,16 +225,19 @@ function AppShell() {
   }, []);
   // Background sync — ONE loop for every screen instead of a per-screen call:
   // push this device's outbox, pull everyone else's changes, then emit
-  // salesEvents so mounted lists reload themselves. Starts once we know both
-  // the device id and who is signed in; stops on sign-out.
+  // salesEvents so mounted lists reload themselves. Starts once we know the
+  // device id, who is signed in, AND which store this device is on (in live
+  // mode the roster must have resolved it — a fallback uuid would be another
+  // tenant's store). Stops on sign-out or store switch.
   useEffect(() => {
     if (deviceId === "device-pending" || !auth.user) return;
+    if (isLiveSupabase && !storeResolved) return;
     let cancelled = false;
     (async () => {
       try {
         const autoSync = await import("./src/sync/autoSync");
         if (cancelled) return;
-        autoSync.configureSync(STORE_ID, deviceId);
+        autoSync.configureSync(activeStoreId, deviceId);
         autoSync.startAutoSync();
       } catch {}
     })();
@@ -194,7 +245,7 @@ function AppShell() {
       cancelled = true;
       import("./src/sync/autoSync").then(m => m.stopAutoSync()).catch(() => {});
     };
-  }, [auth.user?.id, deviceId]);
+  }, [auth.user?.id, deviceId, activeStoreId, storeResolved]);
   // Re-hydrate the roster / store lists whenever new rows land in SQLite — a
   // pull from another register (autoSync emits after a pull) or our own write.
   // Without this App-level data froze at boot, so a screen could never reflect
@@ -264,6 +315,42 @@ function AppShell() {
 
   const [tabDataVersion, setTabDataVersion] = useState(0);
 
+  // Shared-device session hygiene: whenever the signed-in IDENTITY changes,
+  // drop every piece of per-user view state so nothing from the previous
+  // person's session can leak into the next one (open screens, preselected
+  // customers, proformat seeds, tab). Store data itself stays (role-gated).
+  const lastAuthUserRef = useRef<string | null>(null);
+  useEffect(() => {
+    const uid = auth.user?.id ?? null;
+    if (lastAuthUserRef.current === uid) return;
+    lastAuthUserRef.current = uid;
+    setTab("pos");
+    setMoreKey(k => k + 1);
+    setMoreSel(null);
+    setShowShift(false);
+    setShiftFull(false);
+    setSelectedCreditCustomer(null);
+    setPosAttachCustomer(null);
+    setPosSeed(null);
+    setShowProfileMenu(false);
+    setShowAccountCenter(false);
+    setShowSecurity(false);
+    setShowStore(false);
+    setShowTeam(false);
+    setShowInventory(false);
+    setTabDataVersion(v => v + 1);
+  }, [auth.user?.id]);
+
+  // Subscription snapshot upkeep: refresh when the app returns to foreground
+  // (renewal should lift read-only without a re-login). Throttled in the
+  // subscription module; sync cycles also refresh it.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", s => {
+      if (s === "active") void refreshSubscriptionFromDb();
+    });
+    return () => sub.remove();
+  }, []);
+
   // Refresh the FAB counts straight from the DB so they show whenever there
   // is something pending (any tab, even after leaving and returning): open
   // suspended sales + not-yet-paid orders.
@@ -278,14 +365,14 @@ function AppShell() {
       } catch { if (!cancelled) tabsUI.setCount(0); }
       try {
         const { listOrders } = await import("./src/orders/store");
-        const rows = await listOrders(STORE_ID);
+        const rows = await listOrders(activeStoreId);
         if (!cancelled) ordersUI.setCount(rows.length);
       } catch { if (!cancelled) ordersUI.setCount(0); }
     }
     refresh();
     const sub = AppState.addEventListener("change", (s) => { if (s === "active") refresh(); });
     return () => { cancelled = true; sub.remove(); };
-  }, [tabDataVersion]);
+  }, [tabDataVersion, activeStoreId]);
 
   // Business Guard: only a supervisor's confirmation ends the cashier's
   // session. Watch THIS user's report for today — when it transitions
@@ -314,7 +401,7 @@ function AppShell() {
           if (prev === "submitted" && String(r.status) === "closed" && r.reviewed_by && String(r.reviewed_by) !== uid) {
             try {
               const { clearCartDraft } = await import("./src/sales/cartDraft");
-              await clearCartDraft(await getDb(), STORE_ID, uid);
+              await clearCartDraft(await getDb(), activeStoreId, uid);
             } catch {}
             auth.signOut().catch(() => {});
             return;
@@ -326,58 +413,99 @@ function AppShell() {
     const t = setInterval(check, 10000);
     const sub = AppState.addEventListener("change", s => { if (s === "active") setTimeout(check, 500); });
     return () => { cancelled = true; clearInterval(t); sub.remove(); };
-  }, [auth.user?.id]);
+  }, [auth.user?.id, activeStoreId]);
 
-  // Unified Shift: manager/admin/owner shifts + reports auto-close daily at the
-  // configured low-traffic time (default 06:30 local). Self-accountability — no
-  // approval step, no manual close. Cashiers never auto-close: submitting their
-  // report is their close. Runs on boot, every 60s, and on every foreground.
+  // Unified Shift: open shifts + reports auto-close daily at the configured
+  // low-traffic time (default 06:00 local). Two rules, one sweep every
+  // register runs on boot, every 60s, and on every foreground:
+  //   • a shift whose day is already settled (report submitted/closed) only
+  //     needs the bookkeeping close — the review is the report, not the row;
+  //   • a report-less shift closes only when its owner is INACTIVE (no
+  //     presence heartbeat in 10 minutes), and only a supervisor writes the
+  //     auto report — so reviewed_by keeps a rank for the next-open checks.
+  // Whoever is actively on the app keeps their till; an abandoned one closes
+  // at the first sweep after 06:00.
   useEffect(() => {
     const uid = auth.user?.id;
-    if (!uid || role === "cashier") return;
+    if (!uid) return;
     let cancelled = false;
+    const INACTIVE_MS = 10 * 60_000;
     const run = async () => {
       try {
         const { getDb } = await import("./src/db");
-        const { shiftAutoCloseDue, reconcileShift, inLocalDay, localDayKey } = await import("./src/businessGuard");
+        const { shiftAutoCloseDue, reconcileShift, localDayKey } = await import("./src/businessGuard");
         const db = await getDb();
         const meta = ((await db.getAllAsync("SELECT * FROM _meta WHERE key = 'shift_autoclose_time'").catch(() => [])) ?? []) as any[];
         // Per-shift due check, never a blanket "past HH:MM" gate: a rebundle
         // re-runs this poll, and closing every open shift just because the
-        // clock is past 06:30 would lose shifts still in use (see
+        // clock is past the time would lose shifts still in use (see
         // shiftAutoCloseDue). A shift only closes after its OWN first
         // post-clock-in HH:MM occurrence has passed.
         const nowDate = new Date();
-        const open = ((await db.getAllAsync("SELECT * FROM shifts WHERE cashier_id = ? AND status = 'open'", [uid]).catch(() => [])) ?? []) as any[];
+        const open = ((await db.getAllAsync("SELECT * FROM shifts WHERE status = 'open'").catch(() => [])) ?? []) as any[];
+        if (!open.length) return;
+        const emps = ((await db.getAllAsync("SELECT id, role, updated_at, full_name FROM employees").catch(() => [])) ?? []) as any[];
+        const empById = new Map(emps.map((e: any) => [String(e.id), e]));
+        const isSupervisor = role === "manager" || role === "admin" || role === "owner";
         for (const s of open) {
           if (cancelled) return;
+          const owner = String(s.cashier_id ?? "");
+          if (!owner) continue;
           if (!shiftAutoCloseDue(s.start_time, nowDate, meta[0]?.value)) continue;
           const day = (String(s.start_time ?? "") ? localDayKey(s.start_time) : localDayKey());
-          const reps = ((await db.getAllAsync("SELECT * FROM daily_reports WHERE user_id = ? AND report_date = ? AND store_id = ?", [uid, day, STORE_ID]).catch(() => [])) ?? []) as any[];
-          if (reps.some((r: any) => r.status === "closed")) continue;
+          // The report that belongs to THIS shift: exact link first, then a
+          // legacy day report (no shift_id) — a sibling shift's closed report
+          // on a multi-shift day must never settle this one.
+          const reps = ((await db.getAllAsync(
+            "SELECT * FROM daily_reports WHERE shift_id = ? OR (user_id = ? AND report_date = ? AND (shift_id IS NULL OR shift_id = ''))",
+            [s.id, owner, day]).catch(() => [])) ?? []) as any[];
+          const linked = reps.find((r: any) => String(r.shift_id ?? "") === String(s.id))
+            ?? reps.find((r: any) => r.shift_id == null || String(r.shift_id) === "");
+          const ts = new Date().toISOString();
+          const settled = !!linked && (linked.status === "submitted" || linked.status === "closed");
+          if (settled) {
+            // The person finished their side — just close the row wherever
+            // this sweep runs.
+            await db.runAsync("UPDATE shifts SET status = 'closed', end_time = ?, auto_closed = 1, updated_at = ? WHERE id = ? AND status = 'open'", [ts, ts, s.id]);
+            continue;
+          }
+          // No settled report: only a supervisor closes it, and only once the
+          // owner stopped beating (app closed / signed out / gone).
+          if (!isSupervisor) continue;
+          const emp = empById.get(owner);
+          const seen = Date.parse(String(emp?.updated_at ?? ""));
+          if (!isNaN(seen) && Date.now() - seen < INACTIVE_MS) continue; // still online
           const allSales = ((await db.getAllAsync("SELECT * FROM sales").catch(() => [])) ?? []) as any[];
           // Per-shift only: transactions since THIS shift started (not the
           // whole day) feed the Final Total, same as the cashier flow.
           const since = String(s.start_time ?? "");
-          const inShift = (ts: any) => String(ts ?? "") >= since;
-          const daySales = allSales.filter((x: any) => (x.seller_id ?? null) === uid && inShift(x.created_at) && !Number(x.standby ?? 0));
-          const cashSales = daySales.filter((x: any) => x.payment_method === "cash").reduce((a: number, x: any) => x.total ?? 0, 0);
-          const debts = ((await db.getAllAsync("SELECT * FROM credit_payments").catch(() => [])) ?? []).filter((p: any) => (p.payment_method ?? "cash") === "cash" && (p.collected_by ?? null) === uid && inShift(p.created_at));
+          const inShift = (ts2: any) => String(ts2 ?? "") >= since;
+          const daySales = allSales.filter((x: any) => (x.seller_id ?? null) === owner && inShift(x.created_at) && !Number(x.standby ?? 0));
+          const cashSales = daySales.filter((x: any) => x.payment_method === "cash").reduce((a: number, x: any) => a + (x.total ?? 0), 0);
+          const debts = ((await db.getAllAsync("SELECT * FROM credit_payments").catch(() => [])) ?? []).filter((p: any) => (p.payment_method ?? "cash") === "cash" && (p.collected_by ?? null) === owner && inShift(p.created_at));
           const debt = debts.reduce((a: number, p: any) => a + Number(p.amount ?? 0), 0);
-          const cms = ((await db.getAllAsync("SELECT * FROM cash_movements").catch(() => [])) ?? []).filter((m: any) => (m.shift_id != null && m.shift_id === s.id) || ((m.taken_by ?? null) === uid && inShift(m.created_at)));
+          const cms = ((await db.getAllAsync("SELECT * FROM cash_movements").catch(() => [])) ?? []).filter((m: any) => (m.shift_id != null && m.shift_id === s.id) || ((m.taken_by ?? null) === owner && inShift(m.created_at)));
           const cashOut = cms.filter((m: any) => m.type === "withdrawal" || m.type === "inventory").reduce((a: number, m: any) => a + Number(m.amount ?? 0), 0);
+          const inventoryTotal = Number(cms.filter((m: any) => m.type === "inventory").reduce((a: number, m: any) => a + Number(m.amount ?? 0), 0));
           const expected = reconcileShift({ opening: Number(s.opening_balance ?? 0), cashSales, debtCollected: debt, cashOut, standbyCarry: 0 });
-          const ts = new Date().toISOString();
-          const repId = `rep-${uid}-${day}`;
-          if (reps.length === 0) {
-            await db.runAsync("INSERT INTO daily_reports (id, store_id, report_date, role, user_id, status, standby_carry, opening_balance, expected_cash, actual_cash, deficit, cash_sales, credit_collected_cash, withdrawals_total, inventory_total, submitted_at, closed_at, reviewed_by, reviewed_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-              [repId, STORE_ID, day, role, uid, "closed", 0, Number(s.opening_balance ?? 0), expected, expected, 0, cashSales, debt, cashOut, Number(cms.filter((m: any) => m.type === "inventory").reduce((a: number, m: any) => a + Number(m.amount ?? 0), 0)), ts, ts, uid, ts, ts, ts]);
+          const repRole = String(emp?.role ?? (owner === uid ? role : "cashier"));
+          if (!linked) {
+            await db.runAsync("INSERT INTO daily_reports (id, store_id, report_date, role, user_id, shift_id, status, standby_carry, opening_balance, expected_cash, actual_cash, deficit, cash_sales, credit_collected_cash, withdrawals_total, inventory_total, submitted_at, closed_at, reviewed_by, reviewed_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              [reportIdForShift(String(s.id)), s.store_id ?? activeStoreId, day, repRole, owner, s.id, "closed", 0, Number(s.opening_balance ?? 0), expected, expected, 0, cashSales, debt, cashOut, inventoryTotal, ts, ts, uid, ts, ts, ts]);
           } else {
-            await db.runAsync("UPDATE daily_reports SET status = ?, expected_cash = ?, actual_cash = ?, deficit = ?, cash_sales = ?, credit_collected_cash = ?, withdrawals_total = ?, inventory_total = ?, submitted_at = ?, closed_at = ?, reviewed_by = ?, reviewed_at = ? WHERE user_id = ? AND report_date = ? AND store_id = ?",
-              ["closed", expected, expected, 0, cashSales, debt, cashOut, Number(cms.filter((m: any) => m.type === "inventory").reduce((a: number, m: any) => a + Number(m.amount ?? 0), 0)), ts, ts, uid, ts, uid, day, STORE_ID]);
+            await db.runAsync("UPDATE daily_reports SET status = ?, expected_cash = ?, actual_cash = ?, deficit = ?, shift_id = COALESCE(shift_id, ?), cash_sales = ?, credit_collected_cash = ?, withdrawals_total = ?, inventory_total = ?, submitted_at = ?, closed_at = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ?",
+              ["closed", expected, expected, 0, s.id, cashSales, debt, cashOut, inventoryTotal, ts, ts, uid, ts, ts, String(linked.id)]);
           }
-          await db.runAsync("UPDATE shifts SET status = 'closed', end_time = ?, actual_cash = ?, auto_closed = 1, updated_at = ? WHERE id = ?", [ts, expected, ts, s.id]);
-          console.log(`[auto-close] shift ${s.id} report ${repId} closed at ${ts} (expected ${expected})`);
+          await db.runAsync("UPDATE shifts SET status = 'closed', end_time = ?, actual_cash = ?, auto_closed = 1, updated_at = ? WHERE id = ? AND status = 'open'", [ts, expected, ts, s.id]);
+          try {
+            const startLabel = (() => {
+              try { return new Date(String(s.start_time)).toLocaleTimeString("fr-HT", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; }
+            })();
+            await db.runAsync("INSERT INTO notifications (id, user_id, type, reference_id, message, status, created_at) VALUES (?,?,?,?,?,?,?)",
+              [mintId(), owner, "shift_auto_closed", s.id,
+                `Chanjman w te louvri${startLabel ? ` a ${startLabel}` : ""} fèmen otomatik a ${String(meta[0]?.value ?? "06:00")} — paske w pa t aktif. Rapò jounen an make fèmen pou revizyon.`, "pending", ts]);
+          } catch {}
+          console.log(`[auto-close] shift ${s.id} of ${owner} closed at ${ts} (expected ${expected})`);
         }
       } catch (e) {
         console.warn("[auto-close] failed:", String(e));
@@ -387,7 +515,7 @@ function AppShell() {
     const t = setInterval(run, 60000);
     const sub = AppState.addEventListener("change", s => { if (s === "active") setTimeout(run, 500); });
     return () => { cancelled = true; clearInterval(t); sub.remove(); };
-  }, [auth.user?.id, role]);
+  }, [auth.user?.id, role, activeStoreId]);
 
   // FAB tap from any screen: jump to POS and open its tabs sheet.
   const onTabFABOpen = useCallback(() => {
@@ -405,12 +533,8 @@ function AppShell() {
     setTab(t);
   }, [tab]);
 
-  // --- Global store context (Apple-like Account Center) — persisted to SQLite (except users) ---
-  const [stores, setStores] = useState<StoreItem[]>(() => [
-    { id: STORE_IDS.petionVille, name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", createdAt: new Date().toISOString() },
-    { id: STORE_IDS.delmas, name: "Delmas", location: "Dèlma", code: "DL-9034", createdAt: new Date().toISOString() },
-  ]);
-  const [activeStoreId, setActiveStoreId] = useState<string>(STORE_IDS.petionVille);
+  // --- Global store context — stores/activeStoreId/storeResolved are declared
+  // near deviceId above (the sync + guard effects depend on them).
   const [appDisabled, setAppDisabled] = useState(false);
   const [storesHydrated, setStoresHydrated] = useState(false);
   // Business type (owner-only setting, inherited by all location stores).
@@ -456,8 +580,10 @@ function AppShell() {
               revokedBy: r.revoked_by ?? undefined,
             }));
           if (mapped.length > 0) setStores(mapped);
-        } else {
-          // first launch — seed SQLite with initial stores
+          // A previous roster already landed — good enough to sync offline.
+          if (isLiveSupabase && mapped.length > 0) setStoreResolved(true);
+        } else if (!isLiveSupabase) {
+          // first launch (demo mode only) — seed SQLite with initial stores
           const initial = [
             { id: STORE_IDS.petionVille, name: "Pétion-Ville", location: "Petyonvil", code: "PV-4821", createdAt: new Date().toISOString() },
             { id: STORE_IDS.delmas, name: "Delmas", location: "Dèlma", code: "DL-9034", createdAt: new Date().toISOString() },
@@ -481,6 +607,9 @@ function AppShell() {
   // Persist stores on change (for testing: verify sqlite survives restart)
   useEffect(() => {
     if (!storesHydrated) return;
+    // Live mode boots with an empty list until the roster lands — an empty
+    // state must never wipe the previously synced stores table.
+    if (isLiveSupabase && stores.length === 0) return;
     (async () => {
       try {
         const { getDb } = await import("./src/db");
@@ -520,8 +649,11 @@ function AppShell() {
       } catch {}
     })();
   }, [appDisabled, storesHydrated]);
+  // Demo seed roster — MOCK devices only. A live device's roster comes from
+  // the pulled profiles; seeding six demo people here painted "old staff"
+  // onto real teams and showed one person twice once their real row arrived.
   const [employees, setEmployees] = useState<Employee[]>(() =>
-    USERS.map(u => ({
+    isLiveSupabase ? [] : USERS.map(u => ({
       ...u,
       store: u.store ?? "Petyonvil",
       lastAction: u.role === "cashier" ? "Vente #VTE-1021 • il y a 12 min" : u.role === "manager" ? "Ajustement stock • il y a 1 h" : "Clôture caisse • hier",
@@ -542,10 +674,59 @@ function AppShell() {
       try {
         const { getDb } = await import("./src/db");
         const { loadUserStoreIds } = await import("./src/org");
-        setUserStoreIds(await loadUserStoreIds(await getDb(), currentUser));
+        const next = await loadUserStoreIds(await getDb(), currentUser);
+        // Same-content pulls must keep array identity: a fresh array here
+        // invalidates report-screen `load` callbacks and re-fires their
+        // cloud refresh (visible RefreshControl bounce).
+        setUserStoreIds(prev => (sameStrArr(prev, next) ? prev : next));
       } catch {}
     })();
   }, [currentUser?.id, syncTick]);
+  // Live mode: resolve which stores this user may touch from their own
+  // memberships (REST, RLS-scoped) — the device never trusts a hardcoded
+  // location. Re-runs after each pull so a roster change lands eventually.
+  useEffect(() => {
+    if (!auth.user || !isLiveSupabase) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { fetchRoster, applyRosterToDb } = await import("./src/auth/roster");
+        const roster = await fetchRoster();
+        if (cancelled || !roster) return;
+        const { getDb } = await import("./src/db");
+        const db = await getDb();
+        const meta = ((await db.getAllAsync("SELECT value FROM _meta WHERE key = 'active_store_id'").catch(() => [])) ?? []) as any[];
+        const preferred = meta[0]?.value ?? null;
+        const chosen = await applyRosterToDb(roster, preferred);
+        if (cancelled || !chosen) return;
+        setActiveStoreId(chosen);
+        // Identity-stable: same roster content must not churn downstream
+        // [userStoreIds]/[stores] deps (report bounce + persist re-runs).
+        setUserStoreIds(prev => (sameStrArr(prev, roster.storeIds) ? prev : roster.storeIds));
+        // Refresh the visible store list from the roster (names/codes included).
+        setStores(prev => {
+          const next = roster.stores.map(s => ({
+            id: s.id,
+            name: s.name,
+            location: s.location ?? "",
+            code: s.code ?? "",
+            createdAt: s.created_at ?? new Date().toISOString(),
+            disabled: !!s.disabled,
+            breachFlagged: !!s.breach_flagged,
+            breachedAt: s.breached_at ?? undefined,
+            revokedBy: s.revoked_by ?? undefined,
+          }));
+          return sameStores(prev, next) ? prev : next;
+        });
+        setStoreResolved(true);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [auth.user?.id, syncTick]);
+  // Mirror the active store for non-React consumers (autoSync, checkout).
+  useEffect(() => {
+    import("./src/storeContext").then(m => m.setActiveStoreId(activeStoreId)).catch(() => {});
+  }, [activeStoreId]);
   // Hydrate the team roster from SQLite (persistent across restarts); seed once if empty
   useEffect(() => {
     if (!storesHydrated) return;
@@ -553,14 +734,38 @@ function AppShell() {
       try {
         const { getDb } = await import("./src/db");
         const db = await getDb();
+        // Roster list salary is a display cache; salary_history is the truth.
+        // Heal before reading so a device that pulled salary rows (or was
+        // edited elsewhere) never renders a stale/zero salary in the list.
+        try {
+          const { healSalaryCaches } = await import("./src/payroll");
+          await healSalaryCaches(db);
+        } catch {}
+        // Live device: drop the demo seed roster older builds left behind —
+        // local-only ids can never be real accounts, and the leftovers read
+        // as stale duplicates of the pulled team. Queued pushes of those ids
+        // die with them instead of aging out into a sync banner.
+        if (isLiveSupabase) {
+          const demoIds = Object.values(USER_IDS) as string[];
+          const marks = demoIds.map(() => "?").join(",");
+          await db.runAsync(`DELETE FROM employees WHERE id IN (${marks})`, demoIds).catch(() => {});
+          await db.runAsync(`DELETE FROM employee_stores WHERE employee_id IN (${marks})`, demoIds).catch(() => {});
+          for (const id of demoIds) {
+            await db.runAsync("DELETE FROM outbox WHERE payload LIKE ?", [`%${id}%`]).catch(() => {});
+          }
+        }
         const rows = (await db.getAllAsync("SELECT * FROM employees WHERE is_deleted=0 OR is_deleted IS NULL")) as any[];
         if (rows.length > 0) {
-          setEmployees(rows.map(empFromRow));
-        } else {
+          // Identity-stable: this effect re-runs on every syncTick, and a
+          // fresh employees array re-fires the persist effect below, which
+          // re-queues roster outbox rows — an infinite push→pull echo.
+          const next = rows.map(empFromRow);
+          setEmployees(prev => (sameEmployees(prev, next) ? prev : next));
+        } else if (!isLiveSupabase) {
         for (const e of employees) {
           await db.runAsync(
-            "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, salary, address, is_active, online_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            [e.id, empStoreId(e.store), e.name, e.role, e.phone ?? "", parseSalary(e.salary), e.address ?? "", e.active ? 1 : 0, e.isOnline ? 1 : 0, new Date().toISOString(), new Date().toISOString()]
+            "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, email, salary, address, emergency_json, is_active, online_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [e.id, empStoreId(e.store), e.name, e.role, e.phone ?? "", (e as any).email ?? null, parseSalary(e.salary), e.address ?? "", e.emergency ? JSON.stringify(e.emergency) : null, e.active ? 1 : 0, e.isOnline ? 1 : 0, new Date().toISOString(), new Date().toISOString()]
           );
           try {
             await db.runAsync("INSERT OR REPLACE INTO employee_stores (employee_id, store_id) VALUES (?,?)", [e.id, empStoreId(e.store)]);
@@ -578,14 +783,72 @@ function AppShell() {
       try {
         const { getDb } = await import("./src/db");
         const db = await getDb();
+        // Owner/admin roster edits travel to the cloud (pair-keyed upsert on
+        // the server): membership rows + the profile name/role/email. Only
+        // uuid ids go up (local demo ids stay local). Rows for login-less
+        // staff can't satisfy the server FK/NOT NULLs — they fail, age out
+        // after MAX_PUSH_ATTEMPTS, and surface once as a human banner.
+        const canRosterPush = role === "owner" || role === "admin";
+        const isUuid = (x: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(x ?? ""));
+        // Outbox dedupe: this effect re-runs on every employees change, and
+        // re-queueing identical rows each time floods the 100-row push window.
+        const queuedIds = new Set<string>();
+        try {
+          const ob = ((await db.getAllAsync("SELECT table_name, payload FROM outbox").catch(() => [])) ?? []) as any[];
+          for (const o of ob) {
+            try {
+              const pid = String(JSON.parse(String(o?.payload ?? "{}"))?.id ?? "");
+              if (pid) queuedIds.add(`${o.table_name}:${pid}`);
+            } catch {}
+          }
+        } catch {}
         for (const e of employees) {
           await db.runAsync(
-            "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, salary, address, is_active, online_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            [e.id, empStoreId(e.store), e.name, e.role, e.phone ?? "", parseSalary(e.salary), e.address ?? "", e.active ? 1 : 0, e.isOnline ? 1 : 0, new Date().toISOString(), new Date().toISOString()]
+            "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, email, salary, address, emergency_json, is_active, online_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [e.id, empStoreId(e.store), e.name, e.role, e.phone ?? "", (e as any).email ?? null, parseSalary(e.salary), e.address ?? "", e.emergency ? JSON.stringify(e.emergency) : null, e.active ? 1 : 0, e.isOnline ? 1 : 0, new Date().toISOString(), new Date().toISOString()]
           );
           try {
             await db.runAsync("INSERT OR REPLACE INTO employee_stores (employee_id, store_id) VALUES (?,?)", [e.id, empStoreId(e.store)]);
           } catch {}
+          // Memberships: owner/admin mint them (the server rejects anyone
+          // else). Profiles: owner/admin push anyone's; every role may push
+          // its OWN row (server "self" scope) so staff self-edits — name and
+          // emergency contact — reach the cloud like any other data.
+          const canPushProfile = canRosterPush || e.id === currentUser?.id;
+          if (canRosterPush && isUuid(e.id)) {
+            const sid = empStoreId(e.store);
+            if (isUuid(sid)) {
+              const smId = deriveId("sm", e.id, sid);
+              if (!queuedIds.has(`store_members:${smId}`)) {
+                try {
+                  const { insertOutbox } = await import("./src/db");
+                  await insertOutbox("store_members", "update", {
+                    id: smId, store_id: sid, user_id: e.id,
+                    role: e.role, created_at: new Date().toISOString(),
+                  }, db);
+                  queuedIds.add(`store_members:${smId}`);
+                } catch {}
+              }
+            }
+          }
+          if (canPushProfile && isUuid(e.id)) {
+              if (!queuedIds.has(`profiles:${e.id}`)) {
+                try {
+                  const { insertOutbox } = await import("./src/db");
+                  await insertOutbox("profiles", "update", {
+                    id: e.id, full_name: e.name, role: e.role,
+                    ...((e as any).email ? { email: (e as any).email } : {}),
+                    // Emergency contact syncs with the profile row (027).
+                    // Explicit nulls: clearing the section must clear the cloud.
+                    emergency_name: e.emergency?.name ?? null,
+                    emergency_phone: e.emergency?.phone ?? null,
+                    emergency_address: e.emergency?.address ?? null,
+                    updated_at: new Date().toISOString(), is_deleted: 0,
+                  }, db);
+                  queuedIds.add(`profiles:${e.id}`);
+                } catch {}
+              }
+          }
         }
         const existing = (await db.getAllAsync("SELECT id FROM employees")) as any[];
         const ids = new Set(employees.map(e => e.id));
@@ -606,10 +869,10 @@ function AppShell() {
 
   const [newEmpName, setNewEmpName] = useState("");
   const [newEmpRole, setNewEmpRole] = useState("cashier");
-  const [newEmpPhone, setNewEmpPhone] = useState("");
+  const [newEmpSalary, setNewEmpSalary] = useState("12000");
+  const [newEmpEmail, setNewEmpEmail] = useState("");
   const [newEmpAddress, setNewEmpAddress] = useState("");
   const [newEmpEmergName, setNewEmpEmergName] = useState("");
-  const [newEmpEmergPhone, setNewEmpEmergPhone] = useState("");
   const [newEmpEmergAddress, setNewEmpEmergAddress] = useState("");
   const [newEmpError, setNewEmpError] = useState("");
   const [editingEmp, setEditingEmp] = useState<any | null>(null);
@@ -645,6 +908,9 @@ function AppShell() {
     return canAffect(target);
   };
   const canChangeSelf = (target: any) => target.id === currentUser?.id;
+  // Salary changes (028): owner/admin only, strict superior, never self, and
+  // never an owner target — inactive employees are blocked too.
+  const canEditSalary = (target: any) => (role === "owner" || role === "admin") && canAffect(target) && !!target?.active;
   const addRoleOptions = role === "owner"
     ? ["admin", "manager", "cashier", "associate", ...(businessType === "retail" ? [] : ["cook"])]
     : role === "admin"
@@ -881,7 +1147,7 @@ function AppShell() {
     try {
       const { getDb } = await import("./src/db");
       const { clearCartDraft } = await import("./src/sales/cartDraft");
-      await clearCartDraft(await getDb(), STORE_ID, currentUser?.id ?? null);
+      await clearCartDraft(await getDb(), activeStoreId, currentUser?.id ?? null);
     } catch {}
     auth.signOut();
   };
@@ -889,7 +1155,10 @@ function AppShell() {
   // Selling is hard-gated behind an open shift for every role. A pending
   // (unconfirmed) opening still unlocks selling — only a missing shift blocks.
   // After close (report submitted, awaiting review) sales stay blocked.
-  const canSell = shiftTodayActive && !awaitingReview;
+  // Subscription read-only (expired/paused) is the third gate: reads stay up,
+  // new sales are blocked locally (and refused server-side).
+  const subscriptionWritable = useWritable();
+  const canSell = shiftTodayActive && !awaitingReview && subscriptionWritable;
 
   const screenTitle = showInventory
     ? "Nouvo Livrezon"
@@ -915,17 +1184,31 @@ function AppShell() {
               ? "Plis"
               : ht.home;
 
+  // Sync auth banner — when middleware rejects our token (401/403) the loop
+  // keeps retrying in the background; this surfaces it so a register isn't a
+  // silent empty catalog. autoSync clears it on the next successful cycle.
+  const [syncAuthError, setSyncAuthError] = useState<string | null>(null);
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    (async () => {
+      try {
+        const autoSync = await import("./src/sync/autoSync");
+        unsub = autoSync.onSyncAuthError(setSyncAuthError);
+      } catch {}
+    })();
+    return () => { unsub?.(); };
+  }, []);
+
   if (!fontsReady) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: "#000", alignItems: "center", justifyContent: "center" }}>
-        <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", padding: 6 }}>
-          <Image source={require("./assets/kourro-logo.png")} style={{ width: 34, height: 34, resizeMode: "contain" }} />
-        </View>
+        {/* Current brand: the wordmark — same asset as the login hero (the
+            old square badge read as a stale logo on the very first screen). */}
+        <Image source={require("./assets/kourro-wordmark.png")} style={{ width: 180, height: 47, resizeMode: "contain" }} />
         {/* System font (fontWeight, no Inter family) — these render BEFORE
             useFonts finishes, so requesting Inter here would be the very
             "used it before it finished loading" case the warning describes. */}
-        <Text style={{ fontWeight: "600", fontSize: 13, color: palette.ink, marginTop: 10, letterSpacing: -0.2 }}>Kourro</Text>
-        <Text style={{ fontWeight: "400", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
+        <Text style={{ fontWeight: "400", fontSize: 11, color: palette.muted2, marginTop: 14 }}>Chargement…</Text>
       </SafeAreaView>
     );
   }
@@ -937,10 +1220,8 @@ function AppShell() {
   if (auth.status === "loading") {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: "#000", alignItems: "center", justifyContent: "center" }}>
-        <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", borderWidth: 0.5, borderColor: "rgba(200,162,74,0.4)", padding: 6 }}>
-          <Image source={require("./assets/kourro-logo.png")} style={{ width: 34, height: 34, resizeMode: "contain" }} />
-        </View>
-        <Text style={{ fontWeight: "400", fontSize: 11, color: palette.muted2, marginTop: 2 }}>Chargement…</Text>
+        <Image source={require("./assets/kourro-wordmark.png")} style={{ width: 180, height: 47, resizeMode: "contain" }} />
+        <Text style={{ fontWeight: "400", fontSize: 11, color: palette.muted2, marginTop: 14 }}>Chargement…</Text>
       </SafeAreaView>
     );
   }
@@ -955,6 +1236,17 @@ function AppShell() {
     // width so every useResponsive() consumer reflows the instant the menu
     // toggles (context flows through Modals too).
     <SidebarWidthProvider value={menuCollapsed ? SIDEBAR_RAIL : MENU_W_EXPANDED}>
+    {/* Auth banner spans the full width above both layouts (tablet row and
+        phone column) so it's visible on every device. */}
+    <SyncErrorBanner message={syncAuthError} onSignOut={() => { auth.signOut().catch(() => {}); }} />
+    {/* Subscription read-only lock: persistent while the org's plan is
+        expired/paused/unknown. Reads keep working; writes are gated. */}
+    <SubscriptionBanner />
+    {/* Human-language sync alert (amber): push rejects / pull failures in
+        plain words, auto-hides 30s after each new alert. */}
+    <SyncIssueBanner />
+    {/* First-download banner: a new device starts empty — say data is coming */}
+    <InitialDownloadBanner />
     <View style={{ flex: 1, backgroundColor: "#000", flexDirection: IS_TABLET_DEVICE ? "row" : "column" }}>
       {/* Tablets navigate from the permanent menu in the left rail; the bottom
           bar never renders. */}
@@ -1076,7 +1368,7 @@ function AppShell() {
               try {
                 const { getDb } = await import("./src/db");
                 const { clearCartDraft } = await import("./src/sales/cartDraft");
-                await clearCartDraft(await getDb(), STORE_ID, currentUser?.id ?? null);
+                await clearCartDraft(await getDb(), activeStoreId, currentUser?.id ?? null);
               } catch {}
               auth.signOut();
             }} style={{ marginTop: 14, backgroundColor: palette.dangerBg, borderRadius: radius.md, paddingVertical: 14, alignItems: "center", borderWidth: 0.5, borderColor: palette.dangerBd }}>
@@ -1138,7 +1430,7 @@ function AppShell() {
             <StoreScreen
               role={role}
               activeStore={activeStore}
-              storeId={STORE_ID}
+              storeId={activeStoreId}
               storeCount={stores?.length ?? 0}
               appDisabled={appDisabled}
               setAppDisabled={setAppDisabled}
@@ -1174,14 +1466,14 @@ function AppShell() {
               setNewEmpName={setNewEmpName}
               newEmpRole={newEmpRole}
               setNewEmpRole={setNewEmpRole}
-              newEmpPhone={newEmpPhone}
-              setNewEmpPhone={setNewEmpPhone}
+              newEmpSalary={newEmpSalary}
+              setNewEmpSalary={setNewEmpSalary}
+              newEmpEmail={newEmpEmail}
+              setNewEmpEmail={setNewEmpEmail}
               newEmpAddress={newEmpAddress}
               setNewEmpAddress={setNewEmpAddress}
               newEmpEmergName={newEmpEmergName}
               setNewEmpEmergName={setNewEmpEmergName}
-              newEmpEmergPhone={newEmpEmergPhone}
-              setNewEmpEmergPhone={setNewEmpEmergPhone}
               newEmpEmergAddress={newEmpEmergAddress}
               setNewEmpEmergAddress={setNewEmpEmergAddress}
               newEmpError={newEmpError}
@@ -1193,6 +1485,7 @@ function AppShell() {
               canToggle={canToggle}
               canResetOther={canResetOther}
               canChangeSelf={canChangeSelf}
+              canEditSalary={canEditSalary}
               addRoleOptions={addRoleOptions}
               showAdd={showAddEmp}
               setShowAdd={setShowAddEmp}
@@ -1220,7 +1513,7 @@ function AppShell() {
                 )}
               </View>
             )}
-            <ShiftScreen storeId={STORE_ID} role={role} currentUser={currentUser} openSignal={shiftSignal} closeSignal={shiftCloseSignal} onOpenState={setShiftOpen} onFullView={setShiftFull} />
+            <ShiftScreen storeId={activeStoreId} role={role} currentUser={currentUser} openSignal={shiftSignal} closeSignal={shiftCloseSignal} onOpenState={setShiftOpen} onFullView={setShiftFull} />
           </View>
         ) : showInventory ? (
           <View style={{ flex: 1 }}>
@@ -1249,7 +1542,7 @@ function AppShell() {
           </View>
         ) : (
           <>
-            {tab === "home" && <HomeScreen onGoPos={() => setTab("pos")} onGoShift={() => openShiftDeliberate()} onOpenStore={openStore} onOpenTeam={openTeam} role={role} currentUser={currentUser} employees={employees} stores={stores} setStores={setStores} activeStoreId={activeStoreId} setActiveStoreId={setActiveStoreId} appDisabled={appDisabled} setAppDisabled={setAppDisabled} onOpenAccountCenter={() => setShowAccountCenter(true)} onShiftResolved={() => setShiftVersion(v=>v+1)} storeId={STORE_ID} storeName={activeStore?.name ?? "Pétion-Ville"} userStoreIds={userStoreIds} deviceId={deviceId} />}
+            {tab === "home" && <HomeScreen onGoPos={() => setTab("pos")} onGoShift={() => openShiftDeliberate()} onOpenStore={openStore} onOpenTeam={openTeam} role={role} currentUser={currentUser} employees={employees} stores={stores} setStores={setStores} activeStoreId={activeStoreId} setActiveStoreId={setActiveStoreId} appDisabled={appDisabled} setAppDisabled={setAppDisabled} onOpenAccountCenter={() => setShowAccountCenter(true)} onShiftResolved={() => setShiftVersion(v=>v+1)} storeId={activeStoreId} storeName={activeStore?.name ?? "Pétion-Ville"} userStoreIds={userStoreIds} deviceId={deviceId} />}
             {tab === "pos" && (
               !canSell ? (
                 // Shift-flow gate — same dark language as the Shift screen:
@@ -1273,7 +1566,7 @@ function AppShell() {
                 </View>
               ) : (
                 <POSScreen
-                  storeId={STORE_ID}
+                  storeId={activeStoreId}
                   deviceId={deviceId}
                   role={role}
                   currentUser={currentUser}
@@ -1291,7 +1584,7 @@ function AppShell() {
             )}
             {tab === "orders" && (
               <OrdersScreen
-                storeId={STORE_ID}
+                storeId={activeStoreId}
                 deviceId={deviceId}
                 storeName={activeStore?.name ?? "Pétion-Ville"}
                 role={role}
@@ -1308,14 +1601,14 @@ function AppShell() {
                 onAddSale={(c) => { setPosAttachCustomer(c); setTab("pos"); }}
               />
             )}
-            {tab === "transactions" && <TransactionsScreen role={role} storeId={STORE_ID} storeName={activeStore?.name ?? "Pétion-Ville"} currentUser={currentUser} userStoreIds={userStoreIds} />}
+            {tab === "transactions" && <TransactionsScreen role={role} storeId={activeStoreId} storeName={activeStore?.name ?? "Pétion-Ville"} currentUser={currentUser} userStoreIds={userStoreIds} />}
             {tab === "more" && (
               <MoreScreen
                 key={moreKey}
                 role={role}
                 businessType={businessType}
                 currentUser={currentUser}
-                storeId={STORE_ID}
+                storeId={activeStoreId}
                 storeName={activeStore?.name ?? "Pétion-Ville"}
                 inventoryVersion={inventoryVersion}
                 onInventorySaved={() => setInventoryVersion(v => v + 1)}
@@ -1354,6 +1647,8 @@ function AppShell() {
       {!IS_TABLET_DEVICE && !showAccountCenter && !showSecurity && !showStore && !showInventory && !shiftFull && <BottomNav active={tab} visibleTabs={visibleTabs} onChange={onNavChange} />}
       {/* Shared post-save/edit overlay — replaces result Alerts app-wide */}
       <GlobalUploadTransition />
+      {/* Quiet catch-up indicator (initial download / stale sweep) — never blocks work */}
+      <SyncStatusIndicator />
     </View>
     </SidebarWidthProvider>
   );

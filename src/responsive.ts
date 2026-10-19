@@ -12,7 +12,11 @@ const TABLET_SHORT_SIDE = 600;
 export const IS_TABLET_DEVICE: boolean =
   Platform.OS === "ios"
     ? !!Platform.isPad
-    : Math.min(Dimensions.get("screen").width, Dimensions.get("screen").height) >= TABLET_SHORT_SIDE;
+    : Platform.OS === "web"
+      ? // Desktop PWA: the tablet shell is the canonical desktop design; a
+        // narrow browser window falls back to the phone layout.
+        typeof window !== "undefined" && window.innerWidth >= TABLET_MIN
+      : Math.min(Dimensions.get("screen").width, Dimensions.get("screen").height) >= TABLET_SHORT_SIDE;
 
 /** Collapsed menu width — the icon-rail footprint (also the safe default for
  *  screens rendered outside the provider, e.g. login, so their math matches

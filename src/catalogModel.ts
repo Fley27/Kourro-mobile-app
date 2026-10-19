@@ -6,6 +6,22 @@
 // stock and cost unambiguous — see schema.ts note.
 import { getDb, insertOutbox, recomputeItemCosts } from "./db";
 import { mintId } from "./db/ids";
+import { assertWritable } from "./subscription/subscription";
+
+// Pure chain/cost math is shared with the web POS — single source in
+// packages/catalog-core. Imported + re-exported here so every existing
+// import keeps working against the same functions.
+import {
+  itemsForProduct, baseItem, smallestItem, itemFactor, itemChildren, itemDescendants,
+  minItemFactor, toCanonicalQty, fromCanonicalQty, countInUnit, biggestUnitDisplay,
+  currentBaseCost, costForItem, currentCanonicalCost, previewBatchUnitCost,
+  upsertSupplierCost as upsertSupplierCostCore,
+} from "@retail/catalog-core";
+export {
+  itemsForProduct, baseItem, smallestItem, itemFactor, itemChildren, itemDescendants,
+  minItemFactor, toCanonicalQty, fromCanonicalQty, countInUnit, biggestUnitDisplay,
+  currentBaseCost, costForItem, currentCanonicalCost, previewBatchUnitCost,
+};
 
 export type Item = {
   id: string; product_id: string; name: string;
@@ -22,6 +38,8 @@ export type BatchStatus = "pending" | "received" | "denied";
 
 export type Batch = {
   id: string; item_id: string; supplier_id: string;
+  /** Receiving store (023) — legacy rows may lack it. */
+  store_id?: string | null;
   date: string; quantity: number; total_paid: number;
   delivery_ref?: string | null; transport_share?: number;
   status: BatchStatus;
@@ -48,91 +66,6 @@ export type VariantPrice = {
 // existing catalog imports keep working.
 export { GENERIC_VARIANT_NAMES, isStandardVariant, formatCheckoutRow, formatSaleLine } from "./labels";
 
-export function itemsForProduct(items: Item[], productId: string): Item[] {
-  return items.filter(i => i.product_id === productId && !i.is_deleted);
-}
-
-/**
- * Reference (factor-1) item: no ref — the anchor all math starts from.
- * Any size (owners usually pick what they buy, e.g. Sack). Chain-only ⇒ one.
- */
-export function baseItem(items: Item[]): Item | null {
-  return items.find(i => !i.ref_item_id) ?? null;
-}
-
-/**
- * Smallest item by cumulative factor — the canonical storage unit.
- * Stock is ALWAYS stored in smallest-unit counts (integers); display
- * converts to any unit. Falls back to the reference item when empty.
- */
-export function smallestItem(items: Item[]): Item | null {
-  let best: Item | null = null;
-  let bestF = Infinity;
-  for (const it of items) {
-    if (it.is_deleted) continue;
-    const f = itemFactor(items, it.id);
-    if (f > 0 && f < bestF) {
-      bestF = f;
-      best = it;
-    }
-  }
-  return best ?? baseItem(items);
-}
-
-/** Minimum cumulative factor across a product's items (canonical divisor). */
-export function minItemFactor(allItems: Item[], productId: string): number {
-  const items = itemsForProduct(allItems, productId);
-  let m = Infinity;
-  for (const it of items) {
-    const f = itemFactor(allItems, it.id);
-    if (f > 0 && f < m) m = f;
-  }
-  return m === Infinity ? 1 : m;
-}
-
-/**
- * Convert a quantity expressed in an item's units to canonical
- * (smallest-unit) storage counts. factor/minFactor is always integral in
- * practice (whole-number relations); Math.round kills float dust.
- */
-export function toCanonicalQty(
-  allItems: Item[],
-  productId: string,
-  itemId: string,
-  qty: number
-): number {
-  const f = itemFactor(allItems, itemId);
-  const m = minItemFactor(allItems, productId);
-  if (!(f > 0) || !(m > 0)) return 0;
-  return Math.round(((Number(qty) || 0) * f) / m);
-}
-
-/** Canonical counts → counts in the given item's units (may fractionalize). */
-export function fromCanonicalQty(
-  allItems: Item[],
-  productId: string,
-  itemId: string,
-  canonicalQty: number
-): number {
-  const f = itemFactor(allItems, itemId);
-  const m = minItemFactor(allItems, productId);
-  if (!(f > 0) || !(m > 0)) return 0;
-  return (Number(canonicalQty) || 0) / (f / m);
-}
-
-/** Floored sellable/available count of an item from canonical stock. */
-export function countInUnit(
-  allItems: Item[],
-  productId: string,
-  itemId: string,
-  canonicalQty: number
-): number {
-  const f = itemFactor(allItems, itemId);
-  const m = minItemFactor(allItems, productId);
-  if (!(f > 0) || !(m > 0)) return 0;
-  return Math.floor((Number(canonicalQty) || 0) / (f / m) + 1e-9);
-}
-
 /**
  * Mixed breakdown display: "120 Sack · 4 Mamit · 5 Vè" (largest first,
  * zero levels omitted; bare "120 Sack" when the rest is empty).
@@ -157,45 +90,6 @@ export function breakdownStock(
   }
   const smallest = items.length ? items[items.length - 1].it : null;
   return parts.length ? parts.join(" · ") : `0 ${smallest?.name ?? ""}`.trim();
-}
-
-/**
- * Cumulative factor of an item in base units (case→4-pack→single with
- * ratios 6,4 ⇒ case = 24 base). Returns 1 for the base item, 0 when the
- * chain is broken (missing link) so callers never divide by garbage.
- */
-export function itemFactor(allItems: Item[], itemId: string): number {
-  let factor = 1;
-  let cur = allItems.find(i => i.id === itemId);
-  const seen = new Set<string>();
-  while (cur?.ref_item_id) {
-    if (seen.has(cur.id)) return 0; // cycle guard (should be impossible)
-    seen.add(cur.id);
-    const r = Number(cur.ratio) || 0;
-    if (!(r > 0)) return 0;
-    factor *= r;
-    cur = allItems.find(i => i.id === cur!.ref_item_id);
-  }
-  return cur ? factor : 0;
-}
-
-/** Children (directly larger items) of an item, for lock/descendant walks. */
-export function itemChildren(allItems: Item[], itemId: string): Item[] {
-  return allItems.filter(i => i.ref_item_id === itemId && !i.is_deleted);
-}
-
-export function itemDescendants(allItems: Item[], itemId: string): Set<string> {
-  const out = new Set<string>();
-  const walk = (id: string) => {
-    for (const c of itemChildren(allItems, id)) {
-      if (!out.has(c.id)) {
-        out.add(c.id);
-        walk(c.id);
-      }
-    }
-  };
-  walk(itemId);
-  return out;
 }
 
 /** Ratio locked once the item has any batch or variant attached. */
@@ -269,6 +163,7 @@ export function currentBundlePrice(
 export async function upsertVariantPriceRow(db: any, args: {
   variantId: string; price: number; date: string;
 }): Promise<string> {
+  assertWritable();
   const now = new Date().toISOString();
   const price = Math.max(0, Number(args.price) || 0);
   const id = mintId();
@@ -293,6 +188,7 @@ export async function upsertBundleRow(db: any, args: {
   bundleId?: string; variantId: string; minQuantity: number;
   price: number; date: string; active?: boolean;
 }): Promise<string> {
+  assertWritable();
   const now = new Date().toISOString();
   const id = args.bundleId || mintId();
   const minQuantity = Math.max(0, Number(args.minQuantity) || 0);
@@ -326,43 +222,13 @@ export async function upsertBundleRow(db: any, args: {
  * still required by the schema, so it mirrors item_id for v2-written rows.
  * Always written AFTER the comparison runs, never before.
  */
+/** Supplier-cost upsert — shared implementation (catalog-core) with this
+ *  app's outbox + id minting wired in. */
 export async function upsertSupplierCost(db: any, args: {
   productId: string; supplierId: string; itemId: string; cost: number;
 }): Promise<void> {
-  const now = new Date().toISOString();
-  const cost = Math.max(0, Number(args.cost) || 0);
-  const existing = ((await db.getAllAsync(
-    "SELECT * FROM product_supplier_costs WHERE product_id = ? AND supplier_id = ?",
-    [args.productId, args.supplierId]
-  ).catch(() => [])) ?? []) as any[];
-  // Prefer an item-keyed hit, then a legacy unit-keyed hit (pre-backfill row).
-  const hit = existing.find(r => String(r.item_id) === String(args.itemId))
-    ?? existing.find(r => String(r.unit_id) === String(args.itemId));
-  if (hit) {
-    await db.runAsync(
-      "UPDATE product_supplier_costs SET cost = ?, item_id = ?, last_updated = ?, updated_at = ?, dirty = 1 WHERE id = ?",
-      [cost, args.itemId, now, now, String(hit.id)]
-    );
-    try {
-      await insertOutbox("product_supplier_costs", "update", {
-        id: String(hit.id), cost, item_id: args.itemId, last_updated: now, updated_at: now, is_deleted: false,
-      });
-    } catch {}
-    return;
-  }
-  const id = mintId();
-  const rec = {
-    id, product_id: args.productId, supplier_id: args.supplierId,
-    unit_id: args.itemId, item_id: args.itemId, cost,
-    last_updated: now, updated_at: now, is_deleted: 0,
-  };
-  await db.runAsync(
-    "INSERT OR REPLACE INTO product_supplier_costs (id, product_id, supplier_id, unit_id, item_id, cost, last_updated, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?)",
-    [rec.id, rec.product_id, rec.supplier_id, rec.unit_id, rec.item_id, rec.cost, rec.last_updated, rec.updated_at, 0, 1]
-  );
-  try {
-    await insertOutbox("product_supplier_costs", "create", { ...rec, is_deleted: false });
-  } catch {}
+  assertWritable();
+  return upsertSupplierCostCore(db, { insertOutbox, mintId }, args);
 }
 
 export type UnpricedVariantRow = {
@@ -436,74 +302,8 @@ export function latestReceivedBatch(batches: Batch[], itemId: string): Batch | n
   return rows[0];
 }
 
-/**
- * Current base-unit cost for a product: the newest pending batch across its
- * items (the delivery just entered is the freshest price — same rule as
- * itemUnitCosts), else the latest received batch, converted down to base
- * units. 0 when no priced batch yet.
- * (Replaces the dropped products.cost_price — same call shape, new source.)
- */
-export function currentBaseCost(
-  allItems: Item[],
-  batches: Batch[],
-  productId: string
-): number {
-  const items = itemsForProduct(allItems, productId);
-  const ids = new Set(items.map(i => i.id));
-  const live = (batches as Batch[]).filter(b =>
-    b && !b.is_deleted && ids.has(b.item_id) &&
-    Number(b.quantity) > 0 && Number(b.total_paid) > 0
-  );
-  const byRecency = (a: Batch, b: Batch) =>
-    String(b.date ?? "").localeCompare(String(a.date ?? "")) ||
-    String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""));
-  const pend = live.filter(b => b.status === "pending").sort(byRecency);
-  const pool = pend.length ? pend : live.filter(b => b.status === "received").sort(byRecency);
-  const b = pool[0];
-  if (!b) return 0;
-  const f = itemFactor(allItems, b.item_id);
-  if (!(f > 0)) return 0;
-  return Math.max(0, Number(b.total_paid) / Number(b.quantity) / f);
-}
-
-/** Cost at a specific item level, derived from the base cost. */
-export function costForItem(
-  allItems: Item[],
-  batches: Batch[],
-  productId: string,
-  itemId: string
-): number {
-  const base = currentBaseCost(allItems, batches, productId);
-  if (!(base > 0)) return 0;
-  const f = itemFactor(allItems, itemId);
-  return f > 0 ? base * f : 0;
-}
-
-/**
- * Cost per CANONICAL (smallest-unit) count — for margin math against
- * canonical quantities (checkout freeze, stock value, coupon discount).
- * `currentBaseCost` is per anchor (factor-1) unit; the smallest item's
- * cumulative factor is minItemFactor, so the smallest unit costs
- * `base × minItemFactor` — the same formula `costForItem` uses at item level.
- * The anchor always has factor 1, so minItemFactor ≤ 1 and the canonical
- * unit can never cost more than the anchor.
- */
-export function currentCanonicalCost(
-  allItems: Item[],
-  batches: Batch[],
-  productId: string
-): number {
-  const base = currentBaseCost(allItems, batches, productId);
-  if (!(base > 0)) return 0;
-  const m = minItemFactor(allItems, productId);
-  return m > 0 ? base * Math.min(m, 1) : 0;
-}
-
-/** Cost-per-unit preview for a draft batch (display only, any status). */
-export function previewBatchUnitCost(quantity: number, totalPaid: number): number {
-  if (!(quantity > 0)) return 0;
-  return Number(totalPaid) / Number(quantity);
-}
+// currentBaseCost / costForItem / currentCanonicalCost / previewBatchUnitCost
+// come from @retail/catalog-core (imported at the top of this file).
 
 // ---- loaders (single place both UI flows read the new model) ----
 
@@ -543,6 +343,7 @@ export async function loadCatalogModelDefault(): Promise<CatalogModel> {
  * the flow without finishing must never leave a registered product behind.
  */
 export async function softDeleteProduct(db: any, productId: string): Promise<void> {
+  assertWritable();
   const now = new Date().toISOString();
   const pid = String(productId);
   const itemRows = (((await db.getAllAsync("SELECT id FROM items WHERE product_id = ?", [pid]).catch(() => [])) ?? []) as any[]).map((r: any) => String(r.id));
@@ -592,6 +393,8 @@ export type V2BatchInput = {
   /** One wizard run: groups every batch it writes so transport can be patched later. */
   sessionRef?: string | null;
   source?: string;
+  /** Receiving store; defaults to the device's active store. */
+  storeId?: string | null;
 };
 
 /**
@@ -601,10 +404,17 @@ export type V2BatchInput = {
 export async function insertV2Batch(
   db: any, now: string, taken: Set<string>, c: V2BatchInput
 ): Promise<string> {
+  assertWritable();
   const itemRows = (((await db.getAllAsync("SELECT name FROM items WHERE id = ?", [c.itemId]).catch(() => [])) ?? []) as any[]);
   const id = batchUid(taken, `${slugBatch(String(itemRows[0]?.name ?? "batch")) || "batch"}-${c.date}`);
+  // Batches are per store (migration 023): default to the device's active
+  // store so a purchase never lands at another location.
+  let storeId = c.storeId ?? "";
+  if (!storeId) {
+    try { const { getActiveStoreId } = await import("./storeContext"); storeId = getActiveStoreId(); } catch {}
+  }
   const rec = {
-    id, item_id: c.itemId, supplier_id: c.supplierId, date: c.date,
+    id, store_id: storeId || null, item_id: c.itemId, supplier_id: c.supplierId, date: c.date,
     quantity: Number(c.qty) || 0, total_paid: Number(c.total) || 0,
     status: "pending", received_by: null, received_at: null,
     denied_by: null, denied_at: null, reason: null,
@@ -613,8 +423,8 @@ export async function insertV2Batch(
     source: c.source ?? "user", created_at: now, updated_at: now, is_deleted: 0,
   };
   await db.runAsync(
-    "INSERT OR REPLACE INTO batches (id, item_id, supplier_id, date, quantity, total_paid, status, received_by, received_at, denied_by, denied_at, reason, delivery_ref, transport_share, session_ref, source, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-    [rec.id, rec.item_id, rec.supplier_id, rec.date, rec.quantity, rec.total_paid, rec.status, rec.received_by, rec.received_at, rec.denied_by, rec.denied_at, rec.reason, rec.delivery_ref, rec.transport_share, rec.session_ref, rec.source, rec.created_at, rec.updated_at, 0, 1]
+    "INSERT OR REPLACE INTO batches (id, store_id, item_id, supplier_id, date, quantity, total_paid, status, received_by, received_at, denied_by, denied_at, reason, delivery_ref, transport_share, session_ref, source, created_at, updated_at, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    [rec.id, rec.store_id, rec.item_id, rec.supplier_id, rec.date, rec.quantity, rec.total_paid, rec.status, rec.received_by, rec.received_at, rec.denied_by, rec.denied_at, rec.reason, rec.delivery_ref, rec.transport_share, rec.session_ref, rec.source, rec.created_at, rec.updated_at, 0, 1]
   );
   try { await insertOutbox("batches", "create", { ...rec, is_deleted: false }); } catch {}
   return id;
@@ -628,6 +438,7 @@ export async function insertV2Batch(
 export async function mergeV2Batch(
   db: any, now: string, taken: Set<string>, c: V2BatchInput
 ): Promise<string> {
+  assertWritable();
   const addQ = Number(c.qty) || 0;
   const addT = Number(c.total) || 0;
   const rows = (((await db.getAllAsync(
@@ -665,6 +476,7 @@ export async function mergeV2Batch(
 export async function patchSessionTransport(
   db: any, sessionRef: string, totalTransport: number
 ): Promise<{ batchIds: string[] }> {
+  assertWritable();
   const transport = Math.max(0, Number(totalTransport) || 0);
   const ref = String(sessionRef || "");
   if (!ref) return { batchIds: [] };
@@ -712,6 +524,7 @@ export async function receiveV2Batch(
     quantity: number; receivedBy: string; extraTotal?: number;
   }
 ): Promise<{ baseQty: number }> {
+  assertWritable();
   const now = new Date().toISOString();
   // Drafts can never receive: unfinished chains must not become real stock.
   const pRows = (((await db.getAllAsync("SELECT status FROM products WHERE id = ?", [args.productId]).catch(() => [])) ?? []) as any[]);
@@ -742,6 +555,13 @@ export async function receiveV2Batch(
     await db.runAsync("UPDATE products SET stock_quantity = ?, updated_at = ?, dirty = 1 WHERE id = ?",
       [newTotal, now, args.productId]);
     try { await insertOutbox("products", "update", { id: args.productId, stock_quantity: newTotal, updated_at: now, is_deleted: 0 }); } catch {}
+    // Per-store truth (product_stock) tracks the receive on the store that
+    // owns this product row — the products scalar stays as a deprecated cache.
+    try {
+      const { applyStockDelta } = await import("./stock");
+      const srow = (await db.getAllAsync("SELECT store_id FROM products WHERE id = ?", [args.productId]).catch(() => [])) as any[];
+      if (srow?.[0]?.store_id) await applyStockDelta(db, String(srow[0].store_id), args.productId, baseQty, now);
+    } catch {}
     await db.execAsync("COMMIT");
   } catch (tx) {
     try { await db.execAsync("ROLLBACK"); } catch {}

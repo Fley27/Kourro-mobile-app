@@ -145,6 +145,17 @@ export default function AddItemsModal({
     const row = top ? rows.find(r => r.product.id === top.id) ?? null : null;
     if (top && row) { setSearch(top.barcode ?? top.sku ?? ""); handleProductPress(row); setShowScan(false); }
   }
+  // Web/desktop: code typed by an external scanner (keyboard wedge) or by hand.
+  function scanCode(code: string) {
+    const t = code.trim();
+    if (!t) return;
+    setSearch(t);
+    const q = t.toLowerCase();
+    const found = products.find(p => (p.barcode ?? "").toLowerCase() === q || (p.sku ?? "").toLowerCase() === q);
+    const row = found ? rows.find(r => r.product.id === found.id) ?? null : null;
+    if (found && row) { handleProductPress(row); setShowScan(false); }
+    else uploadError("Pa jwenn", `Pa gen pwodwi ak kòd ${t}`);
+  }
 
   // Same copy + behavior as checkout's confirmClearCart.
   function clearRound() {
@@ -438,6 +449,7 @@ export default function AddItemsModal({
           visible={showScan}
           onClose={() => setShowScan(false)}
           onSimulate={simulateScan}
+          onCode={scanCode}
           productLabel={products[0]?.name ?? ""}
         />
       </Animated.View>

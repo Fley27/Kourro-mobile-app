@@ -126,7 +126,11 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
         const model = await loadCatalogModel(db);
         setBatchItems((model.items ?? []).filter((i: any) => !i.is_deleted));
         setVariants(((model.variants ?? []) as Variant[]).filter(v => !v.is_deleted));
-        setBatches(((model.batches ?? []) as Batch[]).filter(b => !b.is_deleted));
+        // Batches are per store (migration 023): show this location's goods
+        // only. Legacy rows without a store_id stay visible everywhere.
+        let activeStore = "";
+        try { const sc = await import("../storeContext"); activeStore = sc.getActiveStoreId(); } catch {}
+        setBatches(((model.batches ?? []) as Batch[]).filter(b => !b.is_deleted && (!b.store_id || b.store_id === activeStore)));
         const map = new Map<string, number>();
         for (const p of rows) map.set(p.id, currentBaseCost(model.items, model.batches, p.id));
         setCostByProduct(map);
@@ -292,7 +296,7 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
   // Per-line receive: stock lands immediately for that product only.
   // The delivery stays Ap vini until its last line is received or refused.
   async function handleReceiveLine(l: DeliverLine) {
-    if (!canAdminOwner) return Alert.alert("Pa gen dwa", "Sèlman Owner/Admin ka resevwa.");
+    if (!canReceive) return Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè/Kesye ka resevwa.");
     if (detailBusy) return Alert.alert("Ap travay", "Yon aksyon ap trete — tann li fini anvan ou peze ankò.");
     setDetailBusy(true);
     try {
@@ -595,19 +599,23 @@ export default function InventoryScreen({ role = "cashier", currentUser, onClose
                     </View>
                     {statusPill(st)}
                   </View>
-                  {isPend && canAdminOwner ? (
-                    <View style={{ flexDirection: "row", gap: 8 }}>
-                      <Pressable onPress={() => handleReceiveLine(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
-                        <Text style={{ fontWeight: "800", fontSize: fs(13), color: "#000" }}>{detailBusy ? "Ap trete…" : "Rive ✓"}</Text>
-                      </Pressable>
-                      <Pressable onPress={() => openLineEdit(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.borderStrong, alignItems: "center" }}>
-                        <Text style={{ fontWeight: "700", fontSize: fs(13), color: "#fff" }}>Modifye</Text>
-                      </Pressable>
-                      <Pressable onPress={() => openLineDeny(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.redBd, alignItems: "center" }}>
-                        <Text style={{ fontWeight: "700", fontSize: fs(13), color: inv.red }}>Refize</Text>
-                      </Pressable>
-                    </View>
-                  ) : null}
+                    {isPend && canReceive ? (
+                      <View style={{ flexDirection: "row", gap: 8 }}>
+                        <Pressable onPress={() => handleReceiveLine(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, backgroundColor: "#fff", alignItems: "center", opacity: detailBusy ? 0.6 : 1 }}>
+                          <Text style={{ fontWeight: "800", fontSize: fs(13), color: "#000" }}>{detailBusy ? "Ap trete…" : "Rive ✓"}</Text>
+                        </Pressable>
+                        {canAdminOwner ? (
+                          <>
+                            <Pressable onPress={() => openLineEdit(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.borderStrong, alignItems: "center" }}>
+                              <Text style={{ fontWeight: "700", fontSize: fs(13), color: "#fff" }}>Modifye</Text>
+                            </Pressable>
+                            <Pressable onPress={() => openLineDeny(l)} style={{ flex: 1, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: inv.redBd, alignItems: "center" }}>
+                              <Text style={{ fontWeight: "700", fontSize: fs(13), color: inv.red }}>Refize</Text>
+                            </Pressable>
+                          </>
+                        ) : null}
+                      </View>
+                    ) : null}
                 </View>
               );
             })}

@@ -20,6 +20,7 @@ export type EmployeeLite = {
   name: string;
   role: string;
   phone?: string | null;
+  email?: string | null;
   address?: string | null;
   store?: string | null;
   salary?: string | null;
@@ -48,7 +49,7 @@ function EmpRow({ label, value, last }: { label: string; value: string; last?: b
   );
 }
 
-export function EmployeeProfileBody({ employee: e, stats, canSeeSalary, roleLabel, storeLabel, isSelf, canToggleActive, canEditRole, canEditCredentials, onToggleActive, onEditRole, onEditCredentials }: {
+export function EmployeeProfileBody({ employee: e, stats, canSeeSalary, roleLabel, storeLabel, isSelf, canToggleActive, canEditRole, canEditCredentials, canEditEmail, canEditEmergency, canEditSalary, payroll, payments, onToggleActive, onEditRole, onEditCredentials, onEditEmail, onEditEmergency, onEditSalary, onOpenPayment }: {
   employee: EmployeeLite;
   stats: EmployeeStats;
   canSeeSalary: boolean;
@@ -58,11 +59,22 @@ export function EmployeeProfileBody({ employee: e, stats, canSeeSalary, roleLabe
   canToggleActive?: boolean;
   canEditRole?: boolean;
   canEditCredentials?: boolean;
+  canEditEmail?: boolean;
+  canEditEmergency?: boolean;
+  canEditSalary?: boolean;
+  /** Live expected payment for the OPEN period (028) — display only. */
+  payroll?: { salary: number; deficits: number; expected: number; periodLabel: string } | null;
+  /** Closed payment rows (newest first) with resolved period labels. */
+  payments?: Array<{ id: string; label?: string; salary_amount?: number; deficit_total?: number; net_amount?: number; closed_at?: string }> | null;
   onToggleActive?: () => void;
   onEditRole?: () => void;
   onEditCredentials?: () => void;
+  onEditEmail?: () => void;
+  onEditEmergency?: () => void;
+  onEditSalary?: () => void;
+  onOpenPayment?: (p: any) => void;
 }) {
-  const showActions = !!(canToggleActive || canEditRole || canEditCredentials);
+  const showActions = !!(canToggleActive || canEditRole || canEditCredentials || canEditEmail || canEditEmergency || canEditSalary);
   const initials = e.name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(w => (w[0] ?? "").toUpperCase()).join("") || "•";
   return (
     <View>
@@ -103,8 +115,21 @@ export function EmployeeProfileBody({ employee: e, stats, canSeeSalary, roleLabe
 
       <View style={{ height: 5, backgroundColor: TILE, borderRadius: 3, marginTop: 20 }} />
 
+      {canSeeSalary && payroll ? (
+        <Section label={`Peman prevwa — ${payroll.periodLabel}`}>
+          <View style={{ backgroundColor: TILE, borderRadius: 14, padding: 16 }}>
+            <Text style={{ fontWeight: "800", fontSize: 30, color: INK }}>{fmtG(Math.round(payroll.expected))}</Text>
+            <Text style={{ fontSize: 13, color: MUTED, marginTop: 4 }}>
+              Salè {fmtG(Math.round(payroll.salary))}{payroll.deficits > 0 ? ` − defisit ${fmtG(Math.round(payroll.deficits))}` : ""}
+            </Text>
+            <Text style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>Estimasyon an dirèk — figi final la fikse lè peryòd la fèmen.</Text>
+          </View>
+        </Section>
+      ) : null}
+
       <Section label="Enfòmasyon">
         <EmpRow label="Telefon" value={e.phone ?? "—"} />
+        <EmpRow label="Imel" value={e.email ?? "—"} />
         <EmpRow label="Adrès" value={e.address ?? "—"} />
         <EmpRow label="Magazen" value={storeLabel ?? e.store ?? "—"} />
         <EmpRow label="Salè" value={canSeeSalary ? `${e.salary ?? "—"} / mwa` : "Konfidansyèl"} />
@@ -119,26 +144,45 @@ export function EmployeeProfileBody({ employee: e, stats, canSeeSalary, roleLabe
         </Section>
       ) : null}
 
+      {canSeeSalary ? (
+        <Section label="Istwa peman">
+          {payments && payments.length ? (
+            payments.map((p, i) => (
+              <Pressable
+                key={String(p.id ?? i)}
+                onPress={() => onOpenPayment?.(p)}
+                style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 12, borderBottomWidth: i < payments.length - 1 ? 1 : 0, borderBottomColor: HAIR }}
+              >
+                <Text style={{ fontSize: 15, color: MUTED }}>{p.label ?? String(p.closed_at ?? "").slice(0, 10)}</Text>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Text style={{ fontSize: 15, color: INK, fontWeight: "500" }}>{fmtG(Number(p.net_amount ?? 0))}</Text>
+                  <Ionicons name="chevron-forward" size={16} color={MUTED} />
+                </View>
+              </Pressable>
+            ))
+          ) : (
+            <Text style={{ fontSize: 13, color: MUTED }}>Pa gen peman ankò — peryòd la fèmen poukont li dènye jou kalandriye a.</Text>
+          )}
+        </Section>
+      ) : null}
+
       {showActions ? (
         <Section label="Aksyon">
-          {canToggleActive ? (
-            <Pressable onPress={onToggleActive} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 13, borderBottomWidth: (canEditRole || canEditCredentials) ? 1 : 0, borderBottomColor: HAIR }}>
-              <Ionicons name={e.active ? "pause-circle-outline" : "play-circle-outline"} size={20} color={RED} style={{ marginRight: 12 }} />
-              <Text style={{ fontSize: 15, color: RED, fontWeight: "500" }}>{e.active ? "Dezaktive" : "Aktive"}</Text>
-            </Pressable>
-          ) : null}
-          {canEditRole ? (
-            <Pressable onPress={onEditRole} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 13, borderBottomWidth: canEditCredentials ? 1 : 0, borderBottomColor: HAIR }}>
-              <Ionicons name="shield-checkmark-outline" size={20} color={RED} style={{ marginRight: 12 }} />
-              <Text style={{ fontSize: 15, color: RED, fontWeight: "500" }}>Modifye wòl</Text>
-            </Pressable>
-          ) : null}
-          {canEditCredentials ? (
-            <Pressable onPress={onEditCredentials} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 13 }}>
-              <Ionicons name="key-outline" size={20} color={RED} style={{ marginRight: 12 }} />
-              <Text style={{ fontSize: 15, color: RED, fontWeight: "500" }}>{isSelf ? "Chanje kòd / modpas" : "Reyinisyialize kòd / modpas"}</Text>
-            </Pressable>
-          ) : null}
+          {(() => {
+            const rows: { icon: keyof typeof Ionicons.glyphMap; label: string; tone: string; onPress?: () => void }[] = [];
+            if (canToggleActive) rows.push({ icon: e.active ? "pause-circle-outline" : "play-circle-outline", label: e.active ? "Dezaktive" : "Aktive", tone: RED, onPress: onToggleActive });
+            if (canEditRole) rows.push({ icon: "shield-checkmark-outline", label: "Modifye wòl", tone: RED, onPress: onEditRole });
+            if (canEditSalary) rows.push({ icon: "cash-outline", label: "Modifye salè", tone: RED, onPress: onEditSalary });
+            if (canEditEmail) rows.push({ icon: "mail-outline", label: "Modifye imel", tone: RED, onPress: onEditEmail });
+            if (canEditEmergency) rows.push({ icon: "call-outline", label: "Kontak ijans", tone: RED, onPress: onEditEmergency });
+            if (canEditCredentials) rows.push({ icon: "key-outline", label: isSelf ? "Chanje kòd / modpas" : "Reyinisyialize kòd / modpas", tone: RED, onPress: onEditCredentials });
+            return rows.map((r, i) => (
+              <Pressable key={r.label} onPress={r.onPress} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 13, borderBottomWidth: i < rows.length - 1 ? 1 : 0, borderBottomColor: HAIR }}>
+                <Ionicons name={r.icon} size={20} color={r.tone} style={{ marginRight: 12 }} />
+                <Text style={{ fontSize: 15, color: r.tone, fontWeight: "500" }}>{r.label}</Text>
+              </Pressable>
+            ));
+          })()}
         </Section>
       ) : null}
     </View>

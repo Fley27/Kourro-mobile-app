@@ -18,6 +18,11 @@ export const canManageCatalog = (role?: string) =>
 export const canHandleBatches = (role?: string) =>
   role === "owner" || role === "admin" || role === "manager";
 
+// Receiving a delivery only lands stock + cost (no catalog edits): cashiers
+// receive too. Registering/creating batches stays manager-plus.
+export const canReceiveBatches = (role?: string) =>
+  role === "owner" || role === "admin" || role === "manager" || role === "cashier";
+
 export function slugifyName(s: string): string {
   return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }

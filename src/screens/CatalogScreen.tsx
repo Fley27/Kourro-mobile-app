@@ -419,6 +419,9 @@ export default function CatalogScreen({ role = "cashier", currentUser, onOpenInv
 
 
   async function handleChangeName() {
+    // Defense in depth: the rename UI hides behind canAddMore, but the
+    // inspector is now reachable read-only for more roles — never write here.
+    if (!canAddMore) return Alert.alert("Pa gen dwa", "Sèlman Owner/Admin/Manadjè ka chanje non pwodwi.");
     if (!infoProduct) return;
     const name = nameInput.trim();
     if (!name) return Alert.alert("Non obligatwa", "Non pwodwi pa ka vid");

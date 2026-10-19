@@ -1,16 +1,20 @@
 import { SCHEMA_SQL } from "./schema";
 import { fmtG } from "../format";
 import { itemCostsFor } from "../analytics/metrics";
+import { recomputeItemCosts as recomputeItemCostsCore } from "@retail/catalog-core";
 import { seedDevCatalogIfNeeded, buildDevCatalogMemory, devSeedEnabled } from "./devSeed";
 import { runCatalogCutover, cleanupAutoBaseJunk, migrateInventoryBatches, backfillSkus, backfillSupplierCostItems, migrateBundlesToV3 } from "./cutoverCatalog";
-import { FALLBACK_STORE_ID, STORE_IDS, stableId } from "./ids";
+import { FALLBACK_STORE_ID, STORE_IDS, stableId, deriveId } from "./ids";
 import { USER_IDS } from "../users";
 import { mintId } from "./ids";
 
 // Web fallback: in-memory mock when expo-sqlite not available (Expo web)
 let SQLite: any = null;
 try {
-  SQLite = require("expo-sqlite");
+  // The web PWA build installs its wa-sqlite-backed implementation on
+  // globalThis before the app loads (see web-app/src/shims/install-globals);
+  // native keeps resolving expo-sqlite through Metro's require.
+  SQLite = (globalThis as any).__JESYON_SQLITE__ ?? require("expo-sqlite");
 } catch {
   // expo-sqlite not available on this platform (e.g. web without native) — use mock
 }
@@ -33,7 +37,7 @@ const memStore = new Map<string, any[]>();
 // row from the column list, UPDATE patches by WHERE column, SELECT evaluates
 // the simple WHERE / ORDER BY / LIMIT shapes src/orders/store.ts uses. Keeps
 // the order loop identical on web (memory) and on device (sqlite).
-const ORDER_MEM_TABLES = new Set(["open_orders", "open_order_lines", "order_change_requests", "open_order_events"]);
+const ORDER_MEM_TABLES = new Set(["open_orders", "open_order_lines", "order_change_requests", "open_order_events", "salary_history", "pay_periods", "salary_deficits", "salary_payments"]);
 function orderMemTable(sql: string): string | null {
   const m =
     /^\s*(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM)\s+(\w+)/i.exec(sql) ??
@@ -289,6 +293,8 @@ async function openDb(): Promise<any> {
       try { await db.execAsync("ALTER TABLE stock_batches ADD COLUMN received_at TEXT"); } catch {}
       // --- migration: FIFO batch accounting ---
       try { await db.execAsync("ALTER TABLE products ADD COLUMN current_amount_available REAL DEFAULT 0"); } catch {}
+      // --- migration: per-store batches (023) ---
+      try { await db.execAsync("ALTER TABLE batches ADD COLUMN store_id TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE stock_movements ADD COLUMN initial_qty REAL DEFAULT 0"); } catch {}
       try { await db.execAsync("ALTER TABLE stock_movements ADD COLUMN remaining_qty REAL DEFAULT 0"); } catch {}
       // --- migration: loading-dock (pending -> delivered) ---
@@ -442,6 +448,20 @@ async function openDb(): Promise<any> {
       // Weekly flag threshold: a deficit is flagged when it (or the employee's
       // rolling 90-day total) reaches this % of their own salary. Seed once.
       try { await db.execAsync("INSERT OR IGNORE INTO _meta (key, value) VALUES ('guard_deficit_flag_pct', '0.1')"); } catch {}
+      // --- repair: duplicate employees rows (pre-PK device databases) ---
+      // CREATE TABLE IF NOT EXISTS never upgrades an existing table, so a DB
+      // created before employees carried `id TEXT PRIMARY KEY` keeps appending
+      // on INSERT OR REPLACE (React then renders the twin as a duplicate key).
+      // Dedupe — newest rowid wins, it carries the freshest write — then pin
+      // uniqueness so REPLACE conflicts again.
+      try {
+        const dup = ((await db.getAllAsync("SELECT id FROM employees GROUP BY id HAVING COUNT(*) > 1").catch(() => [])) ?? []) as any[];
+        if (dup.length) {
+          await db.execAsync("DELETE FROM employees WHERE rowid NOT IN (SELECT MAX(rowid) FROM employees GROUP BY id)");
+          console.log(`[migrate] employees: removed duplicate rows for ${dup.length} id(s)`);
+        }
+        await db.execAsync("CREATE UNIQUE INDEX IF NOT EXISTS idx_employees_id ON employees(id)");
+      } catch {}
       // --- Unified Shift: pending openings, self-confirmed openings, auto-close ---
       // Cashier openings are entered as (stated amount, named manager) and stay
       // pending until that manager confirms; supervisors self-enter. auto_closed
@@ -449,13 +469,61 @@ async function openDb(): Promise<any> {
       try { await db.execAsync("ALTER TABLE shifts ADD COLUMN opening_stated REAL"); } catch {}
       try { await db.execAsync("ALTER TABLE shifts ADD COLUMN opening_confirmed_by TEXT"); } catch {}
       try { await db.execAsync("ALTER TABLE shifts ADD COLUMN auto_closed INTEGER DEFAULT 0"); } catch {}
-      // Daily auto-close time (local "HH:MM") for manager/admin/owner shifts.
-      try { await db.execAsync("INSERT OR IGNORE INTO _meta (key, value) VALUES ('shift_autoclose_time', '06:30')"); } catch {}
+      // Daily auto-close time (local "HH:MM") for open shifts whose owner is
+      // inactive. Devices that seeded the old 06:30 default move to 06:00.
+      try { await db.execAsync("INSERT OR IGNORE INTO _meta (key, value) VALUES ('shift_autoclose_time', '06:00')"); } catch {}
+      try { await db.execAsync("UPDATE _meta SET value = '06:00' WHERE key = 'shift_autoclose_time' AND value = '06:30'"); } catch {}
       // --- dev mock catalog (mock-catalog JSON, seed-once, dev-only) ---
       try { await seedDevCatalogIfNeeded(db); } catch (e) { console.log("[dev seed] skipped:", String(e)); }
       // --- catalog v2: product_suppliers.id added after first create ---
       try { await db.execAsync("ALTER TABLE product_suppliers ADD COLUMN id TEXT"); } catch {}
       try { await db.runAsync("UPDATE product_suppliers SET id = product_id || '__' || supplier_id WHERE id IS NULL"); } catch {}
+      // --- outbox ownership: who queued each row, so a user switch can drop
+      // identity-sensitive rows (roster/profile) left by the previous user.
+      try { await db.execAsync("ALTER TABLE outbox ADD COLUMN queued_by TEXT"); } catch {}
+      // --- roster email: test/pin staff need a real email so their profile
+      // rows satisfy the cloud NOT NULL when they gain a login account.
+      try { await db.execAsync("ALTER TABLE employees ADD COLUMN email TEXT"); } catch {}
+      // --- emergency contact (local-only: the cloud schema has no column).
+      try { await db.execAsync("ALTER TABLE employees ADD COLUMN emergency_json TEXT"); } catch {}
+      // --- shadow staff cleanup (026): four local-only test rows that match
+      // no login account and shadow the real team in lists. Exact ids only.
+      try {
+        await db.execAsync("DELETE FROM employees WHERE id IN ('a215eb97-78dd-5306-91cc-cda784cd8b21','6a1f6483-bfcb-53de-9b2f-99eff41d09e6','48b5f14a-c301-5e41-9b73-79bb67b22a85','36bd2f3a-f7bf-59c5-9990-cb14e2190118')");
+      } catch {}
+      // --- roster twin fold: a demo-seeded row (stable USER_IDS) coexisting
+      // with a same-named roster row is the same person twice — keep the
+      // roster row, drop the seed. Only fires when a twin actually exists, so
+      // offline-only devices keep their seed roster untouched.
+      try {
+        const demoIds = Object.values(USER_IDS) as string[];
+        await db.runAsync(
+          `DELETE FROM employees WHERE id IN (${demoIds.map(() => "?").join(",")}) AND trim(full_name) <> '' AND EXISTS (SELECT 1 FROM employees e2 WHERE e2.id <> employees.id AND lower(trim(e2.full_name)) = lower(trim(employees.full_name)))`,
+          demoIds
+        );
+      } catch {}
+      // --- misaligned roster rows: an old pull wrote created_at into `phone`
+      // (and 0 into salary). Repair to NULL so lists show "—", not a timestamp.
+      try {
+        await db.execAsync("UPDATE employees SET phone = NULL WHERE phone IS NOT NULL AND phone GLOB '????-??-??T??:??:*'");
+      } catch {}
+      // --- roster email backfill: the permanent test accounts (Role@fjbusiness.ht)
+      // predate the email column. Exact auth uuids only — a no-op anywhere
+      // those ids don't exist, and logins/passwords are untouched (auth owns
+      // credentials; this is just the local mirror's contact field).
+      try {
+        await db.execAsync(
+          "UPDATE employees SET email = CASE id " +
+          "WHEN '6915a572-b30a-535e-a027-757bc4cdf198' THEN 'owner@fjbusiness.ht' " +
+          "WHEN 'a949b94a-c852-5297-adad-cc0cc373684b' THEN 'admin@fjbusiness.ht' " +
+          "WHEN '9cd8a65b-d9d2-5f33-947b-0ecdc9432ef5' THEN 'manager@fjbusiness.ht' " +
+          "WHEN '764f3cce-db57-5bac-8073-efb9474097fa' THEN 'cashier@fjbusiness.ht' " +
+          "WHEN 'f2da40da-f9bb-4d16-9abc-fb7a2ba88a3d' THEN 'associate@fjbusiness.ht' " +
+          "WHEN 'b218e598-1664-4c69-87a1-3929b9dc9a04' THEN 'cook@fjbusiness.ht' " +
+          "ELSE email END " +
+          "WHERE id IN ('6915a572-b30a-535e-a027-757bc4cdf198','a949b94a-c852-5297-adad-cc0cc373684b','9cd8a65b-d9d2-5f33-947b-0ecdc9432ef5','764f3cce-db57-5bac-8073-efb9474097fa','f2da40da-f9bb-4d16-9abc-fb7a2ba88a3d','b218e598-1664-4c69-87a1-3929b9dc9a04')"
+        );
+      } catch {}
       // --- catalog v2: smaller_item_id → ref_item_id (refs can be bigger now) ---
       try { await db.execAsync("ALTER TABLE items ADD COLUMN ref_item_id TEXT"); } catch {}
       try { await db.runAsync("UPDATE items SET ref_item_id = smaller_item_id WHERE ref_item_id IS NULL"); } catch {}
@@ -545,6 +613,13 @@ async function openDb(): Promise<any> {
         const n = await repairLegacyCategoryIds(db);
         if (n) console.log(`[migrate] legacy category ids repaired: ${n} row(s)`);
       } catch (e) { console.log("[migrate] legacy category ids skipped:", String(e)); }
+      // --- payroll (028): seed each employee's first salary_history row from
+      // the display cache and ensure the org's current open period exists.
+      // Idempotent per row (deterministic ids) — safe on every launch.
+      try {
+        const { payrollBackfill } = await import("../payroll");
+        await payrollBackfill(db);
+      } catch (e) { console.log("[payroll] backfill skipped:", String(e)); }
       // --- demo customers/credits (credit flows need them; independent of catalog) ---
       try {
         const existing = await db.getAllAsync("SELECT id FROM customers LIMIT 1").catch(() => []);
@@ -668,6 +743,12 @@ async function openDb(): Promise<any> {
     memStore.set("cash_register_checks", []);
     memStore.set("deficit_settlements", []);
     memStore.set("salary_deductions", []);
+    // Payroll (028) — salary history, org periods, salary-bound deficits,
+    // locked payments. Generic engine members (ORDER_MEM_TABLES).
+    memStore.set("salary_history", []);
+    memStore.set("pay_periods", []);
+    memStore.set("salary_deficits", []);
+    memStore.set("salary_payments", []);
     memStore.set("credits", [...creditsSeed]);
     memStore.set("credit_payments", []);
   }
@@ -698,7 +779,7 @@ async function openDb(): Promise<any> {
       }
       if (sql.includes("INSERT INTO outbox")) {
         const arr = memStore.get("outbox") ?? [];
-        arr.push({ id: params[0], table_name: params[1], operation: params[2], payload: params[3], created_at: params[4] });
+        arr.push({ id: params[0], table_name: params[1], operation: params[2], payload: params[3], created_at: params[4], queued_by: params[5] ?? null });
         memStore.set("outbox", arr);
       } else if (sql.includes("INSERT INTO products")) {
         const products = memStore.get("products") ?? [];
@@ -926,8 +1007,13 @@ async function openDb(): Promise<any> {
           created_at: sAt("created_at") ?? ts, updated_at: sAt("updated_at") ?? ts,
         });
         memStore.set("sales", sales);
-      } else if (sql.includes("INSERT INTO daily_reports")) {
+      } else if (/^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+daily_reports/i.test(sql)) {
         const arr = memStore.get("daily_reports") ?? [];
+        // INSERT OR IGNORE keeps an existing derived id (reopened report,
+        // double-tap) — mirror SQLite instead of blind-pushing a twin row.
+        if (/OR\s+IGNORE/i.test(sql) && arr.some((x: any) => x.id === params[0])) {
+          /* already there — the existing row wins */
+        } else {
         const ts = new Date().toISOString();
         const rCols = (sql.match(/\(\s*id\s*,(.*?)\)\s*VALUES/i)?.[1] ?? "").split(",").map(c => c.trim());
         const rAt = (name: string): any => { const i = rCols.indexOf(name); return i >= 0 ? params[i + 1] : undefined; };
@@ -950,6 +1036,7 @@ async function openDb(): Promise<any> {
           reviewed_by: rAt("reviewed_by") ?? null, reviewed_at: rAt("reviewed_at") ?? null,
         });
         memStore.set("daily_reports", arr);
+        }
       } else if (sql.includes("INSERT INTO cashier_deficits")) {
         const arr = memStore.get("cashier_deficits") ?? [];
         const cd = { id: params[0], store_id: params[1], cashier_id: params[2], date: params[3], deficit: params[4] ?? 0, status: params[5] ?? "open", resolution: params[6] ?? null, resolved_by: params[7] ?? null, resolved_at: params[8] ?? null, notes: params[9] ?? null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
@@ -1147,7 +1234,14 @@ async function openDb(): Promise<any> {
         memStore.set("notifications", notifs);
       } else if (sql.includes("INSERT INTO employees")) {
         const emps = memStore.get("employees") ?? [];
-        emps.push({ id: params[0], store_id: params[1], full_name: params[2], role: params[3], phone: params[4], salary: params[5], address: params[6], is_active: params[7], online_status: params[8], created_at: params[9] ?? new Date().toISOString() });
+        // Column list parsed from the statement: callers gained `email` over
+        // time, so positional mapping would misalign across versions.
+        const cols = (sql.match(/INTO employees\s*\((.*?)\)/i)?.[1] ?? "id,store_id,full_name,role,phone,salary,address,is_active,online_status,created_at").split(",").map(s => s.trim());
+        const at = (name: string): any => {
+          const i = cols.indexOf(name);
+          return i >= 0 ? params[i] : undefined;
+        };
+        emps.push({ id: params[0], store_id: at("store_id"), full_name: at("full_name"), role: at("role"), phone: at("phone") ?? "", email: at("email") ?? null, salary: at("salary") ?? 0, address: at("address") ?? "", emergency_json: at("emergency_json") ?? null, is_active: at("is_active") ?? 1, online_status: at("online_status") ?? 0, created_at: at("created_at") ?? new Date().toISOString(), updated_at: at("updated_at") ?? new Date().toISOString() });
         memStore.set("employees", emps);
       } else if (sql.includes("UPDATE employees SET")) {
         const emps = memStore.get("employees") ?? [];
@@ -1157,6 +1251,7 @@ async function openDb(): Promise<any> {
           if (sql.includes("full_name")) emp.full_name = params[0];
           if (sql.includes("role")) emp.role = params[0];
           if (sql.includes("phone")) emp.phone = params[0];
+          if (/\bemail\b/.test(sql)) emp.email = params[0];
           if (sql.includes("salary")) emp.salary = params[0];
           if (sql.includes("address")) emp.address = params[0];
           if (sql.includes("is_active")) emp.is_active = params[0];
@@ -1836,6 +1931,8 @@ async function openDb(): Promise<any> {
       }
       if (sql.includes("FROM daily_reports")) {
         const all = memStore.get("daily_reports") ?? [];
+        if (sql.includes("WHERE id")) { const v = params?.[0]; return all.filter((x: any) => x.id === v); }
+        if (sql.includes("WHERE shift_id")) { const v = params?.[0]; return all.filter((x: any) => (x.shift_id ?? null) === v); }
         if (sql.includes("WHERE user_id")) { const v = params?.[0]; return all.filter((x: any) => x.user_id === v); }
         if (sql.includes("WHERE store_id")) { const v = params?.[0]; return all.filter((x: any) => x.store_id === v); }
         if (sql.includes("WHERE report_date")) { const v = params?.[0]; return all.filter((x: any) => x.report_date === v); }
@@ -2043,6 +2140,11 @@ async function openDb(): Promise<any> {
   try { await backfillSupplierCostItems(db); } catch (e) { console.log("[backfill] memory supplier cost items skipped:", String(e)); }
   try { await migrateBundlesToV3(db); } catch (e) { console.log("[migrate] memory bundles v3 skipped:", String(e)); }
   try { await recomputeItemCosts(db); } catch (e) { console.log("[backfill] memory item costs skipped:", String(e)); }
+  // Payroll (028) backfill on the RAM mock so web mirrors device behavior.
+  try {
+    const { payrollBackfill } = await import("../payroll");
+    await payrollBackfill(db);
+  } catch (e) { console.log("[payroll] memory backfill skipped:", String(e)); }
   return db;
 }
 
@@ -2061,42 +2163,10 @@ async function openDb(): Promise<any> {
  * `productId` scopes it to one product (post-batch / post-edit refresh).
  */
 export async function recomputeItemCosts(db: any, productId?: string): Promise<number> {
-  const load = async (sql: string, args: any[] = []): Promise<any[]> => {
-    try { return ((await db.getAllAsync(sql, args)) ?? []) as any[]; } catch { return []; }
-  };
-  const items = (await load(
-    productId ? "SELECT * FROM items WHERE product_id = ?" : "SELECT * FROM items",
-    productId ? [productId] : []
-  )).filter((i: any) => i && !i.is_deleted);
-  if (!items.length) return 0;
-  const batches = (await load("SELECT * FROM batches")).filter((b: any) => b && !b.is_deleted);
-  const costRows = (await load("SELECT * FROM product_supplier_costs")).filter((r: any) => r && !r.is_deleted);
-  const costs = itemCostsFor(items, batches, costRows);
-  const now = new Date().toISOString();
-  let changed = 0;
-  for (const it of items) {
-    const next = Number(costs.get(String(it.id)) ?? 0) || 0;
-    const prev = Number(it.cost ?? 0) || 0;
-    if (Math.abs(next - prev) < 1e-9) continue;
-    try {
-      await db.runAsync("UPDATE items SET cost = ?, updated_at = ?, dirty = 1 WHERE id = ?", [next, now, String(it.id)]);
-    } catch { continue; } // column not migrated yet — never abort init for it
-    changed++;
-    // Full row: the sync appliers REPLACE from the payload, so a partial one
-    // would blank the name/product on the other device (and the cloud push
-    // needs the NOT NULL columns anyway).
-    // `now + 1ms`: the caller may have just published this same row (name edit),
-    // and equal updated_at loses the LWW tie — this row must win outright.
-    try {
-      await insertOutbox("items", "update", {
-        id: String(it.id), product_id: String(it.product_id), name: String(it.name ?? ""),
-        ref_item_id: it.ref_item_id ?? null, ratio: it.ratio ?? null,
-        sort_order: Number(it.sort_order ?? 0), cost: next,
-        created_at: it.created_at ?? now, updated_at: new Date(Date.now() + 1).toISOString(), is_deleted: false,
-      }, db);
-    } catch {}
-  }
-  return changed;
+  return recomputeItemCostsCore(db, {
+    productId,
+    insertOutbox: (table, op, row) => insertOutbox(table, op as any, row, db),
+  });
 }
 
 /**
@@ -2240,9 +2310,13 @@ const OPS_OUTBOX_TABLES = new Set([
 ]);
 
 function opsOutboxTable(sql: string): string | null {
-  const m = /^\s*(INSERT|UPDATE|DELETE)\s+(?:OR\s+\w+\s+)?(\w+)/i.exec(sql ?? "");
+  // INSERT [OR REPLACE] INTO <table> / DELETE FROM <table> / UPDATE <table>.
+  // Without the INTO/FROM alternations this used to capture "INTO"/"FROM" as
+  // the table name, so every INSERT into an ops table silently skipped the
+  // outbox (a pending shift never left the cashier's device).
+  const m = /^\s*(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|DELETE\s+FROM|UPDATE)\s+(\w+)/i.exec(sql ?? "");
   if (!m) return null;
-  return OPS_OUTBOX_TABLES.has(m[2]) ? m[2] : null;
+  return OPS_OUTBOX_TABLES.has(m[1]) ? m[1] : null;
 }
 
 // Position of the `id = ?` placeholder among the statement's `?`s, or -1 when
@@ -2342,10 +2416,17 @@ function withOpsOutbox(target: any) {
 // row and its outbox entry are written through the same connection).
 export async function insertOutbox(table: string, operation: "create"|"update"|"delete", payload: any, dbOverride?: any) {
   const d = dbOverride ?? await getDb();
+  // Owner of the queued row (nullable — queueing must never fail for this).
+  // Lets a later user switch drop identity-sensitive rows another user left.
+  let queuedBy: string | null = null;
+  try {
+    const { useAuthStore } = await import("../auth/authStore");
+    queuedBy = useAuthStore.getState()?.user?.id ?? null;
+  } catch {}
   // The outbox id is a local queue key only — nothing parses it, so mint a uuid.
   await d.runAsync(
-    "INSERT INTO outbox (id, table_name, operation, payload, created_at) VALUES (?,?,?,?,?)",
-    [mintId(), table, operation, JSON.stringify(payload), new Date().toISOString()]
+    "INSERT INTO outbox (id, table_name, operation, payload, created_at, queued_by) VALUES (?,?,?,?,?,?)",
+    [mintId(), table, operation, JSON.stringify(payload), new Date().toISOString(), queuedBy]
   );
   // Every local write has to reach the other registers: queue a sync right
   // after the write lands (autoSync debounces, so a checkout's dozen inserts

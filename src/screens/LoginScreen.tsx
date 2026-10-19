@@ -2,12 +2,14 @@
 // Sign-in only: accounts are provisioned server-side (admin portal), so the
 // app never creates them. In local-dev (mock) mode you can enter through demo
 // credentials for every role, each carrying its own secret code.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Text, View, TextInput, Pressable, KeyboardAvoidingView, Platform, ActivityIndicator, Image, StyleSheet } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { BlurView } from "expo-blur";
 import { useAuthState, DEMO_CREDENTIALS } from "../auth/authStore";
 import { isLiveSupabase } from "../auth/supabase";
+import { listOfflineCredSummaries, OFFLINE_WINDOW_MS, type OfflineCredSummary } from "../auth/offlineCreds";
+import { useOnline } from "../net/connectivity";
 import { blackPalette as palette, radius, shadow } from "../theme";
 import type { Role } from "../users";
 import { useResponsive, centerBox } from "../responsive";
@@ -40,12 +42,25 @@ function BrandHero({ compact }: { compact?: boolean }) {
 export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   const { width, isTablet } = useResponsive();
   const { user, cached, error, signIn, unlockWithPin, demoSignIn, signOut } = useAuthState();
+  const online = useOnline();
+  const [offlineUsers, setOfflineUsers] = useState<OfflineCredSummary[]>([]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [focused, setFocused] = useState<"email" | "password" | null>(null);
+
+  // Users cached for offline login on THIS device (per-user 30-day windows).
+  // A shared tablet shows everyone who ever logged in online here.
+  useEffect(() => {
+    if (!isLiveSupabase) return;
+    let alive = true;
+    listOfflineCredSummaries()
+      .then(rows => { if (alive) setOfflineUsers(rows); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [user, busy]);
 
   const inputStyle = (k: "email" | "password") => ({
     borderWidth: 1,
@@ -65,8 +80,12 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
     onBlur: () => setFocused(null),
   });
 
-  // Offline PIN quick entry (cached profile, no live session).
-  if (!user && cached) {
+  // Offline PIN quick entry — MOCK (local-dev) mode ONLY, and only with a
+  // cached profile. In live (Supabase) mode we must never take this branch:
+  // unlockWithPin re-marks the user signed-in with NO JWT, so the whole app
+  // runs "signed in" while every sync call 401s (empty store, frozen cursor).
+  // Live login is always email + password, which is what mints a real session.
+  if (!isLiveSupabase && !user && cached) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: "#000" }}>
         <KeyboardSafeScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: "center", alignItems: "center", paddingHorizontal: isTablet ? 32 : 24, paddingVertical: 24 }}>
@@ -165,6 +184,52 @@ export default function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
                   Demo: owner@demo.magazen.ht · admin@ · manager@ · cashier@{'\n'}nenpòt modpas (6 karaktè omwen) — kont lokal
                 </Text>
               </>
+            )}
+
+            {isLiveSupabase && !online && (
+              <View style={{ marginBottom: 18 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 14, backgroundColor: palette.warningBg, borderWidth: 0.5, borderColor: palette.warning }}>
+                  <Ionicons name="cloud-offline-outline" size={16} color={palette.warning} />
+                  <Text allowFontScaling={false} style={{ flex: 1, fontSize: 11.5, color: palette.warning, fontWeight: "700", lineHeight: 16 }}>
+                    Pa gen entènèt — ou ka antre ak yon kont ki anrejistre sou aparèy sa a.
+                  </Text>
+                </View>
+                {offlineUsers.length > 0 ? (
+                  <View style={{ marginTop: 12 }}>
+                    <Text allowFontScaling={false} style={{ fontSize: 10, color: palette.muted2, textTransform: "uppercase", letterSpacing: 1, textAlign: "center", marginBottom: 8 }}>
+                      Itilizatè sou aparèy sa a
+                    </Text>
+                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+                      {offlineUsers.map(u => {
+                        const expired = Date.now() - Date.parse(u.lastOnlineAuthAt) > OFFLINE_WINDOW_MS;
+                        const meta = ROLE_META[u.role];
+                        const selected = email.trim().toLowerCase() === u.email.toLowerCase();
+                        return (
+                          <Pressable
+                            key={u.userId}
+                            onPress={() => { setEmail(u.email); setLocalError(null); }}
+                            style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, backgroundColor: selected ? "rgba(255,77,0,0.14)" : "rgba(255,255,255,0.05)", borderWidth: 1, borderColor: selected ? palette.accent : "rgba(255,255,255,0.1)", opacity: expired ? 0.55 : 1 }}
+                          >
+                            <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: "rgba(255,255,255,0.08)", alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: meta?.color ?? palette.muted3 }}>
+                              <Text allowFontScaling={false} style={{ fontSize: 10, fontWeight: "800", color: palette.ink }}>{u.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</Text>
+                            </View>
+                            <View>
+                              <Text allowFontScaling={false} style={{ fontSize: 12, fontWeight: "700", color: palette.ink }} numberOfLines={1}>{u.name.split(" ")[0]}</Text>
+                              <Text allowFontScaling={false} style={{ fontSize: 9, color: expired ? palette.danger : palette.muted2, fontWeight: "600" }}>
+                                {expired ? "Ekspire — konekte entènèt" : meta?.label ?? u.role}
+                              </Text>
+                            </View>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : (
+                  <Text allowFontScaling={false} style={{ fontSize: 11, color: palette.muted2, textAlign: "center", marginTop: 10, lineHeight: 16 }}>
+                    Pèsonn pa anrejistre sou aparèy sa a. Premye koneksyon an dwe fèt sou entènèt.
+                  </Text>
+                )}
+              </View>
             )}
 
             <Text allowFontScaling={false} style={{ fontSize: 12, fontWeight: "600", color: palette.muted }}>Imel</Text>

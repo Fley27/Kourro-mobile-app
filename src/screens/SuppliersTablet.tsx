@@ -1,10 +1,11 @@
-import React, { useEffect, useRef } from "react";
-import { View, Text, Pressable, FlatList, ScrollView, TextInput } from "react-native";
+import React, { useEffect, useRef, useState } from "react";
+import { View, Text, Pressable, FlatList, ScrollView, TextInput, Modal } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { blackPalette as palette, radius, shadow } from "../theme";
 import { CustomerProfileHeader, ProfileMenu } from "../components/CustomerProfile";
 import { SupplierProfileBody, SupplierBatchesList, SupplierBatchDetailBody, batchStatusLabel, type SupplierStats } from "../components/SupplierProfile";
 import { EditSupplierContent, supplierToFormValues, type EditSupplierState } from "../components/SupplierSheets";
-import { fmtG, monoStyle } from "../format";
+import { fmtG } from "../format";
 import { SkeletonListRow } from "../components/Skeleton";
 import { KeyboardSafeScrollView } from "../components/KeyboardSafe";
 
@@ -60,51 +61,78 @@ function TabletSearchBlock(props: {
 }) {
   const { search, setSearch, showBatchOnly, setShowBatchOnly, suppliers, batchCounts } = props;
   const withBatches = suppliers.filter(s => (batchCounts[s.id]?.count ?? 0) > 0).length;
+  const [showFilters, setShowFilters] = useState(false);
+  const [draftFilter, setDraftFilter] = useState(showBatchOnly);
   return (
-    <View style={{ padding: 12, borderBottomWidth: 0.5, borderColor: palette.hairline, backgroundColor: palette.surface, gap: 10 }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: palette.surface, borderWidth: 0.5, borderColor: palette.hairlineStrong, borderRadius: radius.sm, paddingHorizontal: 12, paddingVertical: 9 }}>
-        <Text style={{ fontSize: 13, color: palette.muted3 }}>⌕</Text>
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 }}>
+      <View style={{ flex: 1, height: 56, flexDirection: "row", alignItems: "center", backgroundColor: "transparent", borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 28, paddingHorizontal: 16 }}>
+        <Ionicons name="search" size={20} color="#fff" style={{ marginRight: 10 }} />
         <TextInput
           value={search}
           onChangeText={setSearch}
           placeholder="Chèche pa non, telefòn oswa kondisyon peman"
-          placeholderTextColor={palette.muted3}
-          style={{ flex: 1, fontSize: 13.5, color: palette.ink, paddingVertical: 0 }}
+          placeholderTextColor="#8e8e93"
           returnKeyType="search"
+          style={{ flex: 1, paddingVertical: 10, fontSize: 16, color: "#fff" }}
         />
-        {search.length > 0 && (
-          <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: palette.surfaceGrouped, alignItems: "center", justifyContent: "center" }}>
-            <Text style={{ fontSize: 10, color: palette.muted2, fontWeight: "600" }}>✕</Text>
+        {search ? (
+          <Pressable onPress={() => setSearch("")} hitSlop={8} style={{ padding: 4 }}>
+            <Ionicons name="close-circle" size={18} color="#8e8e93" />
           </Pressable>
-        )}
+        ) : null}
       </View>
+      <Pressable
+        onPress={() => { setDraftFilter(showBatchOnly); setShowFilters(true); }}
+        style={{
+          width: 52, height: 52, borderRadius: 14, alignItems: "center", justifyContent: "center",
+          backgroundColor: showBatchOnly ? "#fff" : "#000",
+          borderWidth: 1, borderColor: showBatchOnly ? "#fff" : "#3a3a3c",
+        }}
+      >
+        <Ionicons name="filter" size={20} color={showBatchOnly ? "#000" : "#fff"} />
+      </Pressable>
 
-      {/* Small segmented — web .segmented, compact */}
-      <View style={{ alignSelf: "flex-start", flexDirection: "row", backgroundColor: palette.surfaceGrouped, borderWidth: 0.5, borderColor: palette.hairline, borderRadius: radius.pill, padding: 2, gap: 2 }}>
-        <Pressable
-          onPress={() => setShowBatchOnly(false)}
-          style={{
-            flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill,
-            backgroundColor: !showBatchOnly ? palette.ink : "transparent",
-            borderWidth: !showBatchOnly ? 0.5 : 0, borderColor: palette.hairline,
-            shadowColor: "#000", shadowOpacity: !showBatchOnly ? 0.06 : 0, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
-          }}
-        >
-          <Text style={{ fontWeight: "600", fontSize: 12.5, color: !showBatchOnly ? "#000" : palette.muted, letterSpacing: -0.1 }}>Tout • {suppliers.length}</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setShowBatchOnly(true)}
-          style={{
-            flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill,
-            backgroundColor: showBatchOnly ? palette.ink : "transparent",
-            borderWidth: showBatchOnly ? 0.5 : 0, borderColor: palette.hairline,
-            shadowColor: "#000", shadowOpacity: showBatchOnly ? 0.06 : 0, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
-          }}
-        >
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: showBatchOnly ? palette.warningDot : "rgba(255,255,255,0.3)" }} />
-          <Text style={{ fontWeight: "600", fontSize: 12.5, color: showBatchOnly ? "#000" : palette.muted, letterSpacing: -0.1 }}>Ki gen livrezon • {withBatches}</Text>
-        </Pressable>
-      </View>
+      <Modal visible={showFilters} transparent animationType="slide" onRequestClose={() => setShowFilters(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}>
+          <Pressable style={{ flex: 1 }} onPress={() => setShowFilters(false)} />
+          <View style={{ backgroundColor: "#1c1c1e", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, paddingBottom: 32 }}>
+            <View style={{ width: 36, height: 4, backgroundColor: "#3a3a3c", borderRadius: 2, alignSelf: "center", marginBottom: 14 }} />
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <Text style={{ fontSize: 26, fontWeight: "800", color: "#fff" }}>Filters</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <Pressable
+                  onPress={() => setDraftFilter(false)}
+                  style={{ paddingHorizontal: 20, paddingVertical: 13, borderRadius: 26, backgroundColor: "#2b2b2b" }}
+                >
+                  <Text style={{ fontWeight: "700", fontSize: 14, color: draftFilter ? "#fff" : "#6e6e73" }}>Clear All</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => { setShowBatchOnly(draftFilter); setShowFilters(false); }}
+                  style={{ paddingHorizontal: 26, paddingVertical: 13, borderRadius: 26, backgroundColor: "#fff" }}
+                >
+                  <Text style={{ fontWeight: "800", fontSize: 14, color: "#000" }}>Apply</Text>
+                </Pressable>
+              </View>
+            </View>
+            {([false, true] as const).map(key => {
+              const checked = draftFilter === key;
+              const label = key ? `Ki gen livrezon • ${withBatches}` : `Tout • ${suppliers.length}`;
+              return (
+                <Pressable
+                  key={key ? "with" : "all"}
+                  onPress={() => setDraftFilter(key)}
+                  style={{ flexDirection: "row", alignItems: "center", gap: 14, borderWidth: 1, borderColor: "#3a3a3c", borderRadius: 14, paddingVertical: 15, paddingHorizontal: 16, marginBottom: 10 }}
+                >
+                  <View style={{ width: 24, height: 24, borderRadius: 7, borderWidth: 1.5, borderColor: checked ? "#fff" : "#6e6e73", backgroundColor: checked ? "#fff" : "transparent", alignItems: "center", justifyContent: "center" }}>
+                    {checked ? <Ionicons name="checkmark" size={16} color="#000" /> : null}
+                  </View>
+                  <Text style={{ fontSize: 16, fontWeight: "600", color: "#fff" }}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -113,57 +141,26 @@ function TabletSupplierRow(props: { item: any; batchCounts: Record<string, { cou
   const { item, batchCounts, isSelected, onPress } = props;
   const stats = batchCounts[item.id] ?? { count: 0, total: 0 };
   const hasBatches = stats.count > 0;
-  const active = isSelected;
+  const initials = String(item.name ?? "•").split(" ").map((p: string) => p[0]).slice(0, 2).join("").toUpperCase();
   return (
-    <Pressable
-      onPress={onPress}
-      style={{
-        backgroundColor: active ? palette.surfaceGrouped : palette.surface,
-        borderWidth: 0.5,
-        borderColor: active ? palette.accentGold : hasBatches ? palette.successBd : palette.hairline,
-        borderRadius: radius.md,
-        padding: 12,
-        flexDirection: "row",
-        gap: 10,
-        alignItems: "center",
-        position: "relative",
-        overflow: "hidden",
-        shadowColor: "#000",
-        shadowOpacity: active ? 0.12 : 0.04,
-        shadowRadius: active ? 16 : 4,
-        shadowOffset: { width: active ? 0 : 0, height: active ? 4 : 1 },
-        elevation: active ? 4 : 1,
-      }}
-    >
-      {hasBatches && !active && (
-        <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, backgroundColor: palette.successDot }} />
-      )}
-      <View
-        style={{
-          width: 36, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center",
-          backgroundColor: active ? palette.surface : hasBatches ? palette.successBg : palette.surfaceGrouped,
-        }}
-      >
-        <Text style={{ fontWeight: "800", fontSize: 13, color: active ? palette.ink : hasBatches ? palette.success : palette.muted2 }}>
-          {(item.name?.[0] ?? "•").toUpperCase()}
-        </Text>
+    <Pressable onPress={onPress}>
+      <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 14, backgroundColor: isSelected ? "#1c1c1e" : "transparent" }}>
+        <View style={{ width: 52, height: 52, borderRadius: 12, backgroundColor: "#2b2b2b", alignItems: "center", justifyContent: "center" }}>
+          <Text style={{ color: "#8e8e93", fontSize: 17, fontWeight: "700" }}>{initials}</Text>
+        </View>
+        <View style={{ flex: 1, marginLeft: 12, minWidth: 0 }}>
+          <Text style={{ fontWeight: "600", fontSize: 17, color: "#fff" }} numberOfLines={1}>
+            {item.name}
+          </Text>
+          <Text style={{ fontSize: 14, color: "#8e8e93", marginTop: 2 }} numberOfLines={1}>
+            {item.phone || "—"}{item.address ? ` · ${item.address}` : ""}
+          </Text>
+          <Text style={{ fontSize: 13, color: hasBatches ? "#34C759" : "#8e8e93", marginTop: 1 }} numberOfLines={1}>
+            {hasBatches ? `${fmtG(stats.total)} • ${stats.count} livrezon` : "Pa gen livrezon"}
+          </Text>
+        </View>
       </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ fontWeight: "700", fontSize: 13, color: active ? "#FFFFFF" : palette.ink }} numberOfLines={1}>
-          {item.name}
-        </Text>
-        <Text style={{ fontSize: 11, color: active ? "rgba(255,255,255,0.64)" : palette.muted2, marginTop: 1 }} numberOfLines={1}>
-          {item.phone || "—"}{item.address ? ` • ${item.address}` : ""}
-        </Text>
-      </View>
-      <View style={{ alignItems: "flex-end", minWidth: 76 }}>
-        <Text style={{ fontWeight: "800", fontSize: 12, color: active ? "#FFFFFF" : hasBatches ? palette.success : palette.muted2, textAlign: "right", ...monoStyle }}>
-          {fmtG(stats.total)}
-        </Text>
-        <Text style={{ fontSize: 10, color: active ? "rgba(255,255,255,0.54)" : palette.muted2, marginTop: 1 }}>
-          {hasBatches ? `${stats.count} livrezon` : "A okenn"}
-        </Text>
-      </View>
+      <View style={{ height: 1, backgroundColor: "#262626", marginLeft: 64 }} />
     </Pressable>
   );
 }
@@ -215,8 +212,8 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
       </View>
 
       <View style={{ flex: 1, flexDirection: "row", gap: 16, paddingHorizontal: padH, paddingBottom: 16, minHeight: 0 }}>
-        {/* Master list card — web left column */}
-        <View style={{ flex: 5, minWidth: 280, backgroundColor: palette.surface, borderRadius: radius.lg, borderWidth: 0.5, borderColor: palette.hairline, overflow: "hidden", ...shadow.card, flexDirection: "column" }}>
+        {/* Master list — flat on black, team-list style. Slim on purpose: the inspector is the star. */}
+        <View style={{ flex: 1, minWidth: 240, flexDirection: "column", minHeight: 0 }}>
           <TabletSearchBlock
             search={search}
             setSearch={setSearch}
@@ -225,41 +222,37 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
             suppliers={suppliers}
             batchCounts={batchCounts}
           />
-          <View style={{ flex: 1, backgroundColor: palette.surface2, padding: 10 }}>
-            <FlatList
-              data={displaySuppliers}
-              keyExtractor={(item, index) => `${item.id}__${index}`}
-              key="tablet-1"
-              numColumns={1}
-              contentContainerStyle={{ paddingBottom: 24, gap: 8 }}
-              showsVerticalScrollIndicator={false}
-              renderItem={({ item }) => {
-                const isSelected = item.id === selectedId;
-                return (
-                  <TabletSupplierRow item={item} batchCounts={batchCounts} isSelected={isSelected} onPress={() => setSelectedId(isSelected ? null : item.id)} />
-                );
-              }}
-              ListEmptyComponent={
-                loading ? (
-                  <View>
-                    {[0, 1, 2, 3, 4].map(i => <SkeletonListRow key={i} tone="dark" padH={10} divider={false} />)}
-                  </View>
-                ) : (
-                  <View style={{ backgroundColor: "#111", borderWidth: 1, borderColor: "#262626", borderRadius: 16, padding: 28, alignItems: "center", marginTop: 8 }}>
-                    <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: "#1c1c1e", borderWidth: 1, borderColor: "#3a3a3c", alignItems: "center", justifyContent: "center", marginBottom: 10 }}>
-                      <Text style={{ fontSize: 18, color: "#8e8e93" }}>◯</Text>
-                    </View>
-                    <Text style={{ fontWeight: "600", fontSize: 13, color: "#fff" }}>Pa gen founisè</Text>
-                    <Text style={{ color: "#8e8e93", fontSize: 12, marginTop: 4, textAlign: "center" }}>Eseye yon lòt rechèch oswa ajoute yon nouvo founisè</Text>
-                  </View>
-                )
-              }
-            />
-          </View>
+          <FlatList
+            data={displaySuppliers}
+            keyExtractor={(item, index) => `${item.id}__${index}`}
+            key="tablet-1"
+            numColumns={1}
+            style={{ flex: 1 }}
+            contentContainerStyle={{ paddingBottom: 24 }}
+            showsVerticalScrollIndicator={false}
+            renderItem={({ item }) => {
+              const isSelected = item.id === selectedId;
+              return (
+                <TabletSupplierRow item={item} batchCounts={batchCounts} isSelected={isSelected} onPress={() => setSelectedId(isSelected ? null : item.id)} />
+              );
+            }}
+            ListEmptyComponent={
+              loading ? (
+                <View>
+                  {[0, 1, 2, 3, 4].map(i => <SkeletonListRow key={i} tone="dark" padH={0} divider={false} />)}
+                </View>
+              ) : (
+                <View style={{ padding: 32, alignItems: "center" }}>
+                  <Text style={{ fontSize: 15, fontWeight: "600", color: "#fff" }}>{search || showBatchOnly ? "Pa gen rezilta" : "Pa gen founisè"}</Text>
+                  <Text style={{ fontSize: 13, color: "#8e8e93", marginTop: 4 }}>Eseye chanje rechèch oswa filtè.</Text>
+                </View>
+              )
+            }
+          />
         </View>
 
         {/* Inspector — web right column */}
-        <View style={{ flex: 7, minWidth: 0, flexDirection: "column", minHeight: 0 }}>
+        <View style={{ flex: 2, minWidth: 0, flexDirection: "column", minHeight: 0 }}>
           {!selectedSupplier ? (
             <View style={{ backgroundColor: palette.surface, borderRadius: radius.lg, borderWidth: 0.5, borderColor: palette.hairline, padding: 28, alignItems: "center", justifyContent: "center", ...shadow.card }}>
               <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: palette.surfaceGrouped, borderWidth: 0.5, borderColor: palette.hairline, alignItems: "center", justifyContent: "center", marginBottom: 10 }}>
@@ -270,7 +263,12 @@ export function SuppliersTablet(props: SuppliersTabletProps) {
             </View>
           ) : (
             <View style={{ flex: 1, minHeight: 0, flexDirection: "column", gap: 12 }}>
-              <View style={{ backgroundColor: "#000", borderWidth: 0.5, borderColor: "#262626", borderRadius: radius.lg, padding: 16, paddingBottom: 0 }}>
+              {/* zIndex while the menu is open: the menu is anchored inside this
+                  card, and RNW gives every View `position: relative; z-index: 0`
+                  (its own stacking context) — without lifting the card the
+                  dropdown renders below the sibling scroll view (same on native:
+                  later siblings paint on top). */}
+              <View style={{ backgroundColor: "#000", borderWidth: 0.5, borderColor: "#262626", borderRadius: radius.lg, padding: 16, paddingBottom: 0, ...(showProfileMenu ? { zIndex: 60 } : null) }}>
                 <CustomerProfileHeader
                   onBack={() => {
                     if (showEdit) onCloseEdit();

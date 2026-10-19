@@ -61,6 +61,26 @@ CREATE TABLE IF NOT EXISTS products (
   dirty INTEGER DEFAULT 0
 );
 
+-- Per-store stock (migration 023). products.stock_quantity stays as a
+-- deprecated cache — one scalar on a store-owned row — while THIS table is
+-- the authoritative (store, product) quantity that syncs between registers.
+-- Baseline comes from products.stock_quantity on first touch; from then on
+-- every sale/receive adjusts the row and pushes it (absolute value, LWW).
+CREATE TABLE IF NOT EXISTS product_stock (
+  id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  product_id TEXT NOT NULL,
+  quantity REAL DEFAULT 0,
+  available REAL DEFAULT 0,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_product_stock_store_product ON product_stock(store_id, product_id);
+
 -- Catalog v2: Product (abstract: name + categories) → Item (purchasable
 -- container chain) → Variant (sellable presentation) → VariantPrice
 -- (effective-dated). Cost enters only via batches.
@@ -96,6 +116,8 @@ CREATE INDEX IF NOT EXISTS idx_product_suppliers_supplier ON product_suppliers(s
 
 CREATE TABLE IF NOT EXISTS batches (
   id TEXT PRIMARY KEY,
+  -- Store that received the goods (migration 023 — per-store batches).
+  store_id TEXT,
   item_id TEXT NOT NULL,
   supplier_id TEXT NOT NULL,
   date TEXT NOT NULL,
@@ -447,7 +469,11 @@ CREATE TABLE IF NOT EXISTS outbox (
   operation TEXT NOT NULL,
   payload TEXT NOT NULL,
   attempts INTEGER DEFAULT 0,
-  created_at TEXT
+  created_at TEXT,
+  -- Who queued the row: lets a user switch drop identity-sensitive rows
+  -- (roster/profile) left by the previous user instead of warning about
+  -- rejections they can never fix.
+  queued_by TEXT
 );
 
 -- Open sales / tabs (Vant an Atann): suspended carts with frozen variant prices.
@@ -509,8 +535,10 @@ CREATE TABLE IF NOT EXISTS employees (
   full_name TEXT NOT NULL,
   role TEXT NOT NULL,
   phone TEXT,
+  email TEXT,
   salary REAL DEFAULT 0,
   address TEXT,
+  emergency_json TEXT,
   is_active INTEGER DEFAULT 1,
   online_status INTEGER DEFAULT 0,
   created_at TEXT,
@@ -704,6 +732,102 @@ CREATE TABLE IF NOT EXISTS salary_deductions (
   registered_by TEXT,
   created_at TEXT
 );
+
+-- ── Payroll (028) ──────────────────────────────────────────────────────────
+-- Salary is never overwritten: each change appends one dated row and the
+-- CURRENT salary is simply the most recent row per employee. employees.salary
+-- stays as a display cache refreshed by every write path (no structural change
+-- to that table). First row per employee uses deriveId("sal", employeeId,
+-- "init") so every device's one-time backfill converges on one cloud row.
+CREATE TABLE IF NOT EXISTS salary_history (
+  id TEXT PRIMARY KEY,
+  employee_id TEXT NOT NULL,
+  organization_id TEXT,
+  store_id TEXT,
+  amount REAL NOT NULL DEFAULT 0,
+  created_at TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_salary_history_emp ON salary_history(employee_id, created_at);
+
+-- Pay periods: org-wide (all stores share one cycle). Lazy lifecycle — the
+-- device derives the current period locally (deriveId("pp", orgId, startDate))
+-- and the SERVER is the only writer that flips status to closed (cash_out +
+-- payment rows + email live in the close endpoint). Cadence is present but the
+-- UI stays hidden: everything defaults monthly (calendar months, Haiti-local).
+CREATE TABLE IF NOT EXISTS pay_periods (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT,
+  store_id TEXT,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  cadence TEXT NOT NULL DEFAULT 'monthly',
+  closed_at TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pay_periods_org ON pay_periods(organization_id, start_date);
+
+-- Shortfalls EXPLICITLY designated to come out of salary. Only ever written
+-- from the end-of-report choice ("Pran sou salè") — a shortfall marked
+-- negligible writes nothing here. Permanent: no delete path exists.
+-- period_id anchors the period whose [start_date, end_date] contains the
+-- deficit date; all money math re-scopes by date so a mis-anchored row can
+-- never skew a close. Recordable against active employees only.
+CREATE TABLE IF NOT EXISTS salary_deficits (
+  id TEXT PRIMARY KEY,
+  employee_id TEXT NOT NULL,
+  period_id TEXT,
+  organization_id TEXT,
+  store_id TEXT,
+  date TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  daily_report_id TEXT,
+  registered_by TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_salary_deficits_emp_date ON salary_deficits(employee_id, date);
+CREATE INDEX IF NOT EXISTS idx_salary_deficits_period ON salary_deficits(period_id);
+
+-- Locked close-once ledger: exactly one row per employee per period, written
+-- ONLY by the server close endpoint at the single moment the period closes.
+-- Deficits are already baked in (net = salary − Σ deficits). Clients never
+-- push here; the server drops client writes. UNIQUE(employee_id, period_id)
+-- makes a duplicate close a no-op.
+CREATE TABLE IF NOT EXISTS salary_payments (
+  id TEXT PRIMARY KEY,
+  employee_id TEXT NOT NULL,
+  period_id TEXT NOT NULL,
+  organization_id TEXT,
+  store_id TEXT,
+  salary_amount REAL NOT NULL DEFAULT 0,
+  deficit_total REAL NOT NULL DEFAULT 0,
+  net_amount REAL NOT NULL DEFAULT 0,
+  closed_at TEXT,
+  device_id TEXT,
+  lamport_clock INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  is_deleted INTEGER DEFAULT 0,
+  dirty INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_salary_payments_emp_period ON salary_payments(employee_id, period_id);
+CREATE INDEX IF NOT EXISTS idx_salary_payments_period ON salary_payments(period_id);
+
 
 -- Append-only audit journal for daily-report review decisions.
 -- The *current* decision for a report is the latest row by created_at.
@@ -1095,4 +1219,13 @@ CREATE TABLE IF NOT EXISTS promo_audit (
 CREATE INDEX IF NOT EXISTS idx_promo_audit_store_created ON promo_audit(store_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_promo_audit_entity ON promo_audit(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+
+-- Windowed pulls + local-first search: the 90-day initial download filters on
+-- these columns server-side; the device searches sale numbers and open-state
+-- rows constantly (credit desk, POS tabs, order board).
+CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at);
+CREATE INDEX IF NOT EXISTS idx_sales_sale_number ON sales(sale_number);
+CREATE INDEX IF NOT EXISTS idx_credits_status_balance ON credits(status, balance);
+CREATE INDEX IF NOT EXISTS idx_sale_items_updated_at ON sale_items(updated_at);
+CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);
 `;

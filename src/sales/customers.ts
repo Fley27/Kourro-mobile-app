@@ -42,9 +42,11 @@ export async function resolveCustomerByPhone(
   if (!key) throw { title: "Telefòn obligatwa", message: "Antre yon nimewo telefòn valab." } as any;
   let rows: any[] = [];
   try {
+    // Clients are business-wide (org scope, migration 023): a phone registered
+    // at any store of the business must resolve here, or every store mints its
+    // own prospect copy.
     rows = ((await db.getAllAsync(
-      "SELECT * FROM customers WHERE (store_id = ? OR store_id IS NULL) AND (is_deleted = 0 OR is_deleted IS NULL)",
-      [storeId]
+      "SELECT * FROM customers WHERE (is_deleted = 0 OR is_deleted IS NULL)"
     )) as any[]) ?? [];
   } catch { rows = []; }
   // Deterministic pick when legacy data holds duplicates: newest record wins.

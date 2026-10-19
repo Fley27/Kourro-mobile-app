@@ -33,6 +33,8 @@ import {
 } from "../components/SupplierSheets";
 import { UploadTransition, minDelay, uploadSuccess, uploadError, type UploadPhase } from "../components/UploadTransition";
 import { mintId } from "../db/ids";
+import { useFallbackSearch } from "../search/localFirstSearch";
+import { SearchFallbackNotice } from "../search/SearchFallbackNotice";
 
 export type Supplier = {
   id: string;
@@ -195,6 +197,17 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
     }
     return list;
   }, [suppliers, batchCounts, showBatchOnly, search]);
+
+  // Local-first fallback: miss + online → one live lookup; miss + offline →
+  // quiet "connection needed" notice. Suppliers are reference data so this is
+  // rarely needed — kept for a consistent miss/offline UX across searchers.
+  const fallback = useFallbackSearch({ kind: "supplier", query: search, localHit: displaySuppliers, storeId });
+  const mergedSuppliers = useMemo(
+    () => (fallback.status === "remote" && fallback.rows.length
+      ? [...fallback.rows.filter((r: any) => !displaySuppliers.some(s => s.id === r.id)), ...displaySuppliers]
+      : displaySuppliers),
+    [displaySuppliers, fallback.status, fallback.rows]
+  );
 
   function openBatch(b: any) {
     // Open instantly with what we have; item + product name fill in.
@@ -460,10 +473,13 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
 
   return (
     <View style={{ flex: 1, backgroundColor: "#000", alignItems: showTablet ? "center" : undefined }}>
+      <View style={{ width: "100%", maxWidth: showTablet ? 980 : undefined }}>
+        <SearchFallbackNotice status={fallback.status} />
+      </View>
       {showTablet ? (
         <SuppliersTablet
           suppliers={suppliers}
-          displaySuppliers={displaySuppliers}
+          displaySuppliers={mergedSuppliers}
           loading={loading}
           batchCounts={batchCounts}
           search={search}
@@ -502,7 +518,7 @@ export default function SuppliersScreen({ role = "cashier", storeId }: Props) {
       ) : (
         <SuppliersPhone
           suppliers={suppliers}
-          displaySuppliers={displaySuppliers}
+          displaySuppliers={mergedSuppliers}
           loading={loading}
           search={search}
           setSearch={setSearch}

@@ -5,8 +5,10 @@
  * 3. Local SQLite as source of truth when offline
  */
 import { getDb, getDirtyChanges, insertOutbox, MAX_PUSH_ATTEMPTS, recomputeItemCosts } from "../db";
-
-const MIDDLEWARE_URL = process.env.EXPO_PUBLIC_MIDDLEWARE_URL ?? "http://localhost:4000";
+import { middlewareUrl } from "../auth/supabase";
+import { USER_IDS } from "../users";
+import { healSalaryCaches } from "../payroll";
+import { WINDOW_DAYS, REFERENCE_TABLES, OPEN_ITEM_PREDICATES, SYNC_TABLES, SUBSCRIPTION_EXPIRED_STATUS } from "@retail/shared-types";
 
 // Pull watermark, kept apart from the legacy `last_synced_at` key (which push
 // used to write) so an existing device re-pulls from the epoch once instead of
@@ -161,7 +163,42 @@ const OPS_SYNC_COLUMNS: Record<string, readonly string[]> = {
     "id","user_id","type","reference_id","message","status","created_at",
     "is_deleted","dirty",
   ],
+  // Payroll (028): org-wide period cycle + append-only salary history + the
+  // salary-bound deficit ledger + the server-written close-once payments.
+  // Whole-row upsert; the server owns period status (closed stays closed).
+  pay_periods: [
+    "id","organization_id","store_id","start_date","end_date","status","cadence",
+    "closed_at","created_at","updated_at","is_deleted","dirty","lamport_clock",
+  ],
+  salary_history: [
+    "id","employee_id","organization_id","store_id","amount","created_at",
+    "updated_at","is_deleted","dirty","lamport_clock",
+  ],
+  salary_deficits: [
+    "id","employee_id","period_id","organization_id","store_id","date","amount",
+    "daily_report_id","registered_by","created_at","updated_at","is_deleted","dirty",
+    "lamport_clock",
+  ],
+  salary_payments: [
+    "id","employee_id","period_id","organization_id","store_id","salary_amount",
+    "deficit_total","net_amount","closed_at","created_at","updated_at","is_deleted",
+    "dirty","lamport_clock",
+  ],
 };
+
+/**
+ * Thrown when the middleware rejects our credentials (401/403). A stale JWT
+ * used to make a device 401 forever on every push+pull while other devices on
+ * the same store kept syncing — the pull cursor froze and the register showed
+ * an empty catalog. Callers must refresh the token (or sign the user out),
+ * never just retry with the same dead token.
+ */
+export class SyncAuthError extends Error {
+  constructor(status: number, message = `auth failed ${status}`) {
+    super(message);
+    this.name = "SyncAuthError";
+  }
+}
 
 export class SyncManager {
   storeId: string;
@@ -184,20 +221,21 @@ export class SyncManager {
     return h;
   }
 
-  async pushToCloud(): Promise<void> {
+  async pushToCloud(): Promise<{ rejected: { table: string; status: string }[]; subscriptionBlocked: boolean }> {
     const changesRaw = await getDirtyChanges();
-    if (!changesRaw.length) return;
+    if (!changesRaw.length) return { rejected: [], subscriptionBlocked: false };
     const payload = {
       store_id: this.storeId,
       device_id: this.deviceId,
       changes: changesRaw.map(c => ({ table: c.table, operation: c.operation, record: c.payload })),
       last_synced_at: this.lastSyncedAt,
     };
-    const res = await fetch(`${MIDDLEWARE_URL}/api/sync/push`, {
+    const res = await fetch(`${middlewareUrl}/api/sync/push`, {
       method: "POST",
       headers: this.authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
+    if (res.status === 401 || res.status === 403) throw new SyncAuthError(res.status, `push failed ${res.status}`);
     if (!res.ok) throw new Error(`push failed ${res.status}`);
     const data = await res.json();
     // Clear what the server accepted, KEEP what it rejected: a rejected record
@@ -212,6 +250,19 @@ export class SyncManager {
       return (s.startsWith("error:") || s === "unknown_table") && r?.id != null && String(r.id) !== "undefined";
     });
     const failed = new Set(rejected.map(r => String(r!.id)));
+    // Surfaced on the status bus (P1): a rejected row would otherwise sit in
+    // the outbox for 8 cycles and vanish with only a console.warn — that is
+    // how whole tables silently stopped syncing.
+    const rejectedInfo = rejected.map(r => {
+      const src = changesRaw.find(c => String((c.payload as any)?.id) === String(r!.id));
+      return { table: String(src?.table ?? "?"), status: String(r?.status ?? "") };
+    });
+    // Subscription write-gate rejections (migration 029) are NOT errors: the
+    // org is read-only, the lockdown lifts on renewal. Keep the rows and do
+    // NOT burn push attempts — otherwise a long expiry would silently drop
+    // every write the moment the subscription comes back.
+    const statusById = new Map(results.map(r => [String(r?.id ?? ""), String(r?.status ?? "")]));
+    const subscriptionBlocked = rejectedInfo.some(r => r.status.includes(SUBSCRIPTION_EXPIRED_STATUS));
     const drop = failed.size
       ? changesRaw.filter(c => !failed.has(String((c.payload as any)?.id)))
       : results.length ? changesRaw : [];
@@ -219,6 +270,7 @@ export class SyncManager {
     for (const c of drop) await db.runAsync("DELETE FROM outbox WHERE id = ?", [c.outboxId]);
     for (const c of changesRaw) {
       if (!failed.has(String((c.payload as any)?.id))) continue;
+      if ((statusById.get(String((c.payload as any)?.id)) ?? "").includes(SUBSCRIPTION_EXPIRED_STATUS)) continue;
       const cur = ((await db.getAllAsync("SELECT attempts FROM outbox WHERE id = ?", [c.outboxId])) as any[])?.[0];
       const attempts = Number(cur?.attempts ?? 0) + 1;
       if (attempts >= MAX_PUSH_ATTEMPTS) {
@@ -234,23 +286,193 @@ export class SyncManager {
     // pushes first, then pulls with `since = now`, which skips every row older
     // than this instant — i.e. exactly the other device's sales. The cursor is
     // the pull watermark and only pullFromCloud() moves it.
+    return { rejected: rejectedInfo, subscriptionBlocked };
   }
 
   // Returns how many records came down — callers reload their lists only when
   // the pull actually brought something new.
-  async pullFromCloud(): Promise<number> {
+  //
+  // Phased-pull options (initial download / stale catch-up):
+  //   tables:   only these tables (reference full / windowed 90d split)
+  //   openOnly: only open-item rows, any age
+  //   ids + idsCol: companion fetch (parent sale for an open credit…)
+  //   advanceCursor: false for additive passes — only the plain incremental
+  //                  pull moves the watermark (an open-items sweep must never
+  //                  swallow rows that changed during the same session).
+  async pullFromCloud(opts?: {
+    tables?: readonly string[];
+    openOnly?: boolean;
+    ids?: string[];
+    idsCol?: string;
+    since?: string;
+    until?: string;
+    advanceCursor?: boolean;
+    onProgress?: (received: number) => void;
+  }): Promise<number> {
     await this.loadPullCursor();
-    const since = this.lastSyncedAt ?? new Date(0).toISOString();
-    const url = `${MIDDLEWARE_URL}/api/sync/pull?store_id=${this.storeId}&device_id=${this.deviceId}&since=${encodeURIComponent(since)}`;
-    const res = await fetch(url, { headers: this.authHeaders() });
-    if (!res.ok) throw new Error(`pull failed ${res.status}`);
-    const { changes, server_time } = await res.json();
-    const list: any[] = Array.isArray(changes) ? changes : [];
-    await this.applyChanges(list);
-    this.lastSyncedAt = server_time;
+    const since = opts?.since ?? this.lastSyncedAt ?? new Date(0).toISOString();
+    let page = 0;
+    let serverTime: string | null = opts?.until ?? null;
+    let received = 0;
+    while (true) {
+      const params = [
+        `store_id=${encodeURIComponent(this.storeId)}`,
+        `device_id=${encodeURIComponent(this.deviceId)}`,
+        `since=${encodeURIComponent(since)}`,
+        `page=${page}`,
+      ];
+      if (opts?.tables?.length) params.push(`tables=${encodeURIComponent(opts.tables.join(","))}`);
+      if (opts?.openOnly) params.push(`open_only=1`);
+      if (opts?.ids?.length) {
+        params.push(`ids=${encodeURIComponent(opts.ids.join(","))}`);
+        if (opts.idsCol) params.push(`ids_col=${encodeURIComponent(opts.idsCol)}`);
+      }
+      if (serverTime) params.push(`until=${encodeURIComponent(serverTime)}`);
+      const res = await fetch(`${middlewareUrl}/api/sync/pull?${params.join("&")}`, { headers: this.authHeaders() });
+      if (res.status === 401 || res.status === 403) throw new SyncAuthError(res.status, `pull failed ${res.status}`);
+      if (!res.ok) throw new Error(`pull failed ${res.status}`);
+      const payload = await res.json();
+      const list: any[] = Array.isArray(payload?.changes) ? payload.changes : [];
+      if (typeof payload?.server_time !== "string") throw new Error("pull response missing server_time");
+      // Pin the snapshot only on the first page of a pass — later pages (and
+      // later passes of the same initial download) must see the same until.
+      if (!serverTime) serverTime = payload.server_time;
+      else if (payload.server_time !== serverTime && page > 0) throw new Error("pull snapshot changed during pagination");
+      serverTime = payload.server_time;
+      await this.applyChanges(list);
+      received += list.length;
+      opts?.onProgress?.(received);
+      if (!payload.has_more) break;
+      page += 1;
+    }
+    // Only a cursor-advancing pass records the watermark. Additive passes
+    // (open items, companions) are lookups, not the incremental frontier.
+    if (opts?.advanceCursor !== false) {
+      this.lastSyncedAt = serverTime;
+      const db = await getDb();
+      await db.runAsync("INSERT OR REPLACE INTO _meta (key,value) VALUES (?,?)", [PULL_CURSOR_KEY, this.lastSyncedAt]);
+    }
+    return received;
+  }
+
+  /** True when this device has never completed a pull (fresh install / new device). */
+  async needsInitialDownload(): Promise<boolean> {
     const db = await getDb();
-    await db.runAsync("INSERT OR REPLACE INTO _meta (key,value) VALUES (?,?)", [PULL_CURSOR_KEY, this.lastSyncedAt]);
-    return list.length;
+    const cursor = (await db.getAllAsync("SELECT value FROM _meta WHERE key = ?", [PULL_CURSOR_KEY])) as any[];
+    if (cursor?.[0]?.value) return false;
+    // No cursor: initial download unless local business data already exists
+    // (mock/demo seeds, LAN-only devices) — those keep the epoch pull path.
+    const sales = (await db.getAllAsync("SELECT COUNT(*) AS n FROM sales")) as any[];
+    const customers = (await db.getAllAsync("SELECT COUNT(*) AS n FROM customers")) as any[];
+    return Number(sales?.[0]?.n ?? 0) === 0 && Number(customers?.[0]?.n ?? 0) === 0;
+  }
+
+  /**
+   * Full initial download for a fresh device, in three phases pinned to one
+   * server snapshot so no row falls between phases:
+   *   A. reference data (suppliers, products + batches, clients, roster…) — full
+   *   B. transactional history — last WINDOW_DAYS days only
+   *   C. open/unfinished items — any age
+   * plus companion rows (parent sale of an open credit, lines of an open
+   * order…) so open items are usable. The pull cursor advances once, at the
+   * end — a failure mid-way reruns idempotently (applyChanges = replace).
+   */
+  async initialDownload(onProgress?: (received: number) => void): Promise<number> {
+    const until = new Date().toISOString();
+    const sinceWindow = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const windowed = SYNC_TABLES.filter(t => !(REFERENCE_TABLES as readonly string[]).includes(t));
+    let total = 0;
+    const tally = (n: number) => { total = n; onProgress?.(total); };
+
+    total += await this.pullFromCloud({ tables: REFERENCE_TABLES, since: new Date(0).toISOString(), until, advanceCursor: false, onProgress: n => tally(total + n) });
+    total += await this.pullFromCloud({ tables: windowed, since: sinceWindow, until, advanceCursor: false, onProgress: n => tally(total + n) });
+    total += await this.pullFromCloud({ tables: Object.keys(OPEN_ITEM_PREDICATES), openOnly: true, since: new Date(0).toISOString(), until, advanceCursor: false, onProgress: n => tally(total + n) });
+    total += await this.pullOpenCompanions(until, onProgress);
+
+    // Single cursor write at the end (advanceCursor default true).
+    await this.pullFromCloud({ since: until, until, onProgress: () => {} });
+    const db = await getDb();
+    await db.runAsync("INSERT OR REPLACE INTO _meta (key,value) VALUES (?,?)", ["initial_sync_done", new Date().toISOString()]);
+    return total;
+  }
+
+  /**
+   * Stale-device catch-up: the incremental pull (since the cursor) already
+   * covers everything that CHANGED while offline; this additionally re-sweeps
+   * open items + their companions, catching status transitions the cursor
+   * window may have raced. Additive only — never advances the cursor.
+   */
+  async openItemsSweep(): Promise<number> {
+    const until = new Date().toISOString();
+    let total = await this.pullFromCloud({
+      tables: Object.keys(OPEN_ITEM_PREDICATES),
+      openOnly: true,
+      since: new Date(0).toISOString(),
+      until,
+      advanceCursor: false,
+    });
+    total += await this.pullOpenCompanions(until);
+    return total;
+  }
+
+  // Companion rows for whatever the open sweep just brought: parent sales for
+  // open credits / undelivered lines, lines+events for open orders, items for
+  // open tabs. Fetched by id, additive.
+  private async pullOpenCompanions(until: string, onProgress?: (received: number) => void): Promise<number> {
+    const db = await getDb();
+    const idsFrom = async (sql: string): Promise<string[]> => {
+      try {
+        const rows = (await db.getAllAsync(sql)) as any[];
+        return [...new Set(rows.map(r => String(r?.id)).filter(Boolean))];
+      } catch { return []; }
+    };
+    const fetch = async (table: string, ids: string[], idsCol?: string) => {
+      if (!ids.length) return 0;
+      let got = 0;
+      for (let i = 0; i < ids.length; i += 400) {
+        got += await this.pullFromCloud({
+          tables: [table],
+          ids: ids.slice(i, i + 400),
+          idsCol,
+          since: new Date(0).toISOString(),
+          until,
+          advanceCursor: false,
+        });
+      }
+      onProgress?.(got);
+      return got;
+    };
+
+    // Open credits → their sales + all sale lines (context for collection).
+    const creditSaleIds = await idsFrom("SELECT DISTINCT sale_id AS id FROM credits WHERE balance > 0 AND (is_deleted = 0 OR is_deleted IS NULL)");
+    let got = await fetch("sales", creditSaleIds);
+    got += await fetch("sale_items", creditSaleIds, "sale_id");
+
+    // Undelivered lines → parent sales.
+    const pickupSaleIds = await idsFrom(
+      "SELECT DISTINCT sale_id AS id FROM sale_items WHERE quantity_delivered < quantity AND (is_deleted = 0 OR is_deleted IS NULL)"
+    );
+    got += await fetch("sales", pickupSaleIds.filter(id => !creditSaleIds.includes(id)));
+
+    // Open tabs → their items.
+    const tabIds = await idsFrom("SELECT id FROM suspended_sales WHERE status = 'open'");
+    got += await fetch("suspended_sale_items", tabIds, "suspended_sale_id");
+
+    // Open orders → lines, change requests, events.
+    const orderIds = await idsFrom("SELECT id FROM open_orders WHERE status IN ('open','ready','settling') AND (is_deleted = 0 OR is_deleted IS NULL)");
+    got += await fetch("open_order_lines", orderIds, "order_id");
+    got += await fetch("order_change_requests", orderIds, "order_id");
+    got += await fetch("open_order_events", orderIds, "order_id");
+
+    return got;
+  }
+
+  /** Age of the last successful pull, or null when never pulled. */
+  async pullCursorAgeMs(): Promise<number | null> {
+    await this.loadPullCursor();
+    if (!this.lastSyncedAt) return null;
+    const t = Date.parse(this.lastSyncedAt);
+    return Number.isFinite(t) ? Date.now() - t : null;
   }
 
   // The old `last_synced_at` key was only ever written by push, so it was
@@ -394,9 +616,95 @@ export class SyncManager {
             await db.runAsync("DELETE FROM batches WHERE id = ?", [r.id]);
           } else {
             await db.runAsync(
-              `INSERT OR REPLACE INTO batches (id,item_id,supplier_id,date,quantity,total_paid,status,received_by,received_at,denied_by,denied_at,reason,delivery_ref,transport_share,session_ref,source,created_at,updated_at,is_deleted,dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
-              [r.id, r.item_id, r.supplier_id, r.date, r.quantity ?? 0, r.total_paid ?? 0, r.status ?? "pending", r.received_by ?? null, r.received_at ?? null, r.denied_by ?? null, r.denied_at ?? null, r.reason ?? null, r.delivery_ref ?? null, Number(r.transport_share ?? 0), r.session_ref ?? null, r.source ?? "user", r.created_at ?? new Date().toISOString(), r.updated_at ?? new Date().toISOString(), r.is_deleted ? 1 : 0]
+              `INSERT OR REPLACE INTO batches (id,store_id,item_id,supplier_id,date,quantity,total_paid,status,received_by,received_at,denied_by,denied_at,reason,delivery_ref,transport_share,session_ref,source,created_at,updated_at,is_deleted,dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+              [r.id, r.store_id ?? null, r.item_id, r.supplier_id, r.date, r.quantity ?? 0, r.total_paid ?? 0, r.status ?? "pending", r.received_by ?? null, r.received_at ?? null, r.denied_by ?? null, r.denied_at ?? null, r.reason ?? null, r.delivery_ref ?? null, Number(r.transport_share ?? 0), r.session_ref ?? null, r.source ?? "user", r.created_at ?? new Date().toISOString(), r.updated_at ?? new Date().toISOString(), r.is_deleted ? 1 : 0]
             );
+          }
+        } else if (ch.table === "product_stock") {
+          // Per-store stock (migration 023): whole-row upsert keyed on id.
+          if (r.is_deleted === true || r.is_deleted === 1) {
+            await db.runAsync(
+              "DELETE FROM product_stock WHERE id = ? OR (store_id = ? AND product_id = ?)",
+              [r.id, r.store_id, r.product_id]
+            );
+          } else {
+            // A device may have created the same store/product row offline
+            // with a different UUID. Keep only the canonical cloud row.
+            await db.runAsync(
+              "DELETE FROM product_stock WHERE store_id = ? AND product_id = ? AND id <> ?",
+              [r.store_id, r.product_id, r.id]
+            );
+            await db.runAsync(
+              `INSERT OR REPLACE INTO product_stock (id,store_id,product_id,quantity,available,device_id,lamport_clock,is_deleted,dirty,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?)`,
+              [r.id, r.store_id, r.product_id, Number(r.quantity ?? 0), Number(r.available ?? r.quantity ?? 0), r.device_id ?? null, Number(r.lamport_clock ?? 0), r.is_deleted ? 1 : 0, r.created_at ?? new Date().toISOString(), r.updated_at ?? new Date().toISOString()]
+            );
+          }
+        } else if (ch.table === "profiles") {
+          // Roster: this business's people (names/roles/email/emergency).
+          // Local-only fields (phone/salary/address) stay on the employee row
+          // untouched.
+          if (r.is_deleted === true || r.is_deleted === 1) {
+            await db.runAsync("DELETE FROM employees WHERE id = ?", [r.id]);
+          } else {
+            const name = String(r.full_name ?? "");
+            const role = String(r.role ?? "cashier");
+            const email = r.email != null && String(r.email).trim() ? String(r.email) : null;
+            const emergency =
+              r.emergency_name || r.emergency_phone || r.emergency_address
+                ? JSON.stringify({
+                    name: String(r.emergency_name ?? ""),
+                    phone: String(r.emergency_phone ?? ""),
+                    address: String(r.emergency_address ?? ""),
+                  })
+                : null;
+            const ts = r.updated_at ?? new Date().toISOString();
+            // A pulled profile replaces a demo-seeded twin of the same person:
+            // seed rows carry stable demo ids (USER_IDS) while the roster
+            // carries the auth uuid — same name, two rows, one of them with
+            // a timestamp in its phone field from the old misaligned insert.
+            try {
+              const demoIds = Object.values(USER_IDS) as string[];
+              if (name.trim()) {
+                await db.runAsync(
+                  `DELETE FROM employees WHERE id IN (${demoIds.map(() => "?").join(",")}) AND id <> ? AND lower(trim(full_name)) = ?`,
+                  [...demoIds, r.id, name.trim().toLowerCase()]
+                );
+              }
+            } catch {}
+            const existing = (await db.getAllAsync("SELECT id FROM employees WHERE id = ?", [r.id]).catch(() => [])) as any[];
+            if (!existing.length) {
+              const sm = (await db.getAllAsync("SELECT store_id FROM employee_stores WHERE employee_id = ? LIMIT 1", [r.id]).catch(() => [])) as any[];
+              // Full explicit values: a previous version mixed literals with
+              // too few bindings, landing created_at in `phone` and 0 in
+              // `salary` on every fresh row. Count must match columns exactly.
+              await db.runAsync(
+                "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, email, salary, address, emergency_json, is_active, online_status, created_at, updated_at, lamport_clock, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [r.id, sm?.[0]?.store_id ?? "", name, role, email, 0, "", emergency, 1, 0, r.created_at ?? ts, ts, Number(r.lamport_clock ?? 0), 0, 0]
+              );
+            } else {
+              await db.runAsync("UPDATE employees SET full_name = ?, role = ?, email = ?, emergency_json = ?, updated_at = ?, dirty = 0 WHERE id = ?", [name, role, email, emergency, ts, r.id]);
+            }
+          }
+        } else if (ch.table === "store_members") {
+          // Membership: (employee, store) assignment — the roster backbone.
+          const eid = String(r.user_id ?? "");
+          const sid = String(r.store_id ?? "");
+          if (eid && sid) {
+            await db.runAsync("INSERT OR IGNORE INTO employee_stores (employee_id, store_id) VALUES (?,?)", [eid, sid]);
+            // Ensure a local employee row exists so the roster lists the person
+            // even when their profile row hasn't applied yet in this pull.
+            const existing = (await db.getAllAsync("SELECT id FROM employees WHERE id = ?", [eid]).catch(() => [])) as any[];
+            if (!existing.length) {
+              const ts = new Date().toISOString();
+              // Full explicit values (see profiles branch): the old
+              // literal-mixed statement misaligned columns the same way.
+              await db.runAsync(
+                "INSERT OR REPLACE INTO employees (id, store_id, full_name, role, phone, salary, address, is_active, online_status, created_at, updated_at, lamport_clock, is_deleted, dirty) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [eid, sid, "", String(r.role ?? "cashier"), null, 0, "", 1, 0, r.created_at ?? ts, ts, 0, 0, 0]
+              );
+            } else {
+              await db.runAsync("UPDATE employees SET store_id = ? WHERE id = ? AND (store_id IS NULL OR store_id = '')", [sid, eid]);
+            }
           }
         } else if (ch.table === "variants") {
           // Sellable presentations of an item.
@@ -560,7 +868,20 @@ export class SyncManager {
           );
         }
         // ... similar for other tables
-      } catch (e) { console.warn("apply error", e); }
+      } catch (e) {
+        console.warn("apply error", e);
+        throw e;
+      }
+    }
+    // Older screens still read the product stock cache. Keep it in step with
+    // the authoritative per-store row after the entire pull batch is applied.
+    for (const ch of changes) {
+      const r = ch?.record;
+      if (ch?.table !== "product_stock" || !r || r.is_deleted || r.store_id !== this.storeId) continue;
+      await db.runAsync(
+        "UPDATE products SET stock_quantity = ?, current_amount_available = ? WHERE id = ? AND store_id = ?",
+        [Number(r.quantity ?? 0), Number(r.available ?? r.quantity ?? 0), r.product_id, r.store_id]
+      );
     }
     // A pulled batch/quote row is a new fact about what the product cost:
     // republish the affected products' unit costs now, or items.cost stays
@@ -585,6 +906,16 @@ export class SyncManager {
         try { await recomputeItemCosts(db, pid); } catch {}
       }
     } catch (e) { console.warn("pull recompute", e); }
+    // Salary rows must republish the roster's display cache: the team list
+    // reads employees.salary while the detail reads salary_history, and the
+    // profiles pull carries no salary (local-only) — without this the
+    // receiver's list keeps a stale/zero value forever.
+    try {
+      const touched = changes.some(
+        (ch: any) => ch?.table === "salary_history" || ch?.table === "profiles" || ch?.table === "store_members"
+      );
+      if (touched) await healSalaryCaches(db);
+    } catch (e) { console.warn("salary cache heal", e); }
   }
 
   // LAN P2P — connect to hub WebSocket (main register or middleware)
