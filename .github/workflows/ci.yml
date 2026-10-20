@@ -23,6 +23,8 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm install --legacy-peer-deps
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
       - name: Run ESLint
         run: npm run lint || true
       - name: Publish lint summary
@@ -46,6 +48,8 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm install --legacy-peer-deps
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
       - name: Run TypeScript typecheck
         run: npm run build
       - name: Publish typecheck summary
@@ -69,6 +73,8 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm install --legacy-peer-deps
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
       - name: Run Jest unit tests (if present)
         run: |
           if [ -f jest.config.js ] || [ -f jest.config.ts ] || ls src/**/*.test.* >/dev/null 2>&1; then
