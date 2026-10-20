@@ -5,5 +5,5 @@
     "allowSyntheticDefaultImports": true,
     "noEmit": true
   },
-  "include": ["src", "app", "App.tsx"]
+  "include": ["node_modules/@fley27/shared/src", "index.js"]
 }

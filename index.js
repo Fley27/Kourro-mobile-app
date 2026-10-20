@@ -4,7 +4,7 @@ import './src/polyfills/webcrypto';
 
 import { registerRootComponent } from 'expo';
 
-import App from './App';
+import App from '@fley27/shared/src/App';
 
 // Global safety net: tag ANY unhandled promise rejection / JS error with its
 // message + stack in the console (Metro terminal) while preserving the
