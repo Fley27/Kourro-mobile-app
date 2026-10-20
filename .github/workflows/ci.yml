@@ -70,8 +70,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Run Jest unit tests (if present)
-        if: [ -f jest.config.js ] || [ -f jest.config.ts ] || ls src/**/*.test.* 1>/dev/null 2>&1
-        run: npx jest --ci --coverage --coverageReporters=text --coverageReporters=lcov || true
+        run: |
+          if [ -f jest.config.js ] || [ -f jest.config.ts ] || ls src/**/*.test.* >/dev/null 2>&1; then
+            npx jest --ci --coverage --coverageReporters=text --coverageReporters=lcov || true
+          else
+            echo "No Jest tests found — skipping"
+          fi
       - name: Publish unit summary
         if: always()
         run: |
@@ -81,42 +85,35 @@ jobs:
   report:
     name: Consolidated Report
     needs: [lint, typecheck, unit]
-    if: always()
+    if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout the Kourro dashboard repo
         uses: actions/checkout@v4
         with:
+          repository: Fley27/Kourro
           token: ${{ secrets.DASHBOARD_PAT }}
-          persist-credentials: true
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Publish this repo's results to dashboard data
+      - name: Publish mobile results to consolidated dashboard data
         run: |
-          mkdir -p dashboard-data
-          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          run=${{ github.run_id }}
           sha="${{ github.sha }}"
-          run="${{ github.run_id }}"
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           url="https://github.com/${{ github.repository }}/actions/runs/${run}"
           cat > dashboard-data/mobile-app.json <<EOF
-          {"repo":"Fley27/Kourro-mobile-app","run_id":${run},"sha":"${sha}","updated_at":"${now}","lint":"${{ needs.lint.result }}","typecheck":"${{ needs.typecheck.result }}","unit":"${{ needs.unit.result }}","component":"${{ needs.unit.result }}","e2e":"${{ needs.unit.result }}","url":"${url}"}
-EOF
-      - name: Commit dashboard data
+            {"repo":"Fley27/Kourro-mobile-app","run_id":${run},"sha":"${sha}","updated_at":"${now}","lint":"${{ needs.lint.result }}","typecheck":"${{ needs.typecheck.result }}","unit":"${{ needs.unit.result }}","component":"${{ needs.unit.result }}","e2e":"${{ needs.unit.result }}","url":"${url}"}
+          EOF
+      - name: Commit consolidated dashboard data
         run: |
-          git remote set-url origin "https://x-access-token:${{ secrets.DASHBOARD_PAT }}@github.com/${{ github.repository }}.git" 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add dashboard-data/
           if ! git diff --cached --quiet; then
-            git commit -m "chore(dashboard): publish mobile test results"
+            git commit -m "chore(dashboard): publish mobile-app test results"
             git push
           else
-            echo "No changes to report dashboard."
+            echo "No mobile-app dashboard changes."
           fi
       - name: Trigger cross-repo dashboard refresh (root repo)
-        if: ${{ secrets.DASHBOARD_PAT != '' }}
         continue-on-error: true
         run: |
           curl -s -X POST https://api.github.com/repos/Fley27/Kourro/dispatches \
